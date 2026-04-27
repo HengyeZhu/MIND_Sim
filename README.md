@@ -1,19 +1,14 @@
-<h1 align="center" style="margin:0;">
-  <picture>
-    <img alt="MIND_Sim logo" src="https://github.com/user-attachments/assets/5464f0c1-63c0-4a92-9398-96a712cfc308" height="256" style="max-width:100%; vertical-align:middle;">
-  </picture>
-</h1>
-
-<h3 align="center" style="margin: 0; margin-top: 0;">
-MIND_Sim is designed for studying Multiscale Integrative Neuronal Dynamics
-</h3>
-
 <p align="center">
-  <a href="#overview">Overview</a> •
-  <a href="#architecture">Architecture</a> •
-  <a href="#acknowledgements">Acknowledgements</a>
-</p>
+    <img
+      alt="MIND_Sim logo"
+      src="https://github.com/user-attachments/assets/264fa1cd-6aca-401f-bae2-83d24bc34aa0"
+      height="256"
+    >
+  </p>
 
+  <h3 align="center">
+    MIND_Sim is designed for studying Multiscale Integrative Neuronal Dynamics
+  </h3>
 <br>
 
 ## Overview
