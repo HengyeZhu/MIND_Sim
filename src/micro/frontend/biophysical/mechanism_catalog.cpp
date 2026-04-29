@@ -1,0 +1,184 @@
+#include "biophysical/mechanism_catalog.hpp"
+
+#include "micro/sim/mechanism_runtime.hpp"
+
+#include <filesystem>
+#include <stdexcept>
+#include <string>
+#include <utility>
+
+namespace mind_micro_biophysical {
+namespace {
+
+[[nodiscard]] MechanismFieldRole convert_role(
+    mind_sim::micro::sim::CoreMechanismFieldRole role) noexcept {
+    using CoreRole = mind_sim::micro::sim::CoreMechanismFieldRole;
+    switch (role) {
+    case CoreRole::Parameter:
+        return MechanismFieldRole::Parameter;
+    case CoreRole::Assigned:
+        return MechanismFieldRole::Assigned;
+    case CoreRole::State:
+        return MechanismFieldRole::State;
+    case CoreRole::Range:
+        return MechanismFieldRole::Range;
+    }
+    return MechanismFieldRole::Range;
+}
+
+[[nodiscard]] MechanismMetadata convert_registered_mechanism(
+    const mind_sim::micro::sim::CoreRegisteredMechanism& registered) {
+    MechanismMetadata metadata{};
+    metadata.runtime_type = registered.type;
+    metadata.name = registered.name;
+    metadata.kind = registered.is_artificial ? MechanismKind::ArtificialCell
+                    : registered.is_point   ? MechanismKind::EventTarget
+                                            : MechanismKind::Density;
+    metadata.has_net_receive = registered.has_net_receive;
+    metadata.net_receive_weight_count = registered.has_net_receive
+                                            ? registered.net_receive_weight_count
+                                            : 0;
+    metadata.fields.reserve(registered.fields.size());
+    for (const auto& source : registered.fields) {
+        if (source.name.empty()) {
+            continue;
+        }
+        metadata.fields.push_back(MechanismField{
+            .name = source.name,
+            .role = convert_role(source.role),
+            .array_size = source.array_size,
+            .default_value = source.default_value,
+            .is_global = source.is_global,
+        });
+    }
+    metadata.field_data_offsets.reserve(metadata.fields.size());
+    for (const auto& source : registered.fields) {
+        if (source.name.empty()) {
+            continue;
+        }
+        metadata.field_data_offsets.push_back(source.data_offset);
+    }
+    return metadata;
+}
+
+}  // namespace
+
+MechanismCatalog::MechanismCatalog() = default;
+
+bool MechanismCatalog::contains(const std::string& name) const noexcept {
+    return index_by_name_.find(name) != index_by_name_.end();
+}
+
+const MechanismMetadata& MechanismCatalog::require(const std::string& name) const {
+    const auto it = index_by_name_.find(name);
+    if (it == index_by_name_.end()) {
+        throw std::runtime_error(
+            "mechanism metadata is not registered for '" + name +
+            "'; use a default mechanism name or call load_mech_metadata() with a compiled "
+            "MIND_Sim mechanism artifact or MOD source path");
+    }
+    return mechanisms_[static_cast<std::size_t>(it->second)];
+}
+
+const MechanismMetadata& MechanismCatalog::require(int metadata_id) const {
+    if (metadata_id < 0 || static_cast<std::size_t>(metadata_id) >= mechanisms_.size()) {
+        throw std::runtime_error("mechanism metadata id out of range: " + std::to_string(metadata_id));
+    }
+    return mechanisms_[static_cast<std::size_t>(metadata_id)];
+}
+
+int MechanismCatalog::metadata_id(const std::string& name) const {
+    return require(name).id;
+}
+
+int MechanismCatalog::register_mechanism(MechanismMetadata metadata) {
+    if (metadata.name.empty()) {
+        throw std::runtime_error("mechanism metadata name must not be empty");
+    }
+    if (metadata.net_receive_weight_count < 0) {
+        throw std::runtime_error("mechanism metadata weight count must be non-negative");
+    }
+    metadata.field_index_by_name.clear();
+    if (!metadata.field_data_offsets.empty() &&
+        metadata.field_data_offsets.size() != metadata.fields.size()) {
+        throw std::runtime_error("mechanism metadata field offset count mismatch for " +
+                                 metadata.name);
+    }
+    if (metadata.field_data_offsets.empty()) {
+        metadata.field_data_offsets.assign(metadata.fields.size(), -1);
+    }
+    for (std::size_t i = 0; i < metadata.fields.size(); ++i) {
+        auto& item = metadata.fields[i];
+        if (item.name.empty()) {
+            throw std::runtime_error("mechanism metadata field name must not be empty for " +
+                                     metadata.name);
+        }
+        if (item.array_size <= 0) {
+            throw std::runtime_error("mechanism metadata field array size must be positive for " +
+                                     metadata.name + "." + item.name);
+        }
+        if (!metadata.field_index_by_name.emplace(item.name, static_cast<int>(i)).second) {
+            throw std::runtime_error("duplicate mechanism field '" + item.name + "' in " +
+                                     metadata.name);
+        }
+    }
+
+    const auto existing = index_by_name_.find(metadata.name);
+    if (existing != index_by_name_.end()) {
+        const int id = existing->second;
+        metadata.id = id;
+        mechanisms_[static_cast<std::size_t>(id)] = std::move(metadata);
+        return id;
+    }
+    const int id = static_cast<int>(mechanisms_.size());
+    metadata.id = id;
+    if (metadata.runtime_type < 0) {
+        metadata.runtime_type = id;
+    }
+    index_by_name_.emplace(metadata.name, id);
+    mechanisms_.push_back(std::move(metadata));
+    return id;
+}
+
+int MechanismCatalog::sync_registered_mechanisms() {
+    int count = 0;
+    for (const auto& registered : mind_sim::micro::sim::core_registered_mechanisms()) {
+        if (registered.type < 0 || registered.name.empty() || registered.fields.empty()) {
+            continue;
+        }
+        register_mechanism(convert_registered_mechanism(registered));
+        ++count;
+    }
+    if (count == 0) {
+        throw std::runtime_error("loaded MOD mechanism library registered no usable mechanisms");
+    }
+    return count;
+}
+
+int MechanismCatalog::load_metadata_path(const std::filesystem::path& path) {
+    if (!std::filesystem::exists(path)) {
+        throw std::runtime_error("mechanism metadata path does not exist: " + path.string());
+    }
+
+    mind_sim::micro::sim::load_core_mechanism_library(path);
+    return sync_registered_mechanisms();
+}
+
+const char* mechanism_kind_name(MechanismKind kind) noexcept {
+    switch (kind) {
+    case MechanismKind::Density:
+        return "density";
+    case MechanismKind::EventTarget:
+        return "event_target";
+    case MechanismKind::ArtificialCell:
+        return "artificial_cell";
+    }
+    return "unknown";
+}
+
+std::string mechanism_metadata_summary(const MechanismMetadata& metadata) {
+    return metadata.name + "[" + mechanism_kind_name(metadata.kind) +
+           ", fields=" + std::to_string(metadata.fields.size()) + "]";
+}
+
+}  // namespace mind_micro_biophysical

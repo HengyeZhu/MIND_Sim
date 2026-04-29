@@ -13,6 +13,7 @@
 <p align="center">
   <a href="#overview">Overview</a> •
   <a href="#architecture">Architecture</a> •
+  <a href="#performance">Performance</a> •
   <a href="#acknowledgements">Acknowledgements</a>
 </p>
 
@@ -25,6 +26,14 @@ Currently, it is intended for personal research use, with features added as need
 ## Architecture
 
 coming soon...
+
+## Performance
+
+By rewriting the NEURON simulator frontend in C++, MIND_Sim can speed up model construction by more than 10x while still using CoreNEURON as the backend. This keeps backend performance and numerical results aligned with CoreNEURON.
+
+The macro and bridge components are also implemented in C++, so for small-scale micro simulations the total runtime is significantly faster than TVB-Multiscale. A GPU backend, also based on CoreNEURON, is planned and is expected to provide substantial acceleration for large-scale micro simulations.
+
+The current examples and tests are still incomplete, and the macro and bridge APIs remain under active development.
 
 ## Acknowledgements
 

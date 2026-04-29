@@ -1,0 +1,77 @@
+# CMake / native build outputs
+/build/
+/cmake-build-*/
+/CMakeFiles/
+/CMakeCache.txt
+/Makefile
+/cmake_install.cmake
+/compile_commands.json
+/default_mechanisms/
+
+# Python caches / packaging artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Simulation outputs and analysis products
+/result/
+/results/
+*.h5
+*.hdf5
+*.npz
+*.npy
+*.csv
+
+# CoreNEURON / NEURON generated runtime data
+/corenrn_data/
+/out.dat
+*.corenrn
+**/x86_64/
+**/aarch64/
+**/.libs/
+
+# Compiled objects and native libraries
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.lib
+*.exp
+!src/micro/mod_compiler/nmodl/share/nmodl/nrnunits.lib
+
+# Generated NMODL / nrnivmodl byproducts
+mod_func.cpp
+makemod2c_inc
+special
+special-core
+special.nrn
+
+# Logs, profiling, and temporary files
+*.log
+*.prof
+*.profraw
+*.profdata
+*.tmp
+*.swp
+*.swo
+*.bak
+
+# OS / editor metadata
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
