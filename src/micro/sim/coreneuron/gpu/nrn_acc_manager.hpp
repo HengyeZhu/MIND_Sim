@@ -14,6 +14,9 @@ struct NetSendBuffer_t;
 void setup_nrnthreads_on_device(NrnThread* threads, int nthreads);
 void delete_nrnthreads_on_device(NrnThread* threads, int nthreads);
 void update_nrnthreads_on_host(NrnThread* threads, int nthreads);
+void setup_trajectory_requests_on_device(NrnThread* threads, int nthreads);
+void update_trajectory_requests_on_host(NrnThread* threads, int nthreads);
+void delete_trajectory_requests_on_device(NrnThread* threads, int nthreads);
 
 void update_net_receive_buffer(NrnThread* _nt);
 

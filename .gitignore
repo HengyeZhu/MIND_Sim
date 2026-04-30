@@ -54,6 +54,7 @@ env/
 !src/micro/mod_compiler/nmodl/share/nmodl/nrnunits.lib
 
 # Generated NMODL / nrnivmodl byproducts
+examples/cosim_arbor_hhplus/mod_gpu/
 mod_func.cpp
 makemod2c_inc
 special

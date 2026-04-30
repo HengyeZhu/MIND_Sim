@@ -1082,7 +1082,7 @@ def main() -> int:
             [num_pyr, num_sst, num_pv, num_vip],
             dtype=np.int32,
         ),
-        "runtime_backend": np.asarray("mind_sim_core_neuron_cpu"),
+        "runtime_backend": np.asarray(f"mind_sim_core_neuron_{DEVICE}"),
     }
     print(
         f"[spike] events={int(spike_times_ms.size)} "

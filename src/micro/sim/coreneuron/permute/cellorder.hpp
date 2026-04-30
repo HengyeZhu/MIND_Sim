@@ -39,13 +39,6 @@ std::vector<int> interleave_order(int ith, int ncell, int nnode, int* parent);
 
 void create_interleave_info();
 void destroy_interleave_info();
-void install_type1_interleave_info(int ith,
-                                   int ncell,
-                                   int nstride,
-                                   const std::vector<int>& stride,
-                                   const std::vector<int>& firstnode,
-                                   const std::vector<int>& lastnode,
-                                   const std::vector<int>& cellsize);
 
 #if CORENRN_BUILD
 /**

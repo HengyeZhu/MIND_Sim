@@ -77,6 +77,7 @@ def main() -> int:
     parser.add_argument("--nmodl", required=True)
     parser.add_argument("--cxx", required=True)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--backend", choices=("cpu", "openacc"), default="cpu")
     parser.add_argument("--generate-only", action="store_true")
     parser.add_argument("--modl-reg-name", default="modl_reg")
     parser.add_argument("--cxx-flag", action="append", default=[])
@@ -99,14 +100,14 @@ def main() -> int:
         directory.mkdir(parents=True)
 
     nmodl_env = nmodl_environment(Path(args.nmodl))
+    backend_args = ["host", "--c"] if args.backend == "cpu" else ["acc", "--oacc"]
     run([args.nmodl,
          *map(str, mods),
          "-o",
          str(core_dir),
          "--scratch",
          str(scratch_dir),
-         "host",
-         "--c",
+         *backend_args,
          "passes",
          "--inline"],
         env=nmodl_env)

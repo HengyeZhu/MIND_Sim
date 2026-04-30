@@ -6,6 +6,7 @@
 #include "coreneuron/mechanism/mechanism.hpp"
 #include "coreneuron/sim/multicore.hpp"
 #include "coreneuron/utils/randoms/nrnran123.h"
+#include "micro/sim/device.hpp"
 #include "micro/sim/mechanism_runtime.hpp"
 
 #include <algorithm>
@@ -321,14 +322,18 @@ struct CoreNeuronData {
     std::unordered_map<std::string, int> mechanism_type{};
     std::vector<MechanismRuntimeInfo> mechanisms{};
     std::vector<CoreNeuronThread> threads{};
+    MicroDeviceConfig device_config{};
     double dt{0.025};
     double celsius{6.3};
+    bool gpu_device_runtime_active{false};
+    int gpu_runtime_ref_count{0};
 
     CoreNeuronData() = default;
     CoreNeuronData(const CoreNeuronData&) = delete;
     CoreNeuronData& operator=(const CoreNeuronData&) = delete;
-    CoreNeuronData(CoreNeuronData&&) noexcept = default;
-    CoreNeuronData& operator=(CoreNeuronData&&) noexcept = default;
+    CoreNeuronData(CoreNeuronData&&) noexcept = delete;
+    CoreNeuronData& operator=(CoreNeuronData&&) noexcept = delete;
+    ~CoreNeuronData();
 
     [[nodiscard]] bool empty() const noexcept {
         return threads.empty();

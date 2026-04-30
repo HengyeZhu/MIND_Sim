@@ -6,8 +6,8 @@
 # =============================================================================
 */
 
+#include <queue>
 #include <utility>
-#include <vector>
 
 #include "coreneuron/apps/corenrn_parameters.hpp"
 #include "coreneuron/gpu/nrn_acc_manager.hpp"
@@ -460,6 +460,62 @@ static void delete_ml_from_device(Memb_list* ml, int type) {
     cnrn_target_delete(ml);
 }
 
+static void copy_trajectory_request_to_device(NrnThread* nt, NrnThread* d_nt) {
+    TrajectoryRequests* tr = nt->trajec_requests;
+    if (!tr) {
+        return;
+    }
+    TrajectoryRequests* d_trajec_requests = cnrn_target_copyin(tr);
+    cnrn_target_memcpy_to_device(&(d_nt->trajec_requests), &d_trajec_requests);
+
+    double** d_tr_gather = cnrn_target_copyin(tr->gather, tr->n_trajec);
+    cnrn_target_memcpy_to_device(&(d_trajec_requests->gather), &d_tr_gather);
+
+    double** d_tr_varrays{nullptr};
+    if (tr->varrays) {
+        d_tr_varrays = cnrn_target_copyin(tr->varrays, tr->n_trajec);
+        cnrn_target_memcpy_to_device(&(d_trajec_requests->varrays), &d_tr_varrays);
+    }
+
+    for (int i = 0; i < tr->n_trajec; ++i) {
+        if (tr->varrays) {
+            double* d_buf_traj_i = cnrn_target_copyin(tr->varrays[i], tr->bsize);
+            cnrn_target_memcpy_to_device(&(d_tr_varrays[i]), &d_buf_traj_i);
+        }
+        auto* d_gather_i = cnrn_target_deviceptr(tr->gather[i]);
+        cnrn_target_memcpy_to_device(&(d_tr_gather[i]), &d_gather_i);
+    }
+}
+
+static void update_trajectory_request_on_host(NrnThread* nt) {
+    TrajectoryRequests* tr = nt->trajec_requests;
+    if (!tr || !tr->varrays) {
+        return;
+    }
+    nrn_pragma_acc(wait(nt->stream_id))
+    for (int i = 0; i < tr->n_trajec; ++i) {
+        nrn_pragma_acc(update self(tr->varrays[i][:tr->vsize]))
+        nrn_pragma_omp(target update from(tr->varrays[i][:tr->vsize]))
+    }
+}
+
+static void delete_trajectory_request_from_device(NrnThread* nt, NrnThread* d_nt) {
+    TrajectoryRequests* tr = nt->trajec_requests;
+    if (!tr) {
+        return;
+    }
+    TrajectoryRequests* null_trajec_requests = nullptr;
+    cnrn_target_memcpy_to_device(&(d_nt->trajec_requests), &null_trajec_requests);
+    if (tr->varrays) {
+        for (int i = 0; i < tr->n_trajec; ++i) {
+            cnrn_target_delete(tr->varrays[i], tr->bsize);
+        }
+        cnrn_target_delete(tr->varrays, tr->n_trajec);
+    }
+    cnrn_target_delete(tr->gather, tr->n_trajec);
+    cnrn_target_delete(tr);
+}
+
 #endif
 
 /* note: threads here are corresponding to global nrn_threads array */
@@ -725,42 +781,7 @@ void setup_nrnthreads_on_device(NrnThread* threads, int nthreads) {
             printf("\n WARNING: NrnThread %d not permuted, error for linear algebra?", i);
         }
 
-        {
-            TrajectoryRequests* tr = nt->trajec_requests;
-            if (tr) {
-                // Create a device-side copy of the `trajec_requests` struct and
-                // make sure the device-side NrnThread object knows about it.
-                TrajectoryRequests* d_trajec_requests = cnrn_target_copyin(tr);
-                cnrn_target_memcpy_to_device(&(d_nt->trajec_requests), &d_trajec_requests);
-                // Initialise the double** gather member of the struct.
-                double** d_tr_gather = cnrn_target_copyin(tr->gather, tr->n_trajec);
-                cnrn_target_memcpy_to_device(&(d_trajec_requests->gather), &d_tr_gather);
-                // Initialise the double** varrays member of the struct if it's
-                // set.
-                double** d_tr_varrays{nullptr};
-                if (tr->varrays) {
-                    d_tr_varrays = cnrn_target_copyin(tr->varrays, tr->n_trajec);
-                    cnrn_target_memcpy_to_device(&(d_trajec_requests->varrays), &d_tr_varrays);
-                }
-                for (int i = 0; i < tr->n_trajec; ++i) {
-                    if (tr->varrays) {
-                        // tr->varrays[i] is a buffer of tr->bsize doubles on the host,
-                        // make a device-side copy of it and store a pointer to it in
-                        // the device-side version of tr->varrays.
-                        double* d_buf_traj_i = cnrn_target_copyin(tr->varrays[i], tr->bsize);
-                        cnrn_target_memcpy_to_device(&(d_tr_varrays[i]), &d_buf_traj_i);
-                    }
-                    // tr->gather[i] is a double* referring to (host) data in the
-                    // (host) _data block
-                    auto* d_gather_i = cnrn_target_deviceptr(tr->gather[i]);
-                    cnrn_target_memcpy_to_device(&(d_tr_gather[i]), &d_gather_i);
-                }
-                // TODO: other `double** scatter` and `void** vpr` members of
-                // the TrajectoryRequests struct are not copied to the device.
-                // The `int vsize` member is updated during the simulation but
-                // not kept up to date timestep-by-timestep on the device.
-            }
-        }
+        copy_trajectory_request_to_device(nt, d_nt);
         {
             auto* d_fornetcon_perm_indices = cnrn_target_copyin(nt->_fornetcon_perm_indices,
                                                                 nt->_fornetcon_perm_indices_size);
@@ -775,6 +796,53 @@ void setup_nrnthreads_on_device(NrnThread* threads, int nthreads) {
     }
 
 #endif
+#else
+    (void) threads;
+    (void) nthreads;
+#endif
+}
+
+void setup_trajectory_requests_on_device(NrnThread* threads, int nthreads) {
+#ifdef CORENEURON_ENABLE_GPU
+    NrnThread* d_threads = cnrn_target_deviceptr(threads);
+    for (int i = 0; i < nthreads; ++i) {
+        NrnThread* nt = threads + i;
+        if (!nt->compute_gpu) {
+            continue;
+        }
+        copy_trajectory_request_to_device(nt, d_threads + i);
+    }
+#else
+    (void) threads;
+    (void) nthreads;
+#endif
+}
+
+void update_trajectory_requests_on_host(NrnThread* threads, int nthreads) {
+#ifdef CORENEURON_ENABLE_GPU
+    for (int i = 0; i < nthreads; ++i) {
+        NrnThread* nt = threads + i;
+        if (!nt->compute_gpu) {
+            continue;
+        }
+        update_trajectory_request_on_host(nt);
+    }
+#else
+    (void) threads;
+    (void) nthreads;
+#endif
+}
+
+void delete_trajectory_requests_on_device(NrnThread* threads, int nthreads) {
+#ifdef CORENEURON_ENABLE_GPU
+    NrnThread* d_threads = cnrn_target_deviceptr(threads);
+    for (int i = 0; i < nthreads; ++i) {
+        NrnThread* nt = threads + i;
+        if (!nt->compute_gpu) {
+            continue;
+        }
+        delete_trajectory_request_from_device(nt, d_threads + i);
+    }
 #else
     (void) threads;
     (void) nthreads;
@@ -874,39 +942,44 @@ void realloc_net_receive_buffer(NrnThread* nt, Memb_list* ml) {
 #endif
 }
 
-static void net_receive_buffer_order(NetReceiveBuffer_t* nrb, int nodecount) {
+using NRB_P = std::pair<int, int>;
+
+struct comp {
+    bool operator()(const NRB_P& a, const NRB_P& b) {
+        if (a.first == b.first) {
+            return a.second > b.second;  // same instances in original net_receive order
+        }
+        return a.first > b.first;
+    }
+};
+
+static void net_receive_buffer_order(NetReceiveBuffer_t* nrb) {
     Instrumentor::phase p_net_receive_buffer_order("net-receive-buf-order");
     if (nrb->_cnt == 0) {
         nrb->_displ_cnt = 0;
         return;
     }
 
-    thread_local std::vector<int> counts;
-    thread_local std::vector<int> write_positions;
-    counts.assign(static_cast<std::size_t>(nodecount) + 1, 0);
+    std::priority_queue<NRB_P, std::vector<NRB_P>, comp> nrbq;
+
     for (int i = 0; i < nrb->_cnt; ++i) {
-        const int relative_pnt = nrb->_pnt_index[i] - nrb->_pnt_offset;
-        counts[static_cast<std::size_t>(relative_pnt) + 1] += 1;
-    }
-    for (int i = 1; i <= nodecount; ++i) {
-        counts[static_cast<std::size_t>(i)] += counts[static_cast<std::size_t>(i - 1)];
-    }
-    write_positions = counts;
-    for (int i = 0; i < nrb->_cnt; ++i) {
-        const int relative_pnt = nrb->_pnt_index[i] - nrb->_pnt_offset;
-        const auto output = static_cast<std::size_t>(write_positions[static_cast<std::size_t>(relative_pnt)]++);
-        nrb->_nrb_index[output] = i;
+        nrbq.push(NRB_P(nrb->_pnt_index[i], i));
     }
 
     int displ_cnt = 0;
+    int index_cnt = 0;
+    int last_instance_index = -1;
     nrb->_displ[0] = 0;
-    for (int i = 0; i < nodecount; ++i) {
-        const int begin = counts[static_cast<std::size_t>(i)];
-        const int end = counts[static_cast<std::size_t>(i + 1)];
-        if (begin != end) {
+
+    while (!nrbq.empty()) {
+        const NRB_P& p = nrbq.top();
+        nrb->_nrb_index[index_cnt++] = p.second;
+        if (p.first != last_instance_index) {
             ++displ_cnt;
-            nrb->_displ[displ_cnt] = end;
         }
+        nrb->_displ[displ_cnt] = index_cnt;
+        last_instance_index = p.first;
+        nrbq.pop();
     }
     nrb->_displ_cnt = displ_cnt;
 }
@@ -933,7 +1006,7 @@ void update_net_receive_buffer(NrnThread* nt) {
         // if net receive buffer exist for mechanism
         if (nrb && nrb->_cnt) {
             // instance order to avoid race. setup _displ and _nrb_index
-            net_receive_buffer_order(nrb, tml->ml->nodecount);
+            net_receive_buffer_order(nrb);
 
             if (nt->compute_gpu) {
                 Instrumentor::phase p_net_receive_buffer_order("net-receive-buf-cpu2gpu");
@@ -1076,12 +1149,7 @@ void update_nrnthreads_on_host(NrnThread* threads, int nthreads) {
             {
                 TrajectoryRequests* tr = nt->trajec_requests;
                 if (tr && tr->varrays) {
-                    // The full buffers have `bsize` entries, but only `vsize`
-                    // of them are valid.
-                    for (int i = 0; i < tr->n_trajec; ++i) {
-                        nrn_pragma_acc(update self(tr->varrays[i][:tr->vsize]))
-                        nrn_pragma_omp(target update from(tr->varrays[i][:tr->vsize]))
-                    }
+                    update_trajectory_request_on_host(nt);
                 }
             }
 
@@ -1145,6 +1213,7 @@ void update_weights_from_gpu(NrnThread* threads, int nthreads) {
  */
 void delete_nrnthreads_on_device(NrnThread* threads, int nthreads) {
 #ifdef CORENEURON_ENABLE_GPU
+    NrnThread* d_threads = cnrn_target_deviceptr(threads);
     for (int i = 0; i < nthreads; i++) {
         NrnThread* nt = threads + i;
         if (!nt->compute_gpu) {
@@ -1152,19 +1221,7 @@ void delete_nrnthreads_on_device(NrnThread* threads, int nthreads) {
         }
         cnrn_target_delete(nt->_fornetcon_weight_perm, nt->_fornetcon_weight_perm_size);
         cnrn_target_delete(nt->_fornetcon_perm_indices, nt->_fornetcon_perm_indices_size);
-        {
-            TrajectoryRequests* tr = nt->trajec_requests;
-            if (tr) {
-                if (tr->varrays) {
-                    for (int i = 0; i < tr->n_trajec; ++i) {
-                        cnrn_target_delete(tr->varrays[i], tr->bsize);
-                    }
-                    cnrn_target_delete(tr->varrays, tr->n_trajec);
-                }
-                cnrn_target_delete(tr->gather, tr->n_trajec);
-                cnrn_target_delete(tr);
-            }
-        }
+        delete_trajectory_request_from_device(nt, d_threads + i);
         if (nt->_permute) {
             if (interleave_permute_type == 1) {
                 InterleaveInfo* info = interleave_info + i;

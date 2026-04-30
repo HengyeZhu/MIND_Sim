@@ -150,7 +150,7 @@ class MicroFrontendModel {
     void set_spike_output_enabled(bool enabled) noexcept { spike_output_enabled_ = enabled; }
     [[nodiscard]] bool spike_output_enabled() const noexcept { return spike_output_enabled_; }
 
-    void set_device_cpu_only(const std::string& device);
+    void set_device(const std::string& device);
     void load_mech_metadata(std::string path);
     [[nodiscard]] const std::vector<std::string>& loaded_mech_metadata_paths() const noexcept {
         return loaded_mech_metadata_paths_;
@@ -306,6 +306,7 @@ class MicroFrontendModel {
     mind_micro_network::NetworkRegistry network_registry_{};
     std::shared_ptr<mind_sim::micro::sim::CoreNeuronData> core_neuron_data_{
         std::make_shared<mind_sim::micro::sim::CoreNeuronData>()};
+    mind_sim::micro::sim::MicroDeviceConfig device_config_{};
     std::unique_ptr<mind_sim::micro::sim::MicroRuntime> runtime_backend_{};
     std::vector<int> morph_parent_index_{};
     std::vector<double> morph_area_{};

@@ -293,8 +293,7 @@ const std::vector<mind_sim::macro::sim::ScalarBuffer>& Network::dc_inputs() cons
 void Network::couple(std::vector<int> source_rois,
                      std::vector<int> target_rois,
                      std::shared_ptr<mind_sim::macro::sim::CouplingRule> rule,
-                     std::vector<double> params,
-                     bool use_delays) {
+                     std::vector<double> params) {
     if (!rule) {
         throw std::runtime_error("Network coupling rule cannot be null");
     }
@@ -305,22 +304,19 @@ void Network::couple(std::vector<int> source_rois,
         .target_rois = normalize_roi_indices(std::move(target_rois), "coupling target ROI"),
         .rule = std::move(rule),
         .params = std::move(params),
-        .use_delays = use_delays,
     });
 }
 
 void Network::couple_all(std::shared_ptr<mind_sim::macro::sim::CouplingRule> rule,
-                         std::vector<double> params,
-                         bool use_delays) {
-    couple(all_roi_indices(), all_roi_indices(), std::move(rule), std::move(params), use_delays);
+                         std::vector<double> params) {
+    couple(all_roi_indices(), all_roi_indices(), std::move(rule), std::move(params));
 }
 
 void Network::couple_from(const ROI& source_roi,
                           std::shared_ptr<mind_sim::macro::sim::CouplingRule> rule,
-                          std::vector<double> params,
-                          bool use_delays) {
+                          std::vector<double> params) {
     validate_roi_index(source_roi.index, "coupling source ROI");
-    couple({source_roi.index}, all_roi_indices(), std::move(rule), std::move(params), use_delays);
+    couple({source_roi.index}, all_roi_indices(), std::move(rule), std::move(params));
 }
 
 void Network::use_region_rule(const ROI& roi_value,

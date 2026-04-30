@@ -329,7 +329,7 @@ struct Sim {
     }
     bool is_spike_output_enabled() const { return model.spike_output_enabled(); }
     int set_device(const std::string& device) {
-        model.set_device_cpu_only(device);
+        model.set_device(device);
         return 0;
     }
     int set_dt(double dt) {
@@ -1165,19 +1165,16 @@ NB_MODULE(_native, m) {
              nb::arg("source_rois"),
              nb::arg("target_rois"),
              nb::arg("rule"),
-             nb::arg("params"),
-             nb::arg("use_delays") = true)
+             nb::arg("params"))
         .def("couple_all",
              &Network::couple_all,
              nb::arg("rule"),
-             nb::arg("params"),
-             nb::arg("use_delays") = true)
+             nb::arg("params"))
         .def("couple_from",
              &Network::couple_from,
              nb::arg("source_roi"),
              nb::arg("rule"),
-             nb::arg("params"),
-             nb::arg("use_delays") = true)
+             nb::arg("params"))
         .def("use_region_rule",
              &Network::use_region_rule,
              nb::arg("roi"),

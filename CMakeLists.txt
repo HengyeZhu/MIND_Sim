@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
 project(mind_sim LANGUAGES CXX)
 
+option(MIND_SIM_ENABLE_GPU "Enable CoreNEURON OpenACC GPU backend for the micro runtime" OFF)
+set(MIND_SIM_GPU_ARCHS "lineinfo" CACHE STRING "NVHPC -gpu option list for MIND_Sim GPU builds")
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -8,15 +11,59 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
   set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG" CACHE STRING "Release C++ flags" FORCE)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "NVHPC|PGI")
+  set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG" CACHE STRING "Release C++ flags" FORCE)
 endif()
 
 find_package(Python 3.10 COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(OpenMP REQUIRED)
-set(MIND_SIM_RUNTIME_FP_FLAGS "-O3" "-march=native" "-mtune=native" "-fno-math-errno" "-ffp-contract=off" "-fno-semantic-interposition" "-funroll-loops")
-set(MIND_SIM_MODCC_FP_FLAGS "-O3" "-march=native" "-mtune=native" "-fno-math-errno" "-ffp-contract=off" "-fno-semantic-interposition" "-funroll-loops")
+set(MIND_SIM_MODCC_BACKEND "cpu")
+set(MIND_SIM_GPU_COMPILE_OPTIONS)
+set(MIND_SIM_GPU_LINK_OPTIONS)
+set(MIND_SIM_MODCC_GPU_DEFINE_ARGS)
+set(MIND_SIM_GPU_RUNTIME_LIBRARY)
+if(MIND_SIM_ENABLE_GPU)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "NVHPC|PGI")
+    message(FATAL_ERROR "MIND_SIM_ENABLE_GPU requires the NVIDIA HPC SDK C++ compiler (nvc++).")
+  endif()
+  set(MIND_SIM_MODCC_BACKEND "openacc")
+  set(MIND_SIM_RUNTIME_FP_FLAGS "-O2")
+  set(MIND_SIM_MODCC_FP_FLAGS "-O2" "-Mautoinline")
+  set(MIND_SIM_GPU_COMPILE_OPTIONS "-cuda" "-gpu=${MIND_SIM_GPU_ARCHS}" "-acc")
+  set(MIND_SIM_GPU_LINK_OPTIONS "-cuda" "-gpu=${MIND_SIM_GPU_ARCHS}" "-acc")
+  list(APPEND MIND_SIM_MODCC_FP_FLAGS "-DR123_USE_INTRIN_H=0" "-DEIGEN_DONT_VECTORIZE=1")
+  list(APPEND MIND_SIM_MODCC_GPU_DEFINE_ARGS
+    --define CORENEURON_ENABLE_GPU
+    --define R123_USE_INTRIN_H=0
+    --define EIGEN_DONT_VECTORIZE=1
+  )
+  find_package(CUDAToolkit QUIET)
+  if(CUDAToolkit_FOUND)
+    set(MIND_SIM_GPU_RUNTIME_LIBRARY CUDA::cudart)
+  else()
+    get_filename_component(MIND_SIM_NVHPC_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    get_filename_component(MIND_SIM_NVHPC_COMPILER_DIR "${MIND_SIM_NVHPC_BIN_DIR}" DIRECTORY)
+    get_filename_component(MIND_SIM_NVHPC_VERSION_DIR "${MIND_SIM_NVHPC_COMPILER_DIR}" DIRECTORY)
+    file(GLOB MIND_SIM_CUDART_CANDIDATES
+      "${MIND_SIM_NVHPC_VERSION_DIR}/cuda/*/targets/x86_64-linux/lib/libcudart.so"
+    )
+    list(SORT MIND_SIM_CUDART_CANDIDATES)
+    list(LENGTH MIND_SIM_CUDART_CANDIDATES MIND_SIM_CUDART_CANDIDATE_COUNT)
+    if(MIND_SIM_CUDART_CANDIDATE_COUNT GREATER 0)
+      list(GET MIND_SIM_CUDART_CANDIDATES -1 MIND_SIM_GPU_RUNTIME_LIBRARY)
+    else()
+      message(FATAL_ERROR "Could not locate libcudart for the MIND_Sim GPU build.")
+    endif()
+  endif()
+else()
+  set(MIND_SIM_RUNTIME_FP_FLAGS "-O3" "-march=native" "-mtune=native" "-fno-math-errno" "-ffp-contract=off" "-fno-semantic-interposition" "-funroll-loops")
+  set(MIND_SIM_MODCC_FP_FLAGS "-O3" "-march=native" "-mtune=native" "-fno-math-errno" "-ffp-contract=off" "-fno-semantic-interposition" "-funroll-loops")
+endif()
+list(APPEND MIND_SIM_MODCC_FP_FLAGS ${MIND_SIM_GPU_COMPILE_OPTIONS})
 string(REPLACE ";" " " MIND_SIM_MODCC_FP_FLAGS_TEXT "${MIND_SIM_MODCC_FP_FLAGS}")
 string(STRIP "${OpenMP_CXX_FLAGS} ${MIND_SIM_MODCC_FP_FLAGS_TEXT}" MIND_SIM_MODCC_CXX_FLAGS)
 set(MIND_SIM_MODCC_LINK_OPTIONS ${OpenMP_CXX_FLAGS})
+list(APPEND MIND_SIM_MODCC_LINK_OPTIONS ${MIND_SIM_GPU_LINK_OPTIONS})
 if(OpenMP_CXX_LIBRARIES)
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND MIND_SIM_MODCC_LINK_OPTIONS "-Wl,--no-as-needed")
@@ -118,6 +165,7 @@ add_custom_command(
           --nmodl "${MIND_SIM_NMODL}"
           --cxx "${CMAKE_CXX_COMPILER}"
           --output "${MIND_SIM_DEFAULT_MECHANISM_OUTPUT_DIR}"
+          --backend "${MIND_SIM_MODCC_BACKEND}"
           --generate-only
           --modl-reg-name mind_default_modl_reg
           "--cxx-flag=${MIND_SIM_MODCC_CXX_FLAGS}"
@@ -135,6 +183,7 @@ add_custom_command(
           --define DISABLE_HOC_EXP
           --define NET_RECEIVE_BUFFERING=0
           --define NRN_PRCELLSTATE=0
+          ${MIND_SIM_MODCC_GPU_DEFINE_ARGS}
           ${MIND_SIM_DEFAULT_MECHANISM_MODFILES}
   COMMAND "${CMAKE_COMMAND}" -E touch "${MIND_SIM_DEFAULT_MECHANISM_STAMP}"
   WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
@@ -199,19 +248,37 @@ set(MIND_SIM_MICRO_FRONTEND_SOURCES
   src/micro/frontend/model.cpp
   ${MIND_SIM_CORENEURON_SOURCES}
   src/micro/sim/coreneuron_host_support.cpp
+  src/micro/sim/core_neuron_data.cpp
+  src/micro/sim/device.cpp
   src/micro/sim/mechanism_runtime.cpp
   src/micro/sim/micro_runtime.cpp
   src/cosim/hybrid_simulator.cpp
 )
 
-nanobind_add_module(
-  _native
+set(MIND_SIM_NANOBIND_OPTIONS
   STABLE_ABI
   NOMINSIZE
   NB_STATIC
+)
+if(CMAKE_CXX_COMPILER_ID MATCHES "NVHPC|PGI")
+  list(APPEND MIND_SIM_NANOBIND_OPTIONS PROTECT_STACK)
+endif()
+
+nanobind_add_module(
+  _native
+  ${MIND_SIM_NANOBIND_OPTIONS}
   ${MIND_SIM_MICRO_FRONTEND_SOURCES}
   src/python_api/bindings/module.cpp
 )
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "NVHPC|PGI" AND TARGET nanobind-static)
+  target_compile_definitions(nanobind-static PRIVATE __GXX_ABI_VERSION=1002)
+  get_target_property(MIND_SIM_NATIVE_COMPILE_OPTIONS _native COMPILE_OPTIONS)
+  if(MIND_SIM_NATIVE_COMPILE_OPTIONS)
+    list(REMOVE_ITEM MIND_SIM_NATIVE_COMPILE_OPTIONS "-fno-stack-protector")
+    set_target_properties(_native PROPERTIES COMPILE_OPTIONS "${MIND_SIM_NATIVE_COMPILE_OPTIONS}")
+  endif()
+endif()
 
 add_dependencies(_native mind_sim_default_mechanisms)
 add_dependencies(_native mind_sim_python_api)
@@ -246,15 +313,37 @@ target_compile_definitions(_native PRIVATE
   MIND_SIM_NMODL_SOURCE_DIR="${MIND_SIM_NMODL_SOURCE_DIR}"
   MIND_SIM_PYTHON_EXECUTABLE="${Python_EXECUTABLE}"
   MIND_SIM_CXX_COMPILER="${CMAKE_CXX_COMPILER}"
+  MIND_SIM_MODCC_BACKEND="${MIND_SIM_MODCC_BACKEND}"
   MIND_SIM_MODCC_CXX_FLAGS="${MIND_SIM_MODCC_CXX_FLAGS}"
   MIND_SIM_MODCC_LINK_FLAGS="${MIND_SIM_MODCC_LINK_FLAGS}"
   MIND_SIM_MECHANISM_INCLUDE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/micro/sim"
 )
+if(MIND_SIM_ENABLE_GPU)
+  target_compile_definitions(_native PRIVATE
+    MIND_SIM_ENABLE_GPU=1
+    CORENEURON_ENABLE_GPU
+    R123_USE_INTRIN_H=0
+    EIGEN_DONT_VECTORIZE=1
+  )
+endif()
 
 target_include_directories(_native PRIVATE ${MIND_SIM_HDF5_INCLUDE_DIR})
-target_link_libraries(_native PRIVATE ${CMAKE_DL_LIBS} ${MIND_SIM_HDF5_LIBRARY} OpenMP::OpenMP_CXX)
+target_link_libraries(_native PRIVATE
+  ${CMAKE_DL_LIBS}
+  ${MIND_SIM_HDF5_LIBRARY}
+  OpenMP::OpenMP_CXX
+  ${MIND_SIM_GPU_RUNTIME_LIBRARY}
+)
+if(MIND_SIM_GPU_COMPILE_OPTIONS)
+  target_compile_options(_native PRIVATE ${MIND_SIM_GPU_COMPILE_OPTIONS})
+endif()
+if(MIND_SIM_GPU_LINK_OPTIONS)
+  target_link_options(_native PRIVATE ${MIND_SIM_GPU_LINK_OPTIONS})
+endif()
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
   target_compile_options(_native PRIVATE -O2 ${MIND_SIM_RUNTIME_FP_FLAGS})
+elseif(MIND_SIM_ENABLE_GPU)
+  target_compile_options(_native PRIVATE ${MIND_SIM_RUNTIME_FP_FLAGS})
 endif()
 
 enable_testing()

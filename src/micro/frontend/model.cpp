@@ -1,11 +1,18 @@
 #include "micro/frontend/model.hpp"
 
 #include "coreneuron/coreneuron.hpp"
+#include "coreneuron/apps/corenrn_parameters.hpp"
 #include "coreneuron/io/mem_layout_util.hpp"
+#include "coreneuron/nrniv/nrniv_decl.h"
 #include "coreneuron/permute/cellorder.hpp"
+#include "coreneuron/sim/multicore.hpp"
 #include "morph/section_to_node.hpp"
 #include "micro/sim/mechanism_runtime.hpp"
 #include "micro/sim/micro_runtime.hpp"
+
+#if defined(MIND_SIM_ENABLE_GPU) && defined(CORENEURON_ENABLE_GPU)
+#include "coreneuron/gpu/nrn_acc_manager.hpp"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -39,19 +46,6 @@ struct PopulationLayout {
     int num_cells_total{0};
     std::vector<std::size_t> cell_template_id{};
     std::vector<std::size_t> cell_nonroot_base{};
-};
-
-struct TemplateRuntimeOrder {
-    std::size_t tpl_id{0};
-    std::size_t tree_hash{0};
-    std::size_t tree_size{0};
-    std::vector<int> order_to_template_node{};
-};
-
-struct RuntimeCellOrder {
-    int runtime_cell{0};
-    int original_gid{0};
-    std::size_t tpl_id{0};
 };
 
 constexpr double infinite_resistance_cutoff_Mohm = 1.0e29;
@@ -219,128 +213,6 @@ void build_population_layout(const std::vector<TemplateBuildScratch>& built,
         pop_layout.cell_nonroot_base[cell] = next_nonroot;
         next_nonroot += tpl_nodes - 1;
     }
-}
-
-[[nodiscard]] std::vector<int> template_parent_index(
-    const mind_micro_model::CellTemplateMorphLayout& morph,
-    const std::vector<int>& parent_index,
-    std::size_t tpl_id) {
-    const auto& tpl = morph.templates[tpl_id];
-    std::vector<int> parent(tpl.tpl_nodes_per_cell, -1);
-    const int gid = tpl.cell_base;
-    const auto nonroot_base = morph.cell_nonroot_base[static_cast<std::size_t>(gid)];
-    for (std::size_t template_node = 1; template_node < tpl.tpl_nodes_per_cell; ++template_node) {
-        const auto original = nonroot_base + template_node - 1;
-        const int original_parent = parent_index[original];
-        parent[template_node] = original_parent == gid
-                                    ? 0
-                                    : static_cast<int>(
-                                          static_cast<std::size_t>(original_parent) - nonroot_base + 1);
-    }
-    return parent;
-}
-
-[[nodiscard]] TemplateRuntimeOrder build_template_runtime_order(
-    const mind_micro_model::CellTemplateMorphLayout& morph,
-    const std::vector<int>& parent_index,
-    std::size_t tpl_id) {
-    struct Node {
-        std::vector<int> children{};
-        std::size_t hash{0};
-        std::size_t size{1};
-    };
-
-    const auto parent = template_parent_index(morph, parent_index, tpl_id);
-    std::vector<Node> nodes(parent.size());
-    for (std::size_t node = 1; node < parent.size(); ++node) {
-        nodes[static_cast<std::size_t>(parent[node])].children.push_back(static_cast<int>(node));
-    }
-
-    auto compute_hash = [&](auto&& self, int node) -> void {
-        auto& current = nodes[static_cast<std::size_t>(node)];
-        for (const int child : current.children) {
-            self(self, child);
-        }
-        std::sort(current.children.begin(), current.children.end(), [&](int lhs, int rhs) {
-            const auto& left = nodes[static_cast<std::size_t>(lhs)];
-            const auto& right = nodes[static_cast<std::size_t>(rhs)];
-            if (left.size != right.size) {
-                return left.size < right.size;
-            }
-            if (left.hash != right.hash) {
-                return left.hash < right.hash;
-            }
-            return lhs < rhs;
-        });
-        current.hash = current.children.size();
-        current.size = 1;
-        for (const int child : current.children) {
-            const auto& child_node = nodes[static_cast<std::size_t>(child)];
-            current.hash ^= child_node.hash + 0x9e3779b9 + (current.hash << 6) + (current.hash >> 2);
-            current.size += child_node.size;
-        }
-    };
-    compute_hash(compute_hash, 0);
-
-    TemplateRuntimeOrder out{};
-    out.tpl_id = tpl_id;
-    out.tree_hash = nodes.front().hash;
-    out.tree_size = nodes.front().size;
-    out.order_to_template_node.assign(nodes.size(), -1);
-    out.order_to_template_node[0] = 0;
-
-    int next_order = 1;
-    for (std::size_t node = 0; node < nodes.size(); ++node) {
-        for (const int child : nodes[node].children) {
-            out.order_to_template_node[static_cast<std::size_t>(next_order++)] = child;
-        }
-    }
-    return out;
-}
-
-[[nodiscard]] std::vector<TemplateRuntimeOrder> build_cpu_template_runtime_orders(
-    const mind_micro_model::CellTemplateMorphLayout& morph,
-    const std::vector<int>& parent_index) {
-    std::vector<TemplateRuntimeOrder> orders;
-    orders.reserve(morph.templates.size());
-    for (std::size_t tpl_id = 0; tpl_id < morph.templates.size(); ++tpl_id) {
-        orders.push_back(build_template_runtime_order(morph, parent_index, tpl_id));
-    }
-    return orders;
-}
-
-[[nodiscard]] std::vector<RuntimeCellOrder> build_cpu_runtime_cell_order(
-    const mind_micro_model::CellTemplateMorphLayout& morph,
-    const std::vector<TemplateRuntimeOrder>& template_orders) {
-    std::vector<std::size_t> sorted_templates(template_orders.size());
-    std::iota(sorted_templates.begin(), sorted_templates.end(), 0);
-    std::sort(sorted_templates.begin(), sorted_templates.end(), [&](std::size_t lhs, std::size_t rhs) {
-        const auto& left = template_orders[lhs];
-        const auto& right = template_orders[rhs];
-        if (left.tree_size != right.tree_size) {
-            return left.tree_size < right.tree_size;
-        }
-        if (left.tree_hash != right.tree_hash) {
-            return left.tree_hash < right.tree_hash;
-        }
-        return morph.templates[left.tpl_id].cell_base < morph.templates[right.tpl_id].cell_base;
-    });
-
-    std::vector<RuntimeCellOrder> cells;
-    cells.reserve(static_cast<std::size_t>(morph.num_cells_total));
-    int runtime_cell = 0;
-    for (const auto order_index : sorted_templates) {
-        const auto tpl_id = template_orders[order_index].tpl_id;
-        const auto& tpl = morph.templates[tpl_id];
-        for (int offset = 0; offset < tpl.num_cells; ++offset) {
-            cells.push_back(RuntimeCellOrder{
-                .runtime_cell = runtime_cell++,
-                .original_gid = tpl.cell_base + offset,
-                .tpl_id = tpl_id,
-            });
-        }
-    }
-    return cells;
 }
 
 [[nodiscard]] mind_micro_model::CellTemplateMorphLayout build_morph_layout(
@@ -712,10 +584,24 @@ void MicroFrontendModel::set_celsius(double celsius) {
     runtime_backend_.reset();
 }
 
-void MicroFrontendModel::set_device_cpu_only(const std::string& device) {
-    if (device != "cpu") {
-        throw std::runtime_error("MIND_Sim micro frontend is CPU-only in this build; GPU device is not accepted");
+void MicroFrontendModel::set_device(const std::string& device) {
+    auto config = mind_sim::micro::sim::parse_micro_device(device);
+#ifndef MIND_SIM_ENABLE_GPU
+    if (config.kind == mind_sim::micro::sim::MicroDeviceKind::Gpu) {
+        throw std::runtime_error(
+            "MIND_Sim was built without GPU support; rebuild with -DMIND_SIM_ENABLE_GPU=ON");
     }
+#endif
+    if (microcircuit_built_) {
+        throw std::runtime_error("set_device must be called before build_microcircuit");
+    }
+    device_config_ = config;
+    core_neuron_data_->device_config = device_config_;
+    if (has_morphology_ && !core_neuron_data_->threads.empty()) {
+        reset_core_node_storage();
+        core_neuron_data_->bind();
+    }
+    runtime_backend_.reset();
 }
 
 void MicroFrontendModel::load_mech_metadata(std::string path) {
@@ -768,6 +654,7 @@ void MicroFrontendModel::build_morphology(std::vector<MorphologyTemplateSpec> te
     }
     core_neuron_data_ = std::make_shared<mind_sim::micro::sim::CoreNeuronData>();
     runtime_backend_.reset();
+    core_neuron_data_->device_config = device_config_;
     core_neuron_data_->dt = dt_;
     core_neuron_data_->celsius = section_properties_.celsius;
     core_neuron_data_->threads.resize(1);
@@ -776,7 +663,6 @@ void MicroFrontendModel::build_morphology(std::vector<MorphologyTemplateSpec> te
     nt._dt = dt_;
     nt.ncell = morph_layout_.num_cells_total;
     nt.end = static_cast<int>(morph_layout_.nnode);
-    nt.allocate_node_data(morph_layout_.nnode);
     nt.shadow_rhs.clear();
     nt.shadow_d.clear();
     morph_parent_index_.assign(morph_layout_.nnode, -1);
@@ -1497,20 +1383,104 @@ double MicroFrontendModel::read_variable(const VariableRef& ref) const {
 
 double* MicroFrontendModel::variable_pointer(const VariableRef& ref) {
     require_morphology();
-    if (ref.kind == VariableRef::Kind::LocationVoltage ||
-        (ref.kind == VariableRef::Kind::Location && ref.mech == "global" && ref.var == "v")) {
+    auto resolve_voltage_node = [&]() {
         if (core_neuron_data_->threads.empty()) {
-            throw std::runtime_error("micro voltage record requires built CoreNEURON thread data");
+            throw std::runtime_error("micro variable record requires built CoreNEURON thread data");
         }
         const int original_node = resolve_original_node(morph_layout_, ref.gid, ref.section_index, ref.x);
         const int node_index = runtime_node_for_original(original_node);
-        auto values = core_neuron_data_->threads.front().actual_v();
-        if (node_index < 0 || static_cast<std::size_t>(node_index) >= values.size()) {
-            throw std::runtime_error("voltage record resolved an invalid node index");
+        if (node_index < 0 ||
+            static_cast<std::size_t>(node_index) >= core_neuron_data_->threads.front().actual_v().size()) {
+            throw std::runtime_error("variable record resolved an invalid node index");
         }
+        return node_index;
+    };
+    auto resolve_field_offset = [](const mind_micro_biophysical::MechanismMetadata& metadata,
+                                   const std::string& var,
+                                   int array_index) {
+        const auto field_it = metadata.field_index_by_name.find(var);
+        if (field_it == metadata.field_index_by_name.end()) {
+            throw std::runtime_error("mechanism variable is not a CoreNEURON data field: " +
+                                     metadata.name + "." + var);
+        }
+        const auto& field = metadata.fields[static_cast<std::size_t>(field_it->second)];
+        if (array_index >= field.array_size) {
+            throw std::runtime_error("mechanism variable array index is out of range for: " +
+                                     metadata.name + "." + var);
+        }
+        const int field_offset =
+            metadata.field_data_offsets[static_cast<std::size_t>(field_it->second)] +
+            std::max(array_index, 0);
+        if (field_offset < 0) {
+            throw std::runtime_error("mechanism variable is not stored in CoreNEURON data: " +
+                                     metadata.name + "." + var);
+        }
+        return field_offset;
+    };
+
+    if (ref.kind == VariableRef::Kind::LocationVoltage ||
+        (ref.kind == VariableRef::Kind::Location && ref.mech == "global" && ref.var == "v")) {
+        const int node_index = resolve_voltage_node();
+        auto values = core_neuron_data_->threads.front().actual_v();
         return values.data() + static_cast<std::size_t>(node_index);
     }
-    throw std::runtime_error("record currently requires a section voltage reference");
+    if (ref.kind == VariableRef::Kind::Location) {
+        if (ref.mech.empty() || ref.var.empty()) {
+            throw std::runtime_error("mechanism variable record requires non-empty mechanism and variable names");
+        }
+        const int node_index = resolve_voltage_node();
+        const auto type_it = core_neuron_data_->mechanism_type.find(ref.mech);
+        if (type_it == core_neuron_data_->mechanism_type.end()) {
+            throw std::runtime_error("mechanism variable record requested an unbuilt mechanism: " + ref.mech);
+        }
+        const int type = type_it->second;
+        auto& thread = core_neuron_data_->threads.front();
+        const auto ml_it = std::find_if(
+            thread.memb_lists.begin(),
+            thread.memb_lists.end(),
+            [type](const auto& ml) { return ml.type == type; });
+        if (ml_it == thread.memb_lists.end() || ml_it->ml.data == nullptr) {
+            throw std::runtime_error("mechanism variable record found no Memb_list for: " + ref.mech);
+        }
+        const auto& metadata = mechanism_catalog_.require(ref.mech);
+        const int field_offset = resolve_field_offset(metadata, ref.var, ref.array_index);
+        const auto instance_it = std::find(
+            ml_it->nodeindices.begin(),
+            ml_it->nodeindices.end(),
+            node_index);
+        if (instance_it == ml_it->nodeindices.end()) {
+            throw std::runtime_error("mechanism variable record found no instance for: " +
+                                     ref.mech + "." + ref.var);
+        }
+        const auto instance_index = static_cast<std::size_t>(
+            std::distance(ml_it->nodeindices.begin(), instance_it));
+        const auto padded_count = static_cast<std::size_t>(ml_it->ml._nodecount_padded);
+        const auto data_index = static_cast<std::size_t>(field_offset) * padded_count + instance_index;
+        return ml_it->ml.data + data_index;
+    }
+    if (ref.kind == VariableRef::Kind::Mechanism) {
+        const auto insert_index = require_insert_index(ref.insert_id);
+        const auto& insert = core_mechanism_builder_.inserts[insert_index];
+        if (insert.placement == MechanismPlacementKind::SectionSet) {
+            throw std::runtime_error("object variable record requires a point process or artificial cell");
+        }
+        const auto& metadata = mechanism_catalog_.require(insert.metadata_id);
+        const int field_offset = resolve_field_offset(metadata, ref.var, ref.array_index);
+        auto& thread = core_neuron_data_->threads.front();
+        const auto ml_it = std::find_if(
+            thread.memb_lists.begin(),
+            thread.memb_lists.end(),
+            [&](const auto& ml) { return ml.type == insert.runtime_type; });
+        if (ml_it == thread.memb_lists.end() || ml_it->ml.data == nullptr) {
+            throw std::runtime_error("object variable record found no Memb_list for: " + metadata.name);
+        }
+        const auto instance_index = insert.instance_begin;
+        const auto data_index = static_cast<std::size_t>(field_offset) *
+                                    static_cast<std::size_t>(ml_it->ml._nodecount_padded) +
+                                instance_index;
+        return ml_it->ml.data + data_index;
+    }
+    throw std::runtime_error("record currently supports voltage, density variables, and object variables");
 }
 
 int MicroFrontendModel::build_microcircuit() {
@@ -1617,10 +1587,51 @@ int MicroFrontendModel::continue_run_with_recording(double runtime,
     trajectory.bsize = sample_count;
     trajectory.vsize = 0;
 
+    const bool use_gpu =
+        core_neuron_data_->device_config.kind == mind_sim::micro::sim::MicroDeviceKind::Gpu;
+#if !defined(MIND_SIM_ENABLE_GPU) || !defined(CORENEURON_ENABLE_GPU)
+    if (use_gpu) {
+        throw std::runtime_error(
+            "MIND_Sim was built without CoreNEURON GPU support; rebuild with -DMIND_SIM_ENABLE_GPU=ON");
+    }
+#endif
+
     nt.trajec_requests = &trajectory;
     try {
+#if defined(MIND_SIM_ENABLE_GPU) && defined(CORENEURON_ENABLE_GPU)
+        if (use_gpu && core_neuron_data_->gpu_device_runtime_active) {
+            core_neuron_data_->bind();
+            coreneuron::nrn_nthread = static_cast<int>(core_neuron_data_->threads.size());
+            coreneuron::nrn_threads = core_neuron_data_->threads.data();
+            coreneuron::setup_trajectory_requests_on_device(coreneuron::nrn_threads,
+                                                            coreneuron::nrn_nthread);
+        }
+#endif
         continue_run(runtime);
+#if defined(MIND_SIM_ENABLE_GPU) && defined(CORENEURON_ENABLE_GPU)
+        if (use_gpu && core_neuron_data_->gpu_device_runtime_active) {
+            core_neuron_data_->bind();
+            coreneuron::nrn_nthread = static_cast<int>(core_neuron_data_->threads.size());
+            coreneuron::nrn_threads = core_neuron_data_->threads.data();
+            coreneuron::update_trajectory_requests_on_host(coreneuron::nrn_threads,
+                                                           coreneuron::nrn_nthread);
+            coreneuron::delete_trajectory_requests_on_device(coreneuron::nrn_threads,
+                                                             coreneuron::nrn_nthread);
+        }
+#endif
     } catch (...) {
+#if defined(MIND_SIM_ENABLE_GPU) && defined(CORENEURON_ENABLE_GPU)
+        if (use_gpu && core_neuron_data_->gpu_device_runtime_active) {
+            try {
+                core_neuron_data_->bind();
+                coreneuron::nrn_nthread = static_cast<int>(core_neuron_data_->threads.size());
+                coreneuron::nrn_threads = core_neuron_data_->threads.data();
+                coreneuron::delete_trajectory_requests_on_device(coreneuron::nrn_threads,
+                                                                 coreneuron::nrn_nthread);
+            } catch (...) {
+            }
+        }
+#endif
         nt.trajec_requests = nullptr;
         throw;
     }
@@ -1728,7 +1739,13 @@ int MicroFrontendModel::runtime_node_for_original(int original_node) const {
 void MicroFrontendModel::reset_core_node_storage() {
     auto& nt = core_neuron_data_->threads.front();
     coreneuron::nrn_nthread = 1;
-    coreneuron::interleave_permute_type = 1;
+    const int cell_permute =
+        mind_sim::micro::sim::cell_permute_for_device(core_neuron_data_->device_config.kind);
+    coreneuron::corenrn_param.cell_interleave_permute =
+        static_cast<unsigned>(cell_permute);
+    coreneuron::interleave_permute_type = cell_permute;
+    coreneuron::cellorder_nwarp = static_cast<int>(coreneuron::corenrn_param.nwarp);
+    coreneuron::use_solve_interleave = coreneuron::interleave_permute_type != 0;
     coreneuron::destroy_interleave_info();
     coreneuron::create_interleave_info();
 
@@ -1847,9 +1864,6 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
     }
 
     auto& nt = core_neuron_data_->threads[0];
-    {
-        reset_core_node_storage();
-    }
     {
         apply_section_axial_resistance();
     }

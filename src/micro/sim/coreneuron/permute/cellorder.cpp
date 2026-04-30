@@ -42,6 +42,13 @@ namespace neuron {
 int interleave_permute_type;
 InterleaveInfo* interleave_info;  // nrn_nthread array
 
+#if CORENRN_BUILD && defined(CORENEURON_ENABLE_GPU) && defined(_OPENACC) && \
+    !defined(MIND_SIM_CORENEURON_CUDA_INTERFACE)
+void solve_interleaved2_launcher(NrnThread*, InterleaveInfo*, int, void*) {
+    throw std::runtime_error("CoreNEURON cuda_interface type-2 launcher is not built");
+}
+#endif
+
 
 void InterleaveInfo::swap(InterleaveInfo& info) {
     std::swap(nwarp, info.nwarp);
@@ -117,55 +124,6 @@ void destroy_interleave_info() {
         delete[] interleave_info;
         interleave_info = nullptr;
     }
-}
-
-void install_type1_interleave_info(int ith,
-                                   int ncell,
-                                   int nstride,
-                                   const std::vector<int>& stride,
-                                   const std::vector<int>& firstnode,
-                                   const std::vector<int>& lastnode,
-                                   const std::vector<int>& cellsize) {
-    auto& ii = interleave_info[ith];
-    if (ii.stride) {
-        free_memory(ii.stride);
-        free_memory(ii.firstnode);
-        free_memory(ii.lastnode);
-        free_memory(ii.cellsize);
-    }
-    if (ii.stridedispl) {
-        free_memory(ii.stridedispl);
-    }
-    if (ii.idle) {
-        delete[] ii.nnode;
-        delete[] ii.ncycle;
-        delete[] ii.idle;
-        delete[] ii.cache_access;
-        delete[] ii.child_race;
-    }
-
-    ii.nwarp = 0;
-    ii.nstride = 0;
-    ii.stridedispl = nullptr;
-    ii.stride = nullptr;
-    ii.firstnode = nullptr;
-    ii.lastnode = nullptr;
-    ii.cellsize = nullptr;
-    ii.nnode = nullptr;
-    ii.ncycle = nullptr;
-    ii.idle = nullptr;
-    ii.cache_access = nullptr;
-    ii.child_race = nullptr;
-    ii.nwarp = (ncell + warpsize - 1) / warpsize;
-    ii.nstride = nstride;
-    ii.stride = static_cast<int*>(ecalloc_align(stride.size(), sizeof(int)));
-    ii.firstnode = static_cast<int*>(ecalloc_align(firstnode.size(), sizeof(int)));
-    ii.lastnode = static_cast<int*>(ecalloc_align(lastnode.size(), sizeof(int)));
-    ii.cellsize = static_cast<int*>(ecalloc_align(cellsize.size(), sizeof(int)));
-    std::copy(stride.begin(), stride.end(), ii.stride);
-    std::copy(firstnode.begin(), firstnode.end(), ii.firstnode);
-    std::copy(lastnode.begin(), lastnode.end(), ii.lastnode);
-    std::copy(cellsize.begin(), cellsize.end(), ii.cellsize);
 }
 
 // more precise visualization of the warp quality

@@ -89,10 +89,14 @@ namespace random123_global {
 #define g_k_qualifiers
 #endif
 g_k_qualifiers philox4x32_key_t g_k{{0, 0}};
+#if defined(CORENEURON_ENABLE_GPU) && !defined(__CUDACC__)
+nrn_pragma_acc(declare create(g_k))
+#endif
 
 // Cannot refer to g_k directly from a nrn_pragma_acc(routine seq) method like
 // coreneuron_random123_philox4x32_helper, and cannot have this inlined there at
 // higher optimisation levels
+nrn_pragma_acc(routine seq)
 __attribute__((noinline)) philox4x32_key_t& global_state() {
     return random123_global::g_k;
 }
@@ -150,17 +154,12 @@ void nrnran123_set_globalindex(uint32_t gix) {
 void nrnran123_initialise_global_state_on_device() {
     if (coreneuron::gpu_enabled()) {
 #ifndef __CUDACC__
-        nrn_pragma_acc(enter data copyin(random123_global::g_k))
+        nrn_pragma_acc(update device(random123_global::g_k))
 #endif
     }
 }
 
 void nrnran123_destroy_global_state_on_device() {
-    if (coreneuron::gpu_enabled()) {
-#ifndef __CUDACC__
-        nrn_pragma_acc(exit data delete (random123_global::g_k))
-#endif
-    }
 }
 
 /** @brief Allocate a new Random123 stream.

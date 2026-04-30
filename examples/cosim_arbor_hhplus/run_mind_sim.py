@@ -21,10 +21,10 @@ CONNECTIVITY_FILE = Path.home() / "arbor-tvb-cosim" / "connectivity_mouse.zip"
 RESULT_DIR = ROOT / "result" / "cosim_arbor_hhplus"
 
 DEFAULT_CELLS = 100
-DURATION_MS = 2000.0
+DEFAULT_DURATION_MS = 2000.0
 DT_MS = 0.01
 MACRO_DT_MS = 0.01
-BATCH_WINDOW_MS = 0.25
+DEFAULT_BATCH_WINDOW_MS = 0.25
 MICRO_ROI = 72
 SEED = 1234
 
@@ -93,15 +93,27 @@ def require_integer_multiple(value: float, unit: float, label: str) -> None:
 
 
 parser = argparse.ArgumentParser(description="MIND_Sim Arbor-HHPlus cosim benchmark.")
-parser.add_argument("--cells", type=int, default=DEFAULT_CELLS, choices=(100, 1000))
+parser.add_argument("--cells", type=int, default=DEFAULT_CELLS)
+parser.add_argument("--duration-ms", type=float, default=DEFAULT_DURATION_MS)
+parser.add_argument("--batch-window-ms", type=float, default=DEFAULT_BATCH_WINDOW_MS)
 parser.add_argument("--output", type=Path, default=None)
+parser.add_argument(
+    "--device",
+    choices=("cpu", "gpu"),
+    default=os.environ.get("MIND_SIM_COSIM_DEVICE", "cpu").strip() or "cpu",
+)
 args = parser.parse_args()
+if args.cells <= 0:
+    raise SystemExit("--cells must be positive")
+if args.duration_ms <= 0.0:
+    raise SystemExit("--duration-ms must be positive")
 
 CELLS = args.cells
-OUTPUT_FILE = args.output or RESULT_DIR / f"mind_sim_{CELLS}cells_2s.h5"
+DURATION_MS = float(args.duration_ms)
+duration_label = f"{DURATION_MS / 1000.0:g}s".replace(".", "p")
+OUTPUT_FILE = args.output or RESULT_DIR / f"mind_sim_{CELLS}cells_{duration_label}_{args.device}.h5"
 OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 require_integer_multiple(MACRO_DT_MS, DT_MS, "MACRO_DT_MS")
-require_integer_multiple(BATCH_WINDOW_MS, MACRO_DT_MS, "BATCH_WINDOW_MS")
 
 with zipfile.ZipFile(CONNECTIVITY_FILE) as archive:
     labels = archive.read("region_labels.txt").decode("utf-8").split()
@@ -110,7 +122,10 @@ with zipfile.ZipFile(CONNECTIVITY_FILE) as archive:
 
 np.fill_diagonal(weights, 0.0)
 delays = np.maximum(tract_lengths, MIN_TRACT_LENGTH_MS) / CONDUCTION_SPEED
-if BATCH_WINDOW_MS > float(np.min(delays[delays > 0.0])):
+min_positive_delay = float(np.min(delays[delays > 0.0]))
+BATCH_WINDOW_MS = float(args.batch_window_ms)
+require_integer_multiple(BATCH_WINDOW_MS, MACRO_DT_MS, "BATCH_WINDOW_MS")
+if BATCH_WINDOW_MS > min_positive_delay:
     raise RuntimeError("BATCH_WINDOW_MS must not exceed the minimum positive connectivity delay")
 
 roi_count = len(labels)
@@ -231,6 +246,7 @@ with suppress_native_output():
     network.couple_all(rww_coupling)
 
     micro = ms.Sim()
+    micro.set_device(args.device)
     micro.set_dt(DT_MS)
     micro.set_spike_output_enabled(True)
     micro.ion_register("cl", -1.0)
@@ -289,7 +305,6 @@ with suppress_native_output():
         targets=[MICRO_ROI],
         rule=h_input_coupling,
         params={"inv_source_count": 1.0 / float(len(macro_roi_indices))},
-        delays=False,
     )
 
     for roi_index in range(roi_count):
@@ -332,6 +347,7 @@ result.save_h5(
 
 spikes = result.micro_spikes_by_roi[MICRO_ROI]
 print(f"output={OUTPUT_FILE}")
+print(f"device={args.device}")
 print(f"pre_run_s={pre_run_s:.6f}")
 print(f"run_s={run_s:.6f}")
 print(f"total_s={pre_run_s + run_s:.6f}")

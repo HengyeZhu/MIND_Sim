@@ -37,6 +37,7 @@
 
 #ifdef CORENEURON_ENABLE_GPU
 #include "cuda_profiler_api.h"
+#include <cuda_runtime_api.h>
 #endif
 
 namespace coreneuron {

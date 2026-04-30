@@ -289,6 +289,7 @@ void append_file_signature(std::ostringstream& out, const std::filesystem::path&
     out << path.string() << '\n';
     out << MIND_CORE_MECH_ABI_VERSION << '\n';
     out << MIND_SIM_CXX_COMPILER << '\n';
+    out << MIND_SIM_MODCC_BACKEND << '\n';
     out << MIND_SIM_MODCC_CXX_FLAGS << '\n';
     out << MIND_SIM_MODCC_LINK_FLAGS << '\n';
     append_file_signature(out, MIND_SIM_MODCC);
@@ -334,7 +335,9 @@ void append_file_signature(std::ostringstream& out, const std::filesystem::path&
                           shell_quote(std::string_view{MIND_SIM_MODCC}) + " --nmodl " +
                           shell_quote(std::string_view{MIND_SIM_NMODL_EXECUTABLE}) + " --cxx " +
                           shell_quote(std::string_view{MIND_SIM_CXX_COMPILER}) + " --output " +
-                          shell_quote(build_dir) + " --cxx-flag=" +
+                          shell_quote(build_dir) + " --backend " +
+                          shell_quote(std::string_view{MIND_SIM_MODCC_BACKEND}) +
+                          " --cxx-flag=" +
                           shell_quote(std::string_view{MIND_SIM_MODCC_CXX_FLAGS}) +
                           " --link-flag=" +
                           shell_quote(std::string_view{MIND_SIM_MODCC_LINK_FLAGS}) +
@@ -351,7 +354,11 @@ void append_file_signature(std::ostringstream& out, const std::filesystem::path&
                           " --define NRN_MULTISEND=0"
                           " --define DISABLE_HOC_EXP"
                           " --define NET_RECEIVE_BUFFERING=0"
-                          " --define NRN_PRCELLSTATE=0 " +
+                          " --define NRN_PRCELLSTATE=0"
+#ifdef MIND_SIM_ENABLE_GPU
+                          " --define CORENEURON_ENABLE_GPU"
+#endif
+                          " " +
                           shell_quote(path);
     const int status = std::system(command.c_str());
     if (status != 0) {

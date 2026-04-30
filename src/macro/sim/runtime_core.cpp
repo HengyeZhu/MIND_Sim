@@ -35,9 +35,7 @@ CouplingGraph build_coupling_graph(const mind_sim::macro::frontend::Network& net
             if (weight == 0.0F) {
                 continue;
             }
-            const int delay_steps = projection.use_delays
-                                        ? static_cast<int>(std::lrint(delays[matrix_offset] / dt_macro))
-                                        : 0;
+            const int delay_steps = static_cast<int>(std::lrint(delays[matrix_offset] / dt_macro));
             edge_counts[static_cast<std::size_t>(target)] += 1;
             graph.max_delay_steps = std::max(graph.max_delay_steps, delay_steps);
         }
@@ -60,9 +58,7 @@ CouplingGraph build_coupling_graph(const mind_sim::macro::frontend::Network& net
             if (weight == 0.0F) {
                 continue;
             }
-            const int delay_steps = projection.use_delays
-                                        ? static_cast<int>(std::lrint(delays[matrix_offset] / dt_macro))
-                                        : 0;
+            const int delay_steps = static_cast<int>(std::lrint(delays[matrix_offset] / dt_macro));
             const auto index = static_cast<std::size_t>(
                 write_positions[static_cast<std::size_t>(target)]++);
             graph.edge_sources[index] = source;
@@ -221,10 +217,14 @@ void append_exposure_record(mind_sim::macro::sim::ExposureRecord& record,
                             const std::vector<float>& exposure_soa) {
     const int roi_count = record.roi_count;
     const int exposure_count = record.exposure_count;
+    const auto base = record.values.size();
+    const auto sample_width =
+        record.roi_indices.size() * static_cast<std::size_t>(exposure_count);
+    record.values.resize(base + sample_width);
+    auto* out = record.values.data() + base;
     for (int roi: record.roi_indices) {
         for (int exposure = 0; exposure < exposure_count; ++exposure) {
-            record.values.push_back(
-                exposure_soa[static_cast<std::size_t>(exposure * roi_count + roi)]);
+            *out++ = exposure_soa[static_cast<std::size_t>(exposure * roi_count + roi)];
         }
     }
 }

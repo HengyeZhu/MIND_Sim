@@ -85,7 +85,6 @@ struct CouplingProjection {
     std::vector<int> target_rois{};
     std::shared_ptr<mind_sim::macro::sim::CouplingRule> rule{};
     std::vector<double> params{};
-    bool use_delays{true};
 };
 
 class Network {
@@ -133,15 +132,12 @@ class Network {
     void couple(std::vector<int> source_rois,
                 std::vector<int> target_rois,
                 std::shared_ptr<mind_sim::macro::sim::CouplingRule> rule,
-                std::vector<double> params,
-                bool use_delays);
+                std::vector<double> params);
     void couple_all(std::shared_ptr<mind_sim::macro::sim::CouplingRule> rule,
-                    std::vector<double> params,
-                    bool use_delays);
+                    std::vector<double> params);
     void couple_from(const ROI& source_roi,
                      std::shared_ptr<mind_sim::macro::sim::CouplingRule> rule,
-                     std::vector<double> params,
-                     bool use_delays);
+                     std::vector<double> params);
     void use_region_rule(const ROI& roi,
                          std::shared_ptr<mind_sim::macro::sim::RegionRule> rule,
                          std::vector<double> state,

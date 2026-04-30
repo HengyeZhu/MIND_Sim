@@ -482,7 +482,6 @@ class Network:
         targets,
         rule: CouplingRule,
         params: Mapping[str, float] | None = None,
-        delays: bool = True,
     ) -> "Network":
         if not isinstance(rule, CouplingRule):
             raise TypeError("Network.couple rule expects a CouplingRule")
@@ -497,7 +496,6 @@ class Network:
                 roi_count=self.roi_count(),
             ),
             rule.param_values(params),
-            bool(delays),
         )
         return self
 
@@ -505,20 +503,16 @@ class Network:
         self,
         rule: CouplingRule,
         params: Mapping[str, float] | None = None,
-        *,
-        delays: bool = True,
     ) -> "Network":
-        return self.couple(sources="all", targets="all", rule=rule, params=params, delays=delays)
+        return self.couple(sources="all", targets="all", rule=rule, params=params)
 
     def couple_from(
         self,
         source,
         rule: CouplingRule,
         params: Mapping[str, float] | None = None,
-        *,
-        delays: bool = True,
     ) -> "Network":
-        return self.couple(sources=[source], targets="all", rule=rule, params=params, delays=delays)
+        return self.couple(sources=[source], targets="all", rule=rule, params=params)
 
     def use_micro(self, name: str, micro) -> MicroCircuit:
         index = self._native.use_micro(str(name), micro)

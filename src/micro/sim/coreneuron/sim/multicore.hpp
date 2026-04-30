@@ -180,6 +180,7 @@ extern void nrn_finitialize(int setv, double v);
 extern void direct_mode_initialize();
 extern void nrn_mk_table_check(void);
 extern void nrn_configure_embedded_cpu_runtime(void);
+extern void nrn_configure_embedded_gpu_runtime(int num_gpus, int cell_permute);
 extern void nonvint(NrnThread* _nt);
 extern void update(NrnThread*);
 

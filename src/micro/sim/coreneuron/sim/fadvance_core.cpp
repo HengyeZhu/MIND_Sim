@@ -23,14 +23,22 @@ static void* nrn_fixed_step_thread(NrnThread*);
 static void nrn_fixed_step_group_thread(NrnThread*, int, int, int&);
 
 void dt2thread(double adt) { /* copied from nrnoc/fadvance.c */
-    NrnThread* nt = nrn_threads;
-    if (adt != nt->_dt) {
-        nt->_t = t;
-        nt->_dt = dt;
-        if (secondorder) {
-            nt->cj = 2.0 / dt;
-        } else {
-            nt->cj = 1.0 / dt;
+    if (adt != nrn_threads[0]._dt) {
+        for (int i = 0; i < nrn_nthread; ++i) {
+            NrnThread* nt = nrn_threads + i;
+            nt->_t = t;
+            nt->_dt = dt;
+            if (secondorder) {
+                nt->cj = 2.0 / dt;
+            } else {
+                nt->cj = 1.0 / dt;
+            }
+            nrn_pragma_acc(update device(nt->_t, nt->_dt, nt->cj)
+                               async(nt->stream_id) if (nt->compute_gpu))
+            // clang-format off
+            nrn_pragma_omp(target update to(nt->_t, nt->_dt, nt->cj)
+                                         if(nt->compute_gpu))
+            // clang-format on
         }
     }
 }

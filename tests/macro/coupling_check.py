@@ -28,9 +28,9 @@ def main() -> None:
             [0.0, 0.0, 0.0],
         ],
         delays=[
-            [1.0, 1.0, 1.0],
-            [1.0, 1.0, 1.0],
-            [1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
         ],
         inputs=["drive"],
         exposures=["S"],
@@ -47,7 +47,7 @@ def main() -> None:
         name="count_coupling",
         edge="in.drive += 1.0;",
     )
-    network.couple_all(coupling, delays=False)
+    network.couple_all(coupling)
 
     result = ms.MacroSimulator(network, dt_macro=0.1).run(0.1)
     values = result.exposures.values
