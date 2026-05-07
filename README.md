@@ -23,9 +23,21 @@
 
 Currently, it is intended for personal research use, with features added as needed.
 
+This is my first public release of a simulator project. Its main motivation is the lack of a unified framework for multiscale simulation. While learning from the existing ecosystem, I tried to formulate my own frontend modeling approach. For backend computation, I reused established workflows wherever possible: the micro-scale execution is built on CoreNEURON, and the macro-scale layer was informed by TVB-style computation. I have made efforts to comply with the licenses of the open-source projects on which this work depends, but I may still have overlooked some details. If you notice any issue or believe any attribution or reuse requirement has not been handled correctly, please contact me at [gluciferd@gmail.com](mailto:gluciferd@gmail.com).
+
 ## Architecture
 
-coming soon...
+### Frontend modeling
+
+At the micro scale, the frontend follows the style of the NEURON simulator. In contrast to a general-purpose interactive simulator frontend, this layer is intentionally focused on the computational objects required for execution.
+
+At the macro scale, brain regions are represented as first-class region-of-interest (ROI) objects, and inter-regional interactions are created explicitly as connections between ROI objects. Neural mass models specify the intrinsic dynamics of each ROI using a code-generation style similar in spirit to GeNN: equations are provided at the frontend and compiled into backend kernels. Coupling rules between ROIs, as well as bridge rules between macro-scale and micro-scale components, are supplied by `.mod` files and processed by a dedicated MIND_Sim translator.
+
+This separation between intrinsic ROI dynamics, inter-ROI coupling, and cross-scale exchange makes the modeling interface more flexible, particularly in a field that is still evolving and does not yet have fully settled modeling conventions.
+
+### Backend
+
+The backend currently supports CPU execution on a single core, as well as a GPU mode. Because the dominant computational cost lies in the micro-scale simulation, GPU acceleration is applied only to the micro component. The remaining backend pipeline runs on the CPU, and in the examples tested so far its throughput is sufficient to overlap the macro-scale computation. Micro computation is handled by CoreNEURON, while the macro layer currently supports only discrete-node ROIs.
 
 ## Performance
 
@@ -37,6 +49,6 @@ The current examples and tests are still incomplete, and the macro and bridge AP
 
 ## Acknowledgements
 
-I acknowledge the contributions of simulators such as **[NEURON](https://github.com/neuronsimulator/nrn)**, **[GeNN](https://github.com/genn-team/genn)** and **[TVB](https://github.com/the-virtual-brain/tvb-root)** to computational neuroscience.
+I acknowledge the contributions of simulators such as **[NEURON](https://github.com/neuronsimulator/nrn)**, **[Arbor](https://github.com/arbor-sim/arbor/)**, **[GeNN](https://github.com/genn-team/genn)** and **[TVB](https://github.com/the-virtual-brain/tvb-root)** to computational neuroscience.
 
 This is a project developed during my learning process, and it draws on many existing ideas and implementations. In the future, I plan to redevelop the entire framework based on my own understanding.
