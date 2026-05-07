@@ -15,9 +15,11 @@ struct CouplingGraph {
     std::vector<int> targets{};
     std::vector<int> target_edge_offsets{};
     std::vector<int> edge_sources{};
-    std::vector<float> edge_weights{};
+    std::vector<double> edge_weights{};
     std::vector<int> edge_delay_steps{};
     std::vector<int> edge_delay_offsets{};
+    std::vector<int> read_exposure_offsets{};
+    std::vector<int> write_input_offsets{};
     int max_delay_steps{0};
 };
 
@@ -28,7 +30,7 @@ struct CouplingRuntime {
 
 struct DcInputEntry {
     int offset{0};
-    float value{0.0F};
+    double value{0.0};
 };
 
 struct CouplingEvaluationGraph {
@@ -64,29 +66,30 @@ struct RegionGroup {
 void apply_couplings(const CouplingEvaluation& evaluation,
                      int roi_count,
                      int input_count,
+                     int exposure_count,
                      int step,
-                     const std::vector<float>& history,
-                     std::vector<float>& input_soa);
+                     const std::vector<double>& history,
+                     std::vector<double>& input_soa);
 
-[[nodiscard]] std::vector<float> exposure_buffers_to_soa(
+[[nodiscard]] std::vector<double> exposure_buffers_to_soa(
     const std::vector<mind_sim::macro::sim::ScalarBuffer>& exposures,
     int roi_count,
     int exposure_count);
 
-void initialize_history(std::vector<float>& history,
+void initialize_history(std::vector<double>& history,
                         int history_capacity,
                         int roi_count,
                         int exposure_count,
-                        const std::vector<float>& exposure_soa);
+                        const std::vector<double>& exposure_soa);
 
-void write_history_slot(std::vector<float>& history,
+void write_history_slot(std::vector<double>& history,
                         int slot,
                         int roi_count,
                         int exposure_count,
-                        const std::vector<float>& exposure_soa);
+                        const std::vector<double>& exposure_soa);
 
 void append_exposure_record(mind_sim::macro::sim::ExposureRecord& record,
-                            const std::vector<float>& exposure_soa);
+                            const std::vector<double>& exposure_soa);
 
 [[nodiscard]] std::vector<RegionGroup> build_region_groups(
     const std::vector<mind_sim::macro::frontend::RegionOwner>& owners);

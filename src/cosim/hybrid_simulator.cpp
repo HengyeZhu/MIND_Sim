@@ -100,11 +100,12 @@ void prepare_micro_events_for_batch(
     const mind_sim::macro::sim::CouplingEvaluation& micro_coupling_evaluation,
     int roi_count,
     int input_count,
+    int exposure_count,
     int batch_start,
     int batch_stop,
     double dt_macro,
-    const std::vector<float>& history,
-    std::vector<float>& micro_input_soa,
+    const std::vector<double>& history,
+    std::vector<double>& micro_input_soa,
     std::vector<mind_sim::macro::frontend::MicroCircuitOwner>& micro_circuits,
     std::vector<mind_sim::micro::sim::MicroEventTable>& prepared_events) {
     clear_event_tables(prepared_events);
@@ -114,6 +115,7 @@ void prepare_micro_events_for_batch(
     apply_couplings(micro_coupling_evaluation,
                     roi_count,
                     input_count,
+                    exposure_count,
                     batch_start,
                     history,
                     micro_input_soa);
@@ -124,15 +126,20 @@ void prepare_micro_events_for_batch(
         auto& events = prepared_events[static_cast<std::size_t>(circuit_index)];
         for (int binding_index = 0; binding_index < static_cast<int>(circuit.bindings.size()); ++binding_index) {
             auto& binding = circuit.bindings[static_cast<std::size_t>(binding_index)];
+            if (!binding.input_rule) {
+                continue;
+            }
             binding.input_rule->apply(micro_input_soa,
                                       roi_count,
                                       binding.roi_index,
                                       binding.input_state,
                                       binding.input_params,
+                                      binding.input_random_streams,
                                       batch_start_time,
                                       batch_stop_time,
                                       binding.input_port_bases,
-                                      events);
+                                      events,
+                                      binding.input_read_offsets);
         }
     }
 }
@@ -247,6 +254,9 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
         const auto& circuit = micro_circuits[static_cast<std::size_t>(circuit_index)];
         for (int binding_index = 0; binding_index < static_cast<int>(circuit.bindings.size()); ++binding_index) {
             const int roi = circuit.bindings[static_cast<std::size_t>(binding_index)].roi_index;
+            if (!circuit.bindings[static_cast<std::size_t>(binding_index)].output_rule) {
+                throw std::runtime_error("micro ROI is missing an output mod connection");
+            }
             micro_for_roi[static_cast<std::size_t>(roi)] = circuit_index;
             micro_roi_indices.push_back(roi);
         }
@@ -273,9 +283,9 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
                                         roi_count,
                                         input_count,
                                         network_.dc_inputs());
-    std::vector<float> history(
+    std::vector<double> history(
         static_cast<std::size_t>(coupling_runtime.history_capacity * roi_count * exposure_count),
-        0.0F);
+        0.0);
     auto current_exposure_soa =
         exposure_buffers_to_soa(network_.initial_exposures(), roi_count, exposure_count);
     initialize_history(history,
@@ -284,8 +294,14 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
                        exposure_count,
                        current_exposure_soa);
 
-    std::vector<float> current_input_soa;
-    apply_couplings(region_coupling_evaluation, roi_count, input_count, 0, history, current_input_soa);
+    std::vector<double> current_input_soa;
+    apply_couplings(region_coupling_evaluation,
+                    roi_count,
+                    input_count,
+                    exposure_count,
+                    0,
+                    history,
+                    current_input_soa);
 
     auto region_groups = build_region_groups(region_owners);
 
@@ -320,9 +336,9 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
         micro_binding_spikes.emplace_back(binding_count);
         micro_binding_views.emplace_back(binding_count);
     }
-    std::vector<float> micro_input_soa;
-    std::vector<float> next_input_soa;
-    std::vector<float> micro_exposure_soa(current_exposure_soa.size(), 0.0F);
+    std::vector<double> micro_input_soa;
+    std::vector<double> next_input_soa;
+    std::vector<double> micro_exposure_soa(current_exposure_soa.size(), 0.0);
     std::vector<std::size_t> micro_exposure_offsets;
     micro_exposure_offsets.reserve(
         micro_roi_indices.size() * static_cast<std::size_t>(exposure_count));
@@ -342,6 +358,7 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
         prepare_micro_events_for_batch(micro_coupling_evaluation,
                                        roi_count,
                                        input_count,
+                                       exposure_count,
                                        0,
                                        first_batch_stop,
                                        dt_macro_,
@@ -360,6 +377,7 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
             prepare_micro_events_for_batch(micro_coupling_evaluation,
                                            roi_count,
                                            input_count,
+                                           exposure_count,
                                            batch_start,
                                            batch_stop,
                                            dt_macro_,
@@ -406,6 +424,7 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
             apply_couplings(region_coupling_evaluation,
                             roi_count,
                             input_count,
+                            exposure_count,
                             step + 1,
                             history,
                             current_input_soa);
@@ -416,12 +435,14 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
             apply_couplings(region_coupling_evaluation,
                             roi_count,
                             input_count,
+                            exposure_count,
                             batch_stop,
                             history,
                             next_input_soa);
             prepare_micro_events_for_batch(micro_coupling_evaluation,
                                            roi_count,
                                            input_count,
+                                           exposure_count,
                                            batch_stop,
                                            next_batch_stop,
                                            dt_macro_,
@@ -454,7 +475,8 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
                                            binding.output_state,
                                            binding.output_params,
                                            batch_start_time,
-                                           batch_stop_time);
+                                           batch_stop_time,
+                                           binding.output_write_offsets);
             }
             if (record_micro_spikes_) {
                 const auto& binding_views =
@@ -488,6 +510,7 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
             apply_couplings(region_coupling_evaluation,
                             roi_count,
                             input_count,
+                            exposure_count,
                             batch_stop,
                             history,
                             current_input_soa);

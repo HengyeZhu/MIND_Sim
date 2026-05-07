@@ -6,9 +6,11 @@
 #include "macro/sim/runtime.hpp"
 #include "morph/section_distance.hpp"
 #include "morph/section_spec.hpp"
-#include "bridge/sim/rule_codegen.hpp"
 #include "io/result_hdf5.hpp"
 #include "macro/sim/rule_codegen.hpp"
+#include "mind_mod/abi.hpp"
+#include "mind_mod/rule_mod.hpp"
+#include "utils/dynamic_library.hpp"
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
@@ -42,6 +44,8 @@ using mind_sim::macro::sim::CouplingRule;
 using mind_sim::macro::sim::MacroRuntime;
 using mind_sim::macro::sim::RegionRule;
 using mind_sim::macro::sim::ScalarBuffer;
+using mind_sim::bridge::sim::RandomStreamBinding;
+using mind_sim::bridge::sim::RandomStreamRule;
 using mind_micro_biophysical::ObjectOpKind;
 using mind_micro_biophysical::ParamList;
 using mind_micro_biophysical::ParamValue;
@@ -897,24 +901,107 @@ void network_bind_micro_roi(Network& network,
                             int micro_circuit_index,
                             const ROI& roi,
                             const std::vector<int>& gid_range_begins,
-                            const std::vector<int>& gid_range_ends,
-                            const std::shared_ptr<mind_sim::bridge::sim::MicroInputRule>& input_rule,
-                            std::vector<double> input_state,
-                            std::vector<double> input_params,
-                            std::vector<int> input_port_bases,
-                            const std::shared_ptr<mind_sim::bridge::sim::MicroOutputRule>& output_rule,
-                            std::vector<double> output_state,
-                            std::vector<double> output_params) {
+                            const std::vector<int>& gid_range_ends) {
     network.bind_micro_roi(micro_circuit_index,
                            roi,
-                           make_gid_ranges(gid_range_begins, gid_range_ends),
-                           input_rule,
-                           std::move(input_state),
-                           std::move(input_params),
-                           std::move(input_port_bases),
-                           output_rule,
-                           std::move(output_state),
-                           std::move(output_params));
+                           make_gid_ranges(gid_range_begins, gid_range_ends));
+}
+
+void network_configure_micro_input_rule(
+    Network& network,
+    const ROI& roi,
+    std::shared_ptr<mind_sim::bridge::sim::MicroInputRule> input_rule,
+    std::vector<double> input_state,
+    std::vector<double> input_params,
+    const std::vector<std::shared_ptr<RandomStreamRule>>& random_rules,
+    std::vector<std::vector<double>> random_states,
+    std::vector<int> input_port_bases,
+    std::vector<int> input_read_offsets) {
+    if (random_rules.size() != random_states.size()) {
+        throw std::runtime_error("random provider/state vectors must have the same size");
+    }
+    std::vector<RandomStreamBinding> random_streams;
+    random_streams.reserve(random_rules.size());
+    for (std::size_t index = 0; index < random_rules.size(); ++index) {
+        random_streams.push_back(RandomStreamBinding{
+            .rule = random_rules[index],
+            .state = std::move(random_states[index]),
+        });
+    }
+    network.configure_micro_input_rule(roi,
+                                       std::move(input_rule),
+                                       std::move(input_state),
+                                       std::move(input_params),
+                                       std::move(random_streams),
+                                       std::move(input_port_bases),
+                                       std::move(input_read_offsets));
+}
+
+std::string abi_kind_name(int kind) {
+    if (kind == static_cast<int>(mind_sim::mind_mod::AbiRuleKind::Coupling)) {
+        return "coupling";
+    }
+    if (kind == static_cast<int>(mind_sim::mind_mod::AbiRuleKind::MicroInput)) {
+        return "micro_input";
+    }
+    if (kind == static_cast<int>(mind_sim::mind_mod::AbiRuleKind::MicroOutput)) {
+        return "micro_output";
+    }
+    throw std::runtime_error("unknown compiled MindMod kind");
+}
+
+std::vector<std::string> abi_names(int count, const char* const* names) {
+    std::vector<std::string> out;
+    out.reserve(static_cast<std::size_t>(count));
+    for (int index = 0; index < count; ++index) {
+        out.emplace_back(names[index]);
+    }
+    return out;
+}
+
+std::vector<double> abi_defaults(int count, const double* values) {
+    std::vector<double> out;
+    out.reserve(static_cast<std::size_t>(count));
+    for (int index = 0; index < count; ++index) {
+        out.push_back(values[index]);
+    }
+    return out;
+}
+
+nb::dict mind_mod_descriptor_to_dict(const mind_sim::mind_mod::AbiRuleDescriptor& descriptor) {
+    if (descriptor.abi_version != mind_sim::mind_mod::kMindModAbiVersion) {
+        throw std::runtime_error("compiled MindMod ABI version mismatch");
+    }
+    nb::dict out;
+    out["kind"] = abi_kind_name(descriptor.kind);
+    out["name"] = std::string(descriptor.name);
+    out["read"] = abi_names(descriptor.read_count, descriptor.read_names);
+    out["write"] = abi_names(descriptor.write_count, descriptor.write_names);
+    out["emit"] = abi_names(descriptor.emit_count, descriptor.emit_names);
+    out["random"] = abi_names(descriptor.random_count, descriptor.random_names);
+    out["param_names"] = abi_names(descriptor.param_count, descriptor.param_names);
+    out["param_defaults"] = abi_defaults(descriptor.param_count, descriptor.param_defaults);
+    out["state_names"] = abi_names(descriptor.state_count, descriptor.state_names);
+    out["state_defaults"] = abi_defaults(descriptor.state_count, descriptor.state_defaults);
+    return out;
+}
+
+nb::dict inspect_mind_mod_library(const std::string& library_path) {
+    auto library = mind_sim::utils::load_dynamic_library(library_path);
+    const auto descriptor_fn =
+        reinterpret_cast<mind_sim::mind_mod::DescriptorFn>(library->symbol("mind_rule_descriptor"));
+    const auto* descriptor = descriptor_fn();
+    if (!descriptor) {
+        throw std::runtime_error("compiled MindMod returned a null descriptor");
+    }
+    return mind_mod_descriptor_to_dict(*descriptor);
+}
+
+nb::dict region_rule_fields_to_dict(const mind_sim::macro::sim::codegen::RegionRuleFields& fields) {
+    nb::dict out;
+    out["inputs"] = fields.inputs;
+    out["exposures"] = fields.exposures;
+    return out;
 }
 
 }  // namespace
@@ -933,28 +1020,23 @@ NB_MODULE(_native, m) {
           nb::arg("states"),
           nb::arg("params"),
           nb::arg("update"));
-    m.def("_codegen_coupling_projection_rule_source",
-          &mind_sim::macro::sim::codegen::coupling_projection_rule_source,
-          nb::arg("inputs"),
-          nb::arg("exposures"),
-          nb::arg("params"),
-          nb::arg("edge"),
-          nb::arg("finish"),
-          nb::arg("roi_count"));
-    m.def("_codegen_micro_input_rule_source",
-          &mind_sim::bridge::sim::codegen::micro_input_rule_source,
-          nb::arg("inputs"),
-          nb::arg("ports"),
+    m.def("_inspect_region_rule_fields",
+          [](const std::vector<std::string>& states,
+             const std::vector<std::string>& params,
+             const std::string& update) {
+              return region_rule_fields_to_dict(
+                  mind_sim::macro::sim::codegen::region_rule_fields(states, params, update));
+          },
           nb::arg("states"),
           nb::arg("params"),
-          nb::arg("emit"));
-    m.def("_codegen_micro_output_rule_source",
-          &mind_sim::bridge::sim::codegen::micro_output_rule_source,
-          nb::arg("exposures"),
-          nb::arg("states"),
-          nb::arg("params"),
-          nb::arg("spike"),
-          nb::arg("finish"));
+          nb::arg("update"));
+    m.def("_translate_mind_mod_to_cpp",
+          &mind_sim::mind_mod::compiled_rule_source,
+          nb::arg("source"),
+          nb::arg("origin"));
+    m.def("_inspect_mind_mod_library",
+          &inspect_mind_mod_library,
+          nb::arg("library_path"));
 
     nb::class_<ScalarBuffer>(m, "ScalarBuffer")
         .def(nb::init<>())
@@ -967,7 +1049,7 @@ NB_MODULE(_native, m) {
              nb::arg("exposure_id"))
         .def("set",
              [](ScalarBuffer& buffer, int exposure_id, double value) {
-                 buffer.at(exposure_id, "ScalarBuffer.set") = static_cast<float>(value);
+                 buffer.at(exposure_id, "ScalarBuffer.set") = value;
              },
              nb::arg("exposure_id"),
              nb::arg("value"))
@@ -1033,20 +1115,11 @@ NB_MODULE(_native, m) {
         .def_prop_ro("param_count", &CouplingRule::param_count)
         .def_prop_ro("library_path", &CouplingRule::library_path);
 
-    m.def("_load_coupling_rule",
-          [](const std::string& name,
-             const std::string& library_path,
-             int input_count,
-             int exposure_count,
-             int param_count) {
-              return std::make_shared<CouplingRule>(
-                  name, library_path, input_count, exposure_count, param_count);
+    m.def("_load_compiled_coupling_rule",
+          [](const std::string& library_path) {
+              return std::make_shared<CouplingRule>(library_path);
           },
-          nb::arg("name"),
-          nb::arg("library_path"),
-          nb::arg("input_count"),
-          nb::arg("exposure_count"),
-          nb::arg("param_count"));
+          nb::arg("library_path"));
 
     nb::class_<mind_sim::bridge::sim::MicroInputRule>(m, "_MicroInputRule")
         .def_prop_ro("name", &mind_sim::bridge::sim::MicroInputRule::name)
@@ -1054,24 +1127,25 @@ NB_MODULE(_native, m) {
         .def_prop_ro("state_count", &mind_sim::bridge::sim::MicroInputRule::state_count)
         .def_prop_ro("param_count", &mind_sim::bridge::sim::MicroInputRule::param_count)
         .def_prop_ro("input_port_count", &mind_sim::bridge::sim::MicroInputRule::input_port_count)
+        .def_prop_ro("random_count", &mind_sim::bridge::sim::MicroInputRule::random_count)
         .def_prop_ro("library_path", &mind_sim::bridge::sim::MicroInputRule::library_path);
 
-    m.def("_load_micro_input_rule",
-          [](const std::string& name,
-             const std::string& library_path,
-             int input_count,
-             int state_count,
-             int param_count,
-             int input_port_count) {
-              return std::make_shared<mind_sim::bridge::sim::MicroInputRule>(
-                  name, library_path, input_count, state_count, param_count, input_port_count);
+    m.def("_load_compiled_micro_input_rule",
+          [](const std::string& library_path) {
+              return std::make_shared<mind_sim::bridge::sim::MicroInputRule>(library_path);
           },
-          nb::arg("name"),
+          nb::arg("library_path"));
+
+    nb::class_<RandomStreamRule>(m, "_RandomStreamRule")
+        .def_prop_ro("state_count", &RandomStreamRule::state_count)
+        .def_prop_ro("library_path", &RandomStreamRule::library_path);
+
+    m.def("_load_random_stream_rule",
+          [](const std::string& library_path, int state_count) {
+              return std::make_shared<RandomStreamRule>(library_path, state_count);
+          },
           nb::arg("library_path"),
-          nb::arg("input_count"),
-          nb::arg("state_count"),
-          nb::arg("param_count"),
-          nb::arg("input_port_count"));
+          nb::arg("state_count"));
 
     nb::class_<mind_sim::bridge::sim::MicroOutputRule>(m, "_MicroOutputRule")
         .def_prop_ro("name", &mind_sim::bridge::sim::MicroOutputRule::name)
@@ -1080,25 +1154,16 @@ NB_MODULE(_native, m) {
         .def_prop_ro("param_count", &mind_sim::bridge::sim::MicroOutputRule::param_count)
         .def_prop_ro("library_path", &mind_sim::bridge::sim::MicroOutputRule::library_path);
 
-    m.def("_load_micro_output_rule",
-          [](const std::string& name,
-             const std::string& library_path,
-             int exposure_count,
-             int state_count,
-             int param_count) {
-              return std::make_shared<mind_sim::bridge::sim::MicroOutputRule>(
-                  name, library_path, exposure_count, state_count, param_count);
+    m.def("_load_compiled_micro_output_rule",
+          [](const std::string& library_path) {
+              return std::make_shared<mind_sim::bridge::sim::MicroOutputRule>(library_path);
           },
-          nb::arg("name"),
-          nb::arg("library_path"),
-          nb::arg("exposure_count"),
-          nb::arg("state_count"),
-          nb::arg("param_count"));
+          nb::arg("library_path"));
 
     nb::class_<Connectivity>(m, "Connectivity")
         .def(nb::init<std::vector<std::string>,
-                      std::vector<std::vector<float>>,
-                      std::vector<std::vector<float>>>(),
+                      std::vector<std::vector<double>>,
+                      std::vector<std::vector<double>>>(),
              nb::arg("labels"),
              nb::arg("weights"),
              nb::arg("delays"))
@@ -1111,8 +1176,8 @@ NB_MODULE(_native, m) {
 
     nb::class_<Network>(m, "_Network")
         .def(nb::init<std::vector<std::string>,
-                      std::vector<std::vector<float>>,
-                      std::vector<std::vector<float>>,
+                      std::vector<std::vector<double>>,
+                      std::vector<std::vector<double>>,
                       std::vector<std::string>,
                       std::vector<std::string>,
                       std::vector<int>>(),
@@ -1162,19 +1227,12 @@ NB_MODULE(_native, m) {
              nb::arg("value"))
         .def("couple",
              &Network::couple,
-             nb::arg("source_rois"),
-             nb::arg("target_rois"),
-             nb::arg("rule"),
-             nb::arg("params"))
-        .def("couple_all",
-             &Network::couple_all,
-             nb::arg("rule"),
-             nb::arg("params"))
-        .def("couple_from",
-             &Network::couple_from,
              nb::arg("source_roi"),
+             nb::arg("target_roi"),
              nb::arg("rule"),
-             nb::arg("params"))
+             nb::arg("params"),
+             nb::arg("read_exposure_offsets"),
+             nb::arg("write_input_offsets"))
         .def("use_region_rule",
              &Network::use_region_rule,
              nb::arg("roi"),
@@ -1190,14 +1248,24 @@ NB_MODULE(_native, m) {
              nb::arg("micro_circuit_index"),
              nb::arg("roi"),
              nb::arg("gid_range_begins"),
-             nb::arg("gid_range_ends"),
+             nb::arg("gid_range_ends"))
+        .def("configure_micro_input_rule",
+             &network_configure_micro_input_rule,
+             nb::arg("roi"),
              nb::arg("input_rule"),
              nb::arg("input_state"),
              nb::arg("input_params"),
+             nb::arg("random_rules"),
+             nb::arg("random_states"),
              nb::arg("input_port_bases"),
+             nb::arg("input_read_offsets"))
+        .def("configure_micro_output_rule",
+             &Network::configure_micro_output_rule,
+             nb::arg("roi"),
              nb::arg("output_rule"),
              nb::arg("output_state"),
-             nb::arg("output_params"))
+             nb::arg("output_params"),
+             nb::arg("output_write_offsets"))
         .def("roi_index", &Network::roi_index, nb::arg("label"))
         .def("roi_count", &Network::roi_count)
         .def("weight_at", &Network::weight_at, nb::arg("target_roi"), nb::arg("source_roi"))

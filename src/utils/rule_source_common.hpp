@@ -7,7 +7,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -26,14 +25,6 @@ struct Token {
     std::string text{};
     int line{1};
     int column{1};
-};
-
-struct Schema {
-    std::vector<std::string> inputs{};
-    std::vector<std::string> exposures{};
-    std::vector<std::string> states{};
-    std::vector<std::string> params{};
-    std::vector<std::string> ports{};
 };
 
 inline const std::unordered_set<std::string>& cpp_reserved() {
@@ -99,42 +90,7 @@ inline const std::unordered_set<std::string>& helper_symbols() {
         "abs", "acos", "asin", "atan", "atan2", "ceil", "clamp", "cos", "cosh", "erf",
         "erfc", "exp", "expm1", "fabs", "floor", "fmax", "fmin", "isfinite", "isinf",
         "isnan", "log", "log10", "log1p", "max", "min", "pow", "round", "sigmoid",
-        "sin", "sinh", "sqrt", "tan", "tanh", "pi",
-    };
-    return values;
-}
-
-inline const std::unordered_set<std::string>& region_runtime_symbols() {
-    static const std::unordered_set<std::string> values{
-        "s", "p", "in", "out", "t", "dt", "roi",
-    };
-    return values;
-}
-
-inline const std::unordered_set<std::string>& coupling_edge_runtime_symbols() {
-    static const std::unordered_set<std::string> values{
-        "src", "dst", "in", "edge", "p",
-    };
-    return values;
-}
-
-inline const std::unordered_set<std::string>& coupling_finish_runtime_symbols() {
-    static const std::unordered_set<std::string> values{
-        "dst", "in", "p",
-    };
-    return values;
-}
-
-inline const std::unordered_set<std::string>& input_runtime_symbols() {
-    static const std::unordered_set<std::string> values{
-        "in", "s", "p", "window", "emit",
-    };
-    return values;
-}
-
-inline const std::unordered_set<std::string>& exposure_runtime_symbols() {
-    static const std::unordered_set<std::string> values{
-        "spike", "s", "p", "out", "window",
+        "sin", "sinh", "sqrt", "tan", "tanh", "uniform", "pi",
     };
     return values;
 }
@@ -178,25 +134,6 @@ inline std::vector<std::string> names(const std::vector<std::string>& values, st
         }
         out.push_back(name);
     }
-    return out;
-}
-
-inline Schema schema(std::string_view kind,
-              const std::vector<std::string>& inputs,
-              const std::vector<std::string>& exposures,
-              const std::vector<std::string>& states,
-              const std::vector<std::string>& params,
-              const std::unordered_set<std::string>& runtime_symbols,
-              bool require_exposures = true) {
-    Schema out;
-    out.inputs = names(inputs, "input");
-    out.exposures = names(exposures, "exposure");
-    out.states = names(states, "state");
-    out.params = names(params, "param");
-    if (require_exposures && out.exposures.empty()) {
-        throw std::runtime_error(std::string(kind) + " requires at least one exposure");
-    }
-    (void)runtime_symbols;
     return out;
 }
 
@@ -508,110 +445,6 @@ inline std::unordered_set<std::string> member_set(std::initializer_list<const ch
     return out;
 }
 
-using MemberMap = std::unordered_map<std::string, std::unordered_set<std::string>>;
-
-struct MemberUsage {
-    std::unordered_map<std::string, std::unordered_set<std::string>> fields{};
-};
-
-inline MemberMap region_members(const Schema& schema_value) {
-    return {
-        {"in", member_set(schema_value.inputs)},
-        {"out", member_set(schema_value.exposures)},
-        {"s", member_set(schema_value.states)},
-        {"p", member_set(schema_value.params)},
-    };
-}
-
-inline MemberMap coupling_edge_members(const Schema& schema_value) {
-    return {
-        {"src", member_set(schema_value.exposures)},
-        {"dst", member_set(schema_value.exposures)},
-        {"in", member_set(schema_value.inputs)},
-        {"p", member_set(schema_value.params)},
-        {"edge", member_set({"weight", "delay_steps", "source_roi", "target_roi"})},
-    };
-}
-
-inline MemberMap coupling_finish_members(const Schema& schema_value) {
-    return {
-        {"dst", member_set(schema_value.exposures)},
-        {"in", member_set(schema_value.inputs)},
-        {"p", member_set(schema_value.params)},
-    };
-}
-
-inline MemberMap input_members(const Schema& schema_value, const std::vector<std::string>& ports) {
-    return {
-        {"in", member_set(schema_value.inputs)},
-        {"s", member_set(schema_value.states)},
-        {"p", member_set(schema_value.params)},
-        {"window", member_set({"start", "stop", "duration"})},
-        {"emit", member_set(ports)},
-    };
-}
-
-inline MemberMap exposure_members(const Schema& schema_value) {
-    return {
-        {"spike", member_set({"t", "gid"})},
-        {"s", member_set(schema_value.states)},
-        {"p", member_set(schema_value.params)},
-        {"out", member_set(schema_value.exposures)},
-        {"window", member_set({"start", "stop", "duration"})},
-    };
-}
-
-inline MemberUsage validate_code(std::string_view kind,
-                          const std::string& code,
-                          const std::unordered_set<std::string>& runtime_symbols,
-                          const MemberMap& members) {
-    const auto tokens = scan(code, kind);
-    check_balanced(tokens, kind);
-    const auto locals = declared_locals(tokens, kind);
-    MemberUsage usage;
-
-    std::unordered_set<std::string> allowed = runtime_symbols;
-    allowed.insert(locals.begin(), locals.end());
-    allowed.insert(keywords().begin(), keywords().end());
-    allowed.insert(type_words().begin(), type_words().end());
-    allowed.insert(helper_symbols().begin(), helper_symbols().end());
-
-    for (std::size_t index = 0; index < tokens.size(); ++index) {
-        const auto& token = tokens[index];
-        if (token.kind != TokenKind::Identifier) {
-            continue;
-        }
-        if (index > 0 && tokens[index - 1].text == ".") {
-            continue;
-        }
-        if (contains(forbidden_identifiers(), token.text)) {
-            fail(kind, token, "unsupported C++ construct '" + token.text + "'");
-        }
-        if (index + 1 < tokens.size() && tokens[index + 1].text == ".") {
-            const auto member_iter = members.find(token.text);
-            if (member_iter == members.end()) {
-                fail(kind, token, "member access is not supported for '" + token.text + "'");
-            }
-            if (index + 2 >= tokens.size() || tokens[index + 2].kind != TokenKind::Identifier) {
-                fail(kind, token, "member access requires a field name after '.'");
-            }
-            const auto& field = tokens[index + 2];
-            if (!contains(member_iter->second, field.text)) {
-                fail(kind, field, "unknown member '" + token.text + "." + field.text + "'");
-            }
-            usage.fields[token.text].insert(field.text);
-            continue;
-        }
-        if (members.find(token.text) != members.end()) {
-            fail(kind, token, "object '" + token.text + "' requires explicit member access");
-        }
-        if (!contains(allowed, token.text)) {
-            fail(kind, token, "unknown symbol '" + token.text + "'");
-        }
-    }
-    return usage;
-}
-
 inline std::string common_helpers() {
     return R"cpp(
 #include <algorithm>
@@ -665,74 +498,8 @@ static inline Value clamp(Value value, Low low, High high) {
 static inline double sigmoid(double x) {
     return 1.0 / (1.0 + std::exp(-x));
 }
+
 )cpp";
-}
-
-inline std::string value_struct(const std::string& name,
-                         const std::vector<std::string>& fields,
-                         const std::string& type) {
-    std::ostringstream out;
-    out << "struct " << name << " {\n";
-    for (const auto& field: fields) {
-        out << "    " << type << " " << field << ";\n";
-    }
-    out << "};\n";
-    return out.str();
-}
-
-inline std::string ref_struct(const std::string& name,
-                       const std::vector<std::string>& fields,
-                       const std::string& type) {
-    std::ostringstream out;
-    out << "struct " << name << " {\n";
-    for (const auto& field: fields) {
-        out << "    " << type << "& " << field << ";\n";
-    }
-    out << "};\n";
-    return out.str();
-}
-
-inline std::string params_struct(const std::string& name, const std::vector<std::string>& fields) {
-    std::ostringstream out;
-    out << "struct " << name << " {\n";
-    for (const auto& field: fields) {
-        out << "    double " << field << ";\n";
-    }
-    out << "};\n";
-    return out.str();
-}
-
-inline std::string flat_ref_init(const std::string& type,
-                          const std::string& var,
-                          const std::vector<std::string>& fields,
-                          const std::string& data,
-                          int indent) {
-    std::ostringstream out;
-    out << std::string(static_cast<std::size_t>(indent), ' ') << type << " " << var << "{";
-    for (std::size_t field = 0; field < fields.size(); ++field) {
-        if (field != 0) {
-            out << ", ";
-        }
-        out << data << "[" << field << "]";
-    }
-    out << "};\n";
-    return out.str();
-}
-
-inline std::string flat_value_init(const std::string& type,
-                            const std::string& var,
-                            const std::vector<std::string>& fields,
-                            const std::string& data,
-                            int indent) {
-    return flat_ref_init(type, var, fields, data, indent);
-}
-
-inline std::string params_flat_init(const std::string& type,
-                             const std::string& var,
-                             const std::vector<std::string>& fields,
-                             const std::string& data,
-                             int indent) {
-    return flat_value_init(type, var, fields, data, indent);
 }
 
 inline int schema_field_index(const std::vector<std::string>& fields, const std::string& field) {
@@ -741,126 +508,6 @@ inline int schema_field_index(const std::vector<std::string>& fields, const std:
         throw std::runtime_error("internal codegen schema lookup failed for field: " + field);
     }
     return static_cast<int>(found - fields.begin());
-}
-
-inline std::string soa_ref_init_selected(const std::string& type,
-                                  const std::string& var,
-                                  const std::vector<std::string>& fields,
-                                  const std::vector<std::string>& schema_fields,
-                                  const std::string& data,
-                                  const std::string& stride,
-                                  const std::string& index,
-                                  int indent) {
-    std::ostringstream out;
-    out << std::string(static_cast<std::size_t>(indent), ' ') << type << " " << var << "{";
-    for (std::size_t field = 0; field < fields.size(); ++field) {
-        if (field != 0) {
-            out << ", ";
-        }
-        out << data << "[(" << schema_field_index(schema_fields, fields[field]) << " * "
-            << stride << ") + " << index << "]";
-    }
-    out << "};\n";
-    return out.str();
-}
-
-inline std::string soa_value_init_selected(const std::string& type,
-                                    const std::string& var,
-                                    const std::vector<std::string>& fields,
-                                    const std::vector<std::string>& schema_fields,
-                                    const std::string& data,
-                                    const std::string& stride,
-                                    const std::string& index,
-                                    int indent) {
-    return soa_ref_init_selected(type, var, fields, schema_fields, data, stride, index, indent);
-}
-
-inline std::string flat_ref_init_selected(const std::string& type,
-                                   const std::string& var,
-                                   const std::vector<std::string>& fields,
-                                   const std::vector<std::string>& schema_fields,
-                                   const std::string& data,
-                                   int indent) {
-    std::ostringstream out;
-    out << std::string(static_cast<std::size_t>(indent), ' ') << type << " " << var << "{";
-    for (std::size_t field = 0; field < fields.size(); ++field) {
-        if (field != 0) {
-            out << ", ";
-        }
-        out << data << "[" << schema_field_index(schema_fields, fields[field]) << "]";
-    }
-    out << "};\n";
-    return out.str();
-}
-
-inline std::string flat_value_init_selected(const std::string& type,
-                                     const std::string& var,
-                                     const std::vector<std::string>& fields,
-                                     const std::vector<std::string>& schema_fields,
-                                     const std::string& data,
-                                     int indent) {
-    return flat_ref_init_selected(type, var, fields, schema_fields, data, indent);
-}
-
-inline std::string params_soa_init_selected(const std::string& type,
-                                     const std::string& var,
-                                     const std::vector<std::string>& fields,
-                                     const std::vector<std::string>& schema_fields,
-                                     const std::string& data,
-                                     const std::string& stride,
-                                     const std::string& index,
-                                     int indent) {
-    return soa_value_init_selected(type, var, fields, schema_fields, data, stride, index, indent);
-}
-
-inline std::string state_soa_init_selected(const std::string& type,
-                                    const std::string& var,
-                                    const std::vector<std::string>& fields,
-                                    const std::vector<std::string>& schema_fields,
-                                    const std::string& data,
-                                    const std::string& stride,
-                                    const std::string& index,
-                                    int indent) {
-    return soa_ref_init_selected(type, var, fields, schema_fields, data, stride, index, indent);
-}
-
-inline std::string output_soa_init_selected(const std::string& type,
-                                     const std::string& var,
-                                     const std::vector<std::string>& fields,
-                                     const std::vector<std::string>& schema_fields,
-                                     const std::string& data,
-                                     const std::string& stride,
-                                     const std::string& index,
-                                     int indent) {
-    return soa_ref_init_selected(type, var, fields, schema_fields, data, stride, index, indent);
-}
-
-inline std::string input_soa_init_selected(const std::string& type,
-                                    const std::string& var,
-                                    const std::vector<std::string>& fields,
-                                    const std::vector<std::string>& schema_fields,
-                                    const std::string& data,
-                                    const std::string& stride,
-                                    const std::string& index,
-                                    int indent) {
-    return soa_value_init_selected(type, var, fields, schema_fields, data, stride, index, indent);
-}
-
-inline std::string soa_store_selected(const std::string& var,
-                               const std::vector<std::string>& fields,
-                               const std::vector<std::string>& schema_fields,
-                               const std::string& data,
-                               const std::string& stride,
-                               const std::string& index,
-                               int indent) {
-    std::ostringstream out;
-    const auto spaces = std::string(static_cast<std::size_t>(indent), ' ');
-    for (const auto& field: fields) {
-        out << spaces << data << "[(" << schema_field_index(schema_fields, field) << " * "
-            << stride << ") + " << index << "] = static_cast<float>(" << var << "."
-            << field << ");\n";
-    }
-    return out.str();
 }
 
 inline std::string indent_line(const std::string& line, int indent) {
@@ -875,40 +522,6 @@ inline std::string indent_block(const std::string& block, int indent) {
         out << indent_line(line, indent) << "\n";
     }
     return out.str();
-}
-
-inline void merge_usage(MemberUsage& total, const MemberUsage& part) {
-    for (const auto& [object, fields]: part.fields) {
-        auto& destination = total.fields[object];
-        destination.insert(fields.begin(), fields.end());
-    }
-}
-
-inline std::vector<std::string> used_fields(const std::vector<std::string>& fields,
-                                     const MemberUsage& usage,
-                                     const std::string& object) {
-    std::vector<std::string> out;
-    const auto found = usage.fields.find(object);
-    if (found == usage.fields.end()) {
-        return out;
-    }
-    for (const auto& field: fields) {
-        if (contains(found->second, field)) {
-            out.push_back(field);
-        }
-    }
-    return out;
-}
-
-inline void require_all_fields(std::string_view kind,
-                        std::string_view object,
-                        const std::vector<std::string>& used,
-                        const std::vector<std::string>& required) {
-    if (used.size() == required.size()) {
-        return;
-    }
-    throw std::runtime_error(std::string(kind) + " must write every declared " +
-                             std::string(object) + " field");
 }
 
 inline void require_declared_fields_used(std::string_view kind,
@@ -927,45 +540,8 @@ inline void require_declared_fields_used(std::string_view kind,
     }
 }
 
-inline std::vector<std::string> used_edge_fields(const MemberUsage& usage) {
-    static const std::vector<std::string> fields{
-        "weight",
-        "delay_steps",
-        "source_roi",
-        "target_roi",
-    };
-    return used_fields(fields, usage, "edge");
-}
-
 inline bool has_field(const std::vector<std::string>& fields, const std::string& field) {
     return std::find(fields.begin(), fields.end(), field) != fields.end();
-}
-
-inline std::string edge_struct(const std::vector<std::string>& fields) {
-    std::ostringstream out;
-    out << "struct mind_coupling_edge {\n";
-    for (const auto& field: fields) {
-        if (field == "weight") {
-            out << "    float weight;\n";
-        } else {
-            out << "    int " << field << ";\n";
-        }
-    }
-    out << "};\n";
-    return out.str();
-}
-
-inline std::string edge_init(const std::vector<std::string>& fields, int indent) {
-    std::ostringstream out;
-    out << std::string(static_cast<std::size_t>(indent), ' ') << "mind_coupling_edge edge{";
-    for (std::size_t index = 0; index < fields.size(); ++index) {
-        if (index != 0) {
-            out << ", ";
-        }
-        out << fields[index];
-    }
-    out << "};\n";
-    return out.str();
 }
 
 }  // namespace mind_sim::utils::rule_source

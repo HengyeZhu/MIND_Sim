@@ -1,11 +1,8 @@
 from . import _native
 from ._codegen import (
     Connectivity,
-    CouplingRule,
     MacroSimulator,
     MicroCircuit,
-    MicroInputRule,
-    MicroOutputRule,
     Network,
     RegionRule,
     ROI,
@@ -31,13 +28,10 @@ SimulationResult = _native.SimulationResult
 
 __all__ = [
     "Connectivity",
-    "CouplingRule",
     "ExposureRecord",
     "MacroSimulator",
     "MacroSimulationResult",
     "MicroCircuit",
-    "MicroInputRule",
-    "MicroOutputRule",
     "MicroSpikeTable",
     "Network",
     "RegionRule",

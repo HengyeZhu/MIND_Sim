@@ -35,9 +35,9 @@ mind_sim::macro::sim::MacroSimulationResult MacroRuntime::run(double t_stop, dou
     }
 
     const auto coupling_runtime = build_coupling_runtime(network_, dt_macro);
-    std::vector<float> history(
+    std::vector<double> history(
         static_cast<std::size_t>(coupling_runtime.history_capacity * roi_count * exposure_count),
-        0.0F);
+        0.0);
     auto current_exposure_soa =
         exposure_buffers_to_soa(network_.initial_exposures(), roi_count, exposure_count);
     initialize_history(history,
@@ -56,8 +56,14 @@ mind_sim::macro::sim::MacroSimulationResult MacroRuntime::run(double t_stop, dou
                                                                      roi_count,
                                                                      input_count,
                                                                      network_.dc_inputs());
-    std::vector<float> current_input_soa;
-    apply_couplings(coupling_evaluation, roi_count, input_count, 0, history, current_input_soa);
+    std::vector<double> current_input_soa;
+    apply_couplings(coupling_evaluation,
+                    roi_count,
+                    input_count,
+                    exposure_count,
+                    0,
+                    history,
+                    current_input_soa);
 
     MacroSimulationResult result;
     result.times.resize(static_cast<std::size_t>(step_count) + 1);
@@ -98,6 +104,7 @@ mind_sim::macro::sim::MacroSimulationResult MacroRuntime::run(double t_stop, dou
         apply_couplings(coupling_evaluation,
                         roi_count,
                         input_count,
+                        exposure_count,
                         step + 1,
                         history,
                         current_input_soa);

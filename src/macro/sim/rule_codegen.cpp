@@ -2,12 +2,235 @@
 
 #include "utils/rule_source_common.hpp"
 
+#include <unordered_set>
+
 namespace mind_sim::macro::sim::codegen {
 
 using namespace mind_sim::utils::rule_source;
 
+namespace {
+
+struct RegionAnalysis {
+    std::vector<std::string> inputs{};
+    std::vector<std::string> values{};
+    std::vector<std::string> locals{};
+    std::string code{};
+};
+
+void add_field(std::vector<std::string>& ordered,
+               std::unordered_set<std::string>& seen,
+               const std::string& field) {
+    if (seen.insert(field).second) {
+        ordered.push_back(field);
+    }
+}
+
+bool needs_space(const std::string& previous, const std::string& current) {
+    if (previous.empty()) {
+        return false;
+    }
+    if (current == ")" || current == "]" || current == "}" || current == ";" ||
+        current == "," || current == "." || current == "(" || current == "[") {
+        return false;
+    }
+    if (previous == "(" || previous == "[" || previous == "{" || previous == "." ||
+        previous == "!" || previous == "~") {
+        return false;
+    }
+    return true;
+}
+
+void require_unique_region_names(const std::vector<std::string>& states,
+                                 const std::vector<std::string>& params,
+                                 const std::vector<std::string>& inputs) {
+    std::unordered_set<std::string> seen;
+    for (const auto& name: states) {
+        if (!seen.insert(name).second) {
+            throw std::runtime_error("RegionRule duplicate name: " + name);
+        }
+    }
+    for (const auto& name: params) {
+        if (!seen.insert(name).second) {
+            throw std::runtime_error("RegionRule duplicate name: " + name);
+        }
+    }
+    for (const auto& name: inputs) {
+        if (!seen.insert(name).second) {
+            throw std::runtime_error("RegionRule duplicate name: " + name);
+        }
+    }
+}
+
+RegionAnalysis analyze_region_rule(const std::vector<std::string>& states,
+                                   const std::vector<std::string>& params,
+                                   const std::string& update) {
+    constexpr std::string_view kind = "RegionRule";
+    const auto state_fields = names(states, "state");
+    const auto param_fields = names(params, "param");
+    const auto state_set = member_set(state_fields);
+    const auto param_set = member_set(param_fields);
+    const auto tokens = scan(update, kind);
+    check_balanced(tokens, kind);
+
+    std::unordered_set<std::string> locals = declared_locals(tokens, kind);
+    std::vector<std::string> local_fields;
+    std::unordered_set<std::string> local_seen;
+    for (const auto& token: tokens) {
+        if (token.kind == TokenKind::Identifier && contains(locals, token.text)) {
+            add_field(local_fields, local_seen, token.text);
+        }
+    }
+
+    static const std::unordered_set<std::string> runtime{"t", "dt", "roi"};
+    std::ostringstream out;
+    std::string previous;
+    bool statement_start = true;
+    int paren_depth = 0;
+    int bracket_depth = 0;
+    RegionAnalysis analysis;
+    std::unordered_set<std::string> input_seen;
+    std::unordered_set<std::string> state_used;
+    std::unordered_set<std::string> param_used;
+
+    for (std::size_t index = 0; index < tokens.size(); ++index) {
+        const auto& token = tokens[index];
+        if (token.kind == TokenKind::Identifier && contains(forbidden_identifiers(), token.text)) {
+            fail(kind, token, "unsupported C++ construct '" + token.text + "'");
+        }
+        const bool top_level = paren_depth == 0 && bracket_depth == 0;
+        const bool member_access = index > 0 && tokens[index - 1].text == ".";
+        if (!member_access && index + 1 < tokens.size() && tokens[index + 1].text == ".") {
+            fail(kind,
+                 token,
+                 "ROI dynamics use bare equation names; member access like '" + token.text +
+                     ".' is not supported");
+        }
+        const bool local_assignment = statement_start && top_level &&
+                                      token.kind == TokenKind::Identifier &&
+                                      index + 1 < tokens.size() &&
+                                      tokens[index + 1].text == "=" &&
+                                      !member_access &&
+                                      !contains(state_set, token.text) &&
+                                      !contains(param_set, token.text) &&
+                                      !contains(locals, token.text) &&
+                                      !contains(runtime, token.text) &&
+                                      !contains(keywords(), token.text) &&
+                                      !contains(type_words(), token.text) &&
+                                      !contains(helper_symbols(), token.text);
+
+        if (local_assignment) {
+            names({token.text}, "local");
+            if (needs_space(previous, "double")) {
+                out << ' ';
+            }
+            out << "double";
+            previous = "double";
+            locals.insert(token.text);
+            add_field(local_fields, local_seen, token.text);
+        }
+
+        if (needs_space(previous, token.text)) {
+            out << ' ';
+        }
+        out << token.text;
+        previous = token.text;
+
+        if (token.kind == TokenKind::Identifier && !member_access) {
+            const bool is_known =
+                contains(locals, token.text) || contains(state_set, token.text) ||
+                contains(param_set, token.text) || contains(runtime, token.text) ||
+                contains(keywords(), token.text) || contains(type_words(), token.text) ||
+                contains(helper_symbols(), token.text);
+            if (contains(state_set, token.text)) {
+                state_used.insert(token.text);
+            } else if (contains(param_set, token.text)) {
+                param_used.insert(token.text);
+            } else if (!is_known) {
+                names({token.text}, "input");
+                add_field(analysis.inputs, input_seen, token.text);
+            }
+        }
+
+        if (token.text == "(") {
+            ++paren_depth;
+        } else if (token.text == ")" && paren_depth > 0) {
+            --paren_depth;
+        } else if (token.text == "[") {
+            ++bracket_depth;
+        } else if (token.text == "]" && bracket_depth > 0) {
+            --bracket_depth;
+        }
+
+        if ((token.text == ";" && top_level) || token.text == "{" || token.text == "}") {
+            statement_start = true;
+        } else {
+            statement_start = false;
+        }
+    }
+
+    std::vector<std::string> state_used_ordered;
+    for (const auto& field: state_fields) {
+        if (contains(state_used, field)) {
+            state_used_ordered.push_back(field);
+        }
+    }
+    std::vector<std::string> param_used_ordered;
+    for (const auto& field: param_fields) {
+        if (contains(param_used, field)) {
+            param_used_ordered.push_back(field);
+        }
+    }
+    require_declared_fields_used("RegionRule", "state", state_used_ordered, state_fields);
+    require_declared_fields_used("RegionRule", "param", param_used_ordered, param_fields);
+
+    analysis.values = state_fields;
+    std::unordered_set<std::string> value_seen = member_set(analysis.values);
+    for (const auto& local: local_fields) {
+        add_field(analysis.values, value_seen, local);
+    }
+    analysis.locals = std::move(local_fields);
+    analysis.code = out.str();
+    return analysis;
+}
+
+void require_subset_names(const std::vector<std::string>& values,
+                          const std::vector<std::string>& available,
+                          std::string_view what) {
+    const auto available_set = member_set(available);
+    for (const auto& value: values) {
+        if (!contains(available_set, value)) {
+            throw std::runtime_error(std::string("RegionRule unknown ") +
+                                     std::string(what) + ": " + value);
+        }
+    }
+}
+
+std::vector<std::string> intersection_ordered(const std::vector<std::string>& fields,
+                                              const std::vector<std::string>& available) {
+    const auto available_set = member_set(available);
+    std::vector<std::string> out;
+    for (const auto& field: fields) {
+        if (contains(available_set, field)) {
+            out.push_back(field);
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
 std::string kernel_name(const std::string& name, const std::string& what) {
     return names({name}, what).front();
+}
+
+RegionRuleFields region_rule_fields(const std::vector<std::string>& states,
+                                    const std::vector<std::string>& params,
+                                    const std::string& update) {
+    auto analysis = analyze_region_rule(states, params, update);
+    return RegionRuleFields{
+        .inputs = std::move(analysis.inputs),
+        .exposures = std::move(analysis.values),
+    };
 }
 
 std::string region_rule_source(const std::vector<std::string>& inputs,
@@ -15,274 +238,63 @@ std::string region_rule_source(const std::vector<std::string>& inputs,
                                const std::vector<std::string>& states,
                                const std::vector<std::string>& params,
                                const std::string& update) {
-    const auto schema_value =
-        schema("RegionRule", inputs, exposures, states, params, region_runtime_symbols());
-    const auto usage =
-        validate_code("RegionRule", update, region_runtime_symbols(), region_members(schema_value));
-    const auto input_fields = used_fields(schema_value.inputs, usage, "in");
-    const auto output_fields = used_fields(schema_value.exposures, usage, "out");
-    const auto state_fields = used_fields(schema_value.states, usage, "s");
-    const auto param_fields = used_fields(schema_value.params, usage, "p");
-    require_declared_fields_used("RegionRule", "state", state_fields, schema_value.states);
-    require_declared_fields_used("RegionRule", "param", param_fields, schema_value.params);
-    require_all_fields("RegionRule", "out", output_fields, schema_value.exposures);
+    auto analysis = analyze_region_rule(states, params, update);
+    const auto input_fields = names(inputs, "input");
+    const auto output_schema = names(exposures, "exposure");
+    const auto state_fields = names(states, "state");
+    const auto param_fields = names(params, "param");
+    require_unique_region_names(state_fields, param_fields, input_fields);
+    require_subset_names(analysis.inputs, input_fields, "input");
+    const auto output_fields = intersection_ordered(output_schema, analysis.values);
+    const auto state_set = member_set(state_fields);
+    const auto local_set = member_set(analysis.locals);
 
     std::ostringstream source;
     source << common_helpers();
-    if (!input_fields.empty()) {
-        source << value_struct("mind_region_input", input_fields, "double");
-    }
-    source << ref_struct("mind_region_output", output_fields, "float");
-    if (!state_fields.empty()) {
-        source << ref_struct("mind_region_state", state_fields, "double");
-    }
-    if (!param_fields.empty()) {
-        source << params_struct("mind_region_params", param_fields);
-    }
     source << R"cpp(
-extern "C" void mind_region_rule_step(
-    int owner_count,
+	extern "C" void mind_region_rule_step(
+	    int owner_count,
     const int* roi_indices,
     int roi_count,
     int input_count,
     int exposure_count,
-    const float* input_soa,
-    float* exposure_soa,
+    const double* input_soa,
+    double* exposure_soa,
     int state_count,
     double* state_soa,
     int param_count,
     const double* params_soa,
-    double t,
-    double dt) {
-    (void)input_count;
-    (void)exposure_count;
-    (void)state_count;
-    (void)param_count;
-    (void)t;
-    (void)dt;
-)cpp";
+	    double t,
+	    double dt) {
+	    (void)input_count;
+	    (void)exposure_count;
+	    (void)state_count;
+	    (void)param_count;
+	    (void)t;
+	    (void)dt;
+	)cpp";
     source << R"cpp(    for (int unit = 0; unit < owner_count; ++unit) {
         const int roi = roi_indices[unit];
-)cpp";
-    if (!input_fields.empty()) {
-        source << input_soa_init_selected("mind_region_input",
-                                          "in",
-                                          input_fields,
-                                          schema_value.inputs,
-                                          "input_soa",
-                                          "roi_count",
-                                          "roi",
-                                          8);
+	)cpp";
+    for (const auto& input: analysis.inputs) {
+        source << "        const double " << input << " = input_soa[("
+               << schema_field_index(input_fields, input) << " * roi_count) + roi];\n";
     }
-    source << output_soa_init_selected("mind_region_output",
-                                       "out",
-                                       output_fields,
-                                       schema_value.exposures,
-                                       "exposure_soa",
-                                       "roi_count",
-                                       "roi",
-                                       8);
-    if (!state_fields.empty()) {
-        source << state_soa_init_selected("mind_region_state",
-                                          "s",
-                                          state_fields,
-                                          schema_value.states,
-                                          "state_soa",
-                                          "owner_count",
-                                          "unit",
-                                          8);
+    for (std::size_t state = 0; state < state_fields.size(); ++state) {
+        source << "        double& " << state_fields[state] << " = state_soa[("
+               << state << " * owner_count) + unit];\n";
     }
-    if (!param_fields.empty()) {
-        source << params_soa_init_selected("mind_region_params",
-                                           "p",
-                                           param_fields,
-                                           schema_value.params,
-                                           "params_soa",
-                                           "owner_count",
-                                           "unit",
-                                           8);
+    for (std::size_t param = 0; param < param_fields.size(); ++param) {
+        source << "        const double " << param_fields[param] << " = params_soa[("
+               << param << " * owner_count) + unit];\n";
     }
-    source << indent_block(update, 8);
-    source << R"cpp(    }
-}
-)cpp";
-    return source.str();
-}
-
-std::string coupling_projection_rule_source(const std::vector<std::string>& inputs,
-                                            const std::vector<std::string>& exposures,
-                                            const std::vector<std::string>& params,
-                                            const std::string& edge,
-                                            const std::string& finish,
-                                            int roi_count) {
-    if (roi_count <= 0) {
-        throw std::runtime_error("CouplingRule projection requires positive roi_count");
-    }
-
-    const auto schema_value =
-        schema("CouplingRule", inputs, exposures, {}, params, coupling_edge_runtime_symbols());
-    const auto edge_usage =
-        validate_code("CouplingRule", edge, coupling_edge_runtime_symbols(), coupling_edge_members(schema_value));
-    const auto finish_usage =
-        validate_code("CouplingRule", finish, coupling_finish_runtime_symbols(), coupling_finish_members(schema_value));
-    MemberUsage usage = edge_usage;
-    merge_usage(usage, finish_usage);
-    const auto src_fields = used_fields(schema_value.exposures, edge_usage, "src");
-    const auto dst_fields = used_fields(schema_value.exposures, usage, "dst");
-    const auto input_fields = used_fields(schema_value.inputs, usage, "in");
-    const auto edge_fields = used_edge_fields(edge_usage);
-    const auto param_fields = used_fields(schema_value.params, usage, "p");
-    require_declared_fields_used("CouplingRule", "param", param_fields, schema_value.params);
-
-    std::ostringstream source;
-    source << common_helpers();
-    if (!src_fields.empty()) {
-        source << value_struct("mind_coupling_source", src_fields, "double");
-    }
-    if (!dst_fields.empty()) {
-        source << value_struct("mind_coupling_target", dst_fields, "double");
-    }
-    if (!input_fields.empty()) {
-        source << value_struct("mind_coupling_input", input_fields, "double");
-    }
-    if (!edge_fields.empty()) {
-        source << edge_struct(edge_fields);
-    }
-    source << params_struct("mind_coupling_params", schema_value.params);
-    source << "\nconstexpr int mind_roi_count = " << roi_count << ";\n";
-    source << "constexpr int mind_input_count = " << schema_value.inputs.size() << ";\n";
-    source << "constexpr int mind_exposure_count = " << schema_value.exposures.size() << ";\n";
-    source << R"cpp(
-extern "C" void mind_coupling_rule_apply(
-    int roi_count,
-    int input_count,
-    int exposure_count,
-    int history_capacity,
-    int step,
-    int target_count,
-    const int* target_indices,
-    const int* target_edge_offsets,
-    const int* edge_sources,
-    const float* edge_weights,
-    const int* edge_delay_steps,
-    const int* edge_delay_offsets,
-    const float* history,
-    float* inputs,
-    int param_count,
-    const double* params) {
-    (void)roi_count;
-    (void)input_count;
-    (void)exposure_count;
-    (void)target_count;
-    (void)target_indices;
-    (void)target_edge_offsets;
-    (void)edge_sources;
-    (void)edge_weights;
-    (void)edge_delay_steps;
-    (void)edge_delay_offsets;
-    (void)history;
-    (void)inputs;
-    (void)param_count;
-)cpp";
-    source << params_flat_init("mind_coupling_params", "p", schema_value.params, "params", 4);
-    if (!src_fields.empty() || !dst_fields.empty()) {
-        source << R"cpp(    constexpr int mind_history_stride = mind_exposure_count * mind_roi_count;
-    const int history_size = history_capacity * mind_history_stride;
-    const int current_history_offset = (step % history_capacity) * mind_history_stride;
-)cpp";
-    }
-    if (!dst_fields.empty()) {
-        source << R"cpp(    const float* target_history_slot = history + current_history_offset;
-)cpp";
-    }
-
-    source << R"cpp(    for (int target_pos = 0; target_pos < target_count; ++target_pos) {
-        const int target_roi = target_indices[target_pos];
-)cpp";
-
-    if (!input_fields.empty()) {
-        source << soa_value_init_selected("mind_coupling_input",
-                                          "in",
-                                          input_fields,
-                                          schema_value.inputs,
-                                          "inputs",
-                                          "mind_roi_count",
-                                          "target_roi",
-                                          8);
-    }
-    if (!dst_fields.empty()) {
-        source << soa_value_init_selected("mind_coupling_target",
-                                          "dst",
-                                          dst_fields,
-                                          schema_value.exposures,
-                                          "target_history_slot",
-                                          "mind_roi_count",
-                                          "target_roi",
-                                          8);
-    }
-
-    source << R"cpp(        const int edge_begin = target_edge_offsets[target_roi];
-        const int edge_end = target_edge_offsets[target_roi + 1];
-        for (int edge_index = edge_begin; edge_index < edge_end; ++edge_index) {
-            const int source_roi = edge_sources[edge_index];
-)cpp";
-    if (has_field(edge_fields, "weight")) {
-        source << R"cpp(            const float weight = edge_weights[edge_index];
-)cpp";
-    }
-    if (has_field(edge_fields, "delay_steps")) {
-        source << R"cpp(            const int delay_steps_value = edge_delay_steps[edge_index];
-)cpp";
-    }
-    if (has_field(edge_fields, "source_roi")) {
-        source << R"cpp(            const int source_roi_value = source_roi;
-)cpp";
-    }
-    if (has_field(edge_fields, "target_roi")) {
-        source << R"cpp(            const int target_roi_value = target_roi;
-)cpp";
-    }
-    if (!src_fields.empty()) {
-        source << R"cpp(            int history_offset = current_history_offset + edge_delay_offsets[edge_index];
-            if (history_offset >= history_size) {
-                history_offset -= history_size;
-            }
-            const float* history_slot = history + history_offset;
-)cpp";
-        source << soa_value_init_selected("mind_coupling_source",
-                                          "src",
-                                          src_fields,
-                                          schema_value.exposures,
-                                          "history_slot",
-                                          "mind_roi_count",
-                                          "source_roi",
-                                          12);
-    }
-    if (!edge_fields.empty()) {
-        std::vector<std::string> init_fields = edge_fields;
-        for (auto& field: init_fields) {
-            if (field == "source_roi") {
-                field = "source_roi_value";
-            } else if (field == "target_roi") {
-                field = "target_roi_value";
-            } else if (field == "delay_steps") {
-                field = "delay_steps_value";
-            }
+    source << indent_block(analysis.code, 8);
+    for (const auto& output: output_fields) {
+        if (!contains(state_set, output) && !contains(local_set, output)) {
+            throw std::runtime_error("RegionRule cannot expose unknown value: " + output);
         }
-        source << edge_init(init_fields, 12);
-    }
-    source << indent_block(edge, 12);
-    source << R"cpp(        }
-)cpp";
-    source << indent_block(finish, 8);
-    if (!input_fields.empty()) {
-        source << soa_store_selected("in",
-                                     input_fields,
-                                     schema_value.inputs,
-                                     "inputs",
-                                     "mind_roi_count",
-                                     "target_roi",
-                                     8);
+        source << "        exposure_soa[(" << schema_field_index(output_schema, output)
+               << " * roi_count) + roi] = " << output << ";\n";
     }
     source << R"cpp(    }
 }

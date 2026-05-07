@@ -20,22 +20,22 @@ struct ROI {
 class Connectivity {
   public:
     Connectivity(std::vector<std::string> labels,
-                 std::vector<std::vector<float>> weights,
-                 std::vector<std::vector<float>> delays);
+                 std::vector<std::vector<double>> weights,
+                 std::vector<std::vector<double>> delays);
 
     [[nodiscard]] int roi_count() const noexcept;
     [[nodiscard]] const std::vector<ROI>& rois() const noexcept;
     [[nodiscard]] const std::vector<std::string>& labels() const noexcept;
-    [[nodiscard]] const std::vector<float>& weights() const noexcept;
-    [[nodiscard]] const std::vector<float>& delays() const noexcept;
-    [[nodiscard]] float weight_at(int target_roi, int source_roi) const;
-    [[nodiscard]] float delay_at(int target_roi, int source_roi) const;
-    [[nodiscard]] float min_positive_delay() const noexcept;
+    [[nodiscard]] const std::vector<double>& weights() const noexcept;
+    [[nodiscard]] const std::vector<double>& delays() const noexcept;
+    [[nodiscard]] double weight_at(int target_roi, int source_roi) const;
+    [[nodiscard]] double delay_at(int target_roi, int source_roi) const;
+    [[nodiscard]] double min_positive_delay() const noexcept;
     [[nodiscard]] int roi_index(const std::string& label) const;
 
   private:
-    [[nodiscard]] std::vector<float> flatten_square_matrix(
-        const std::vector<std::vector<float>>& matrix,
+    [[nodiscard]] std::vector<double> flatten_square_matrix(
+        const std::vector<std::vector<double>>& matrix,
         const std::string& name,
         bool require_non_negative) const;
     [[nodiscard]] std::size_t matrix_offset(int target_roi, int source_roi) const;
@@ -43,8 +43,8 @@ class Connectivity {
     std::vector<std::string> labels_{};
     std::vector<ROI> rois_{};
     std::unordered_map<std::string, int> label_to_index_{};
-    std::vector<float> weights_{};
-    std::vector<float> delays_{};
+    std::vector<double> weights_{};
+    std::vector<double> delays_{};
 };
 
 struct RegionOwner {
@@ -65,10 +65,13 @@ struct MicroRoiBinding {
     std::shared_ptr<mind_sim::bridge::sim::MicroInputRule> input_rule{};
     std::vector<double> input_state{};
     std::vector<double> input_params{};
+    std::vector<mind_sim::bridge::sim::RandomStreamBinding> input_random_streams{};
     std::vector<int> input_port_bases{};
+    std::vector<int> input_read_offsets{};
     std::shared_ptr<mind_sim::bridge::sim::MicroOutputRule> output_rule{};
     std::vector<double> output_state{};
     std::vector<double> output_params{};
+    std::vector<int> output_write_offsets{};
 };
 
 struct MicroCircuitOwner {
@@ -81,10 +84,12 @@ struct MicroCircuitOwner {
 };
 
 struct CouplingProjection {
-    std::vector<int> source_rois{};
-    std::vector<int> target_rois{};
+    int source_roi{-1};
+    int target_roi{-1};
     std::shared_ptr<mind_sim::macro::sim::CouplingRule> rule{};
     std::vector<double> params{};
+    std::vector<int> read_exposure_offsets{};
+    std::vector<int> write_input_offsets{};
 };
 
 class Network {
@@ -94,8 +99,8 @@ class Network {
             std::vector<std::string> exposures,
             std::vector<int> recorded_rois);
     Network(std::vector<std::string> roi_labels,
-            std::vector<std::vector<float>> weights,
-            std::vector<std::vector<float>> delays,
+            std::vector<std::vector<double>> weights,
+            std::vector<std::vector<double>> delays,
             std::vector<std::string> inputs,
             std::vector<std::string> exposures,
             std::vector<int> recorded_rois);
@@ -115,11 +120,11 @@ class Network {
     [[nodiscard]] const std::vector<int>& recorded_rois() const noexcept;
     void set_recorded_rois(std::vector<int> recorded_rois);
 
-    [[nodiscard]] float weight_at(int target_roi, int source_roi) const;
-    [[nodiscard]] float delay_at(int target_roi, int source_roi) const;
-    [[nodiscard]] float min_positive_delay() const noexcept;
-    [[nodiscard]] const std::vector<float>& weights_flat() const noexcept;
-    [[nodiscard]] const std::vector<float>& delays_flat() const noexcept;
+    [[nodiscard]] double weight_at(int target_roi, int source_roi) const;
+    [[nodiscard]] double delay_at(int target_roi, int source_roi) const;
+    [[nodiscard]] double min_positive_delay() const noexcept;
+    [[nodiscard]] const std::vector<double>& weights_flat() const noexcept;
+    [[nodiscard]] const std::vector<double>& delays_flat() const noexcept;
 
     void set_initial_exposure(const ROI& roi, const mind_sim::macro::sim::ScalarBuffer& exposure);
     void set_initial_exposure_value(const ROI& roi, const std::string& exposure_name, double value);
@@ -129,15 +134,12 @@ class Network {
     void set_dc_input_value(const ROI& roi, const std::string& input_name, double value);
     [[nodiscard]] const std::vector<mind_sim::macro::sim::ScalarBuffer>& dc_inputs() const noexcept;
 
-    void couple(std::vector<int> source_rois,
-                std::vector<int> target_rois,
+    void couple(const ROI& source_roi,
+                const ROI& target_roi,
                 std::shared_ptr<mind_sim::macro::sim::CouplingRule> rule,
-                std::vector<double> params);
-    void couple_all(std::shared_ptr<mind_sim::macro::sim::CouplingRule> rule,
-                    std::vector<double> params);
-    void couple_from(const ROI& source_roi,
-                     std::shared_ptr<mind_sim::macro::sim::CouplingRule> rule,
-                     std::vector<double> params);
+                std::vector<double> params,
+                std::vector<int> read_exposure_offsets,
+                std::vector<int> write_input_offsets);
     void use_region_rule(const ROI& roi,
                          std::shared_ptr<mind_sim::macro::sim::RegionRule> rule,
                          std::vector<double> state,
@@ -146,14 +148,19 @@ class Network {
                   std::shared_ptr<mind_sim::micro::sim::CoreNeuronData> core_data);
     void bind_micro_roi(int micro_circuit_index,
                         const ROI& roi,
-                        std::vector<GidRange> gid_ranges,
-                        std::shared_ptr<mind_sim::bridge::sim::MicroInputRule> input_rule,
-                        std::vector<double> input_state,
-                        std::vector<double> input_params,
-                        std::vector<int> input_port_bases,
-                        std::shared_ptr<mind_sim::bridge::sim::MicroOutputRule> output_rule,
-                        std::vector<double> output_state,
-                        std::vector<double> output_params);
+                        std::vector<GidRange> gid_ranges);
+    void configure_micro_input_rule(const ROI& roi,
+                                    std::shared_ptr<mind_sim::bridge::sim::MicroInputRule> input_rule,
+                                    std::vector<double> input_state,
+                                    std::vector<double> input_params,
+                                    std::vector<mind_sim::bridge::sim::RandomStreamBinding> input_random_streams,
+                                    std::vector<int> input_port_bases,
+                                    std::vector<int> input_read_offsets);
+    void configure_micro_output_rule(const ROI& roi,
+                                     std::shared_ptr<mind_sim::bridge::sim::MicroOutputRule> output_rule,
+                                     std::vector<double> output_state,
+                                     std::vector<double> output_params,
+                                     std::vector<int> output_write_offsets);
 
     [[nodiscard]] const std::vector<CouplingProjection>& coupling_projections() const noexcept;
     [[nodiscard]] const std::vector<RegionOwner>& region_owners() const noexcept;
@@ -174,12 +181,10 @@ class Network {
     void claim_roi(int roi_index, OwnerKind kind);
     void validate_region_rule_schema(const mind_sim::macro::sim::RegionRule& rule) const;
     void validate_coupling_rule_schema(const mind_sim::macro::sim::CouplingRule& rule) const;
-    void validate_bridge_rule_schema(const mind_sim::bridge::sim::MicroInputRule& input_rule,
-                                     const mind_sim::bridge::sim::MicroOutputRule& output_rule) const;
     void validate_gid_ranges(const std::vector<GidRange>& gid_ranges) const;
     [[nodiscard]] MicroCircuitOwner& require_micro_circuit(int micro_circuit_index);
+    [[nodiscard]] MicroRoiBinding& require_micro_binding(int roi_index);
     void rebuild_micro_gid_index(MicroCircuitOwner& circuit) const;
-    [[nodiscard]] std::vector<int> all_roi_indices() const;
     [[nodiscard]] std::vector<int> normalize_roi_indices(std::vector<int> roi_indices,
                                                          const char* what) const;
 

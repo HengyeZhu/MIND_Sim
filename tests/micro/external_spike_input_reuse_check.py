@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import tempfile
+from pathlib import Path
 
 import mind_sim as ms
 
@@ -47,36 +49,50 @@ def main() -> None:
         labels=["micro"],
         weights=[[0.0]],
         delays=[[1.0]],
-        inputs=["drive"],
-        exposures=["S"],
     )
-    input_rule = ms.MicroInputRule(
-        name="external_spike_reuse",
-        ports=["source"],
-        state={"sent": 0.0},
-        params={},
-        code="""
-if (s.sent < 0.5) {
-    emit.source(window.start, 0);
-    s.sent = 1.0;
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        input_path = tmpdir / "external_spike_reuse.mod"
+        input_path.write_text(
+            """
+MIND {
+  MICRO_INPUT external_spike_reuse
+  EMIT source
+}
+STATE {
+  sent = 0.0
+}
+INPUT {
+if (sent < 0.5) {
+    source(t, 0);
+    sent = 1.0;
+}
 }
 """,
-    )
-    output_rule = ms.MicroOutputRule(
-        name="zero_output",
-        state={},
-        params={},
-        spike="",
-        finish="out.S = 0.0;",
-    )
+            encoding="utf-8",
+        )
+        output_path = tmpdir / "zero_output.mod"
+        output_path.write_text(
+            """
+MIND {
+  MICRO_OUTPUT zero_output
+  WRITE S
+}
+BREAKPOINT {
+  S = 0.0;
+}
+""",
+            encoding="utf-8",
+        )
+        network.load_mod_metadata(tmpdir)
 
-    network.use_micro("micro", micro).bind_roi(
-        network.roi(0),
-        gid_ranges=population,
-        input=input_rule,
-        input_ports={"source": source},
-        output=output_rule,
-    )
+        network.use_micro(micro).bind_roi(
+            network.roi(0),
+            gid_ranges=population,
+            ports={"source": source},
+        )
+        network.roi(0).connect(network.roi(0), "external_spike_reuse")
+        network.roi(0).connect(network.roi(0), "zero_output")
 
     ms.Simulator(network, dt_micro=0.025, dt_macro=0.1, batch_window=0.1).run(5.0)
 

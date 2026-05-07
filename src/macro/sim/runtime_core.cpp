@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <iterator>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -17,27 +19,74 @@ std::string region_rule_signature(const mind_sim::macro::sim::RegionRule& rule) 
            std::to_string(rule.state_count()) + "|" + std::to_string(rule.param_count());
 }
 
+struct PendingCouplingGroup {
+    std::shared_ptr<mind_sim::macro::sim::CouplingRule> rule{};
+    std::vector<double> params{};
+    std::vector<int> read_exposure_offsets{};
+    std::vector<int> write_input_offsets{};
+    std::vector<std::pair<int, int>> edges{};
+};
+
+bool same_params(const std::vector<double>& lhs, const std::vector<double>& rhs) {
+    return lhs.size() == rhs.size() && std::equal(lhs.begin(), lhs.end(), rhs.begin());
+}
+
+bool same_ints(const std::vector<int>& lhs, const std::vector<int>& rhs) {
+    return lhs.size() == rhs.size() && std::equal(lhs.begin(), lhs.end(), rhs.begin());
+}
+
+std::vector<PendingCouplingGroup> group_coupling_projections(
+    const std::vector<mind_sim::macro::frontend::CouplingProjection>& projections) {
+    std::vector<PendingCouplingGroup> groups;
+    for (const auto& projection: projections) {
+        auto found = std::find_if(
+            groups.begin(),
+            groups.end(),
+            [&](const PendingCouplingGroup& group) {
+                return group.rule.get() == projection.rule.get() &&
+                       same_params(group.params, projection.params) &&
+                       same_ints(group.read_exposure_offsets, projection.read_exposure_offsets) &&
+                       same_ints(group.write_input_offsets, projection.write_input_offsets);
+            });
+        if (found == groups.end()) {
+            groups.push_back(PendingCouplingGroup{
+                .rule = projection.rule,
+                .params = projection.params,
+                .read_exposure_offsets = projection.read_exposure_offsets,
+                .write_input_offsets = projection.write_input_offsets,
+            });
+            found = std::prev(groups.end());
+        }
+        found->edges.emplace_back(projection.target_roi, projection.source_roi);
+    }
+    return groups;
+}
+
 CouplingGraph build_coupling_graph(const mind_sim::macro::frontend::Network& network,
-                                   const mind_sim::macro::frontend::CouplingProjection& projection,
+                                   const PendingCouplingGroup& group,
                                    double dt_macro) {
     const int roi_count = network.roi_count();
     const auto& weights = network.weights_flat();
     const auto& delays = network.delays_flat();
     CouplingGraph graph;
-    graph.rule = projection.rule;
-    graph.params = projection.params;
-    graph.targets = projection.target_rois;
+    graph.rule = group.rule;
+    graph.params = group.params;
+    graph.read_exposure_offsets = group.read_exposure_offsets;
+    graph.write_input_offsets = group.write_input_offsets;
     std::vector<int> edge_counts(static_cast<std::size_t>(roi_count), 0);
-    for (int target: projection.target_rois) {
-        for (int source: projection.source_rois) {
-            const auto matrix_offset = static_cast<std::size_t>(target * roi_count + source);
-            const float weight = weights[matrix_offset];
-            if (weight == 0.0F) {
-                continue;
-            }
-            const int delay_steps = static_cast<int>(std::lrint(delays[matrix_offset] / dt_macro));
-            edge_counts[static_cast<std::size_t>(target)] += 1;
-            graph.max_delay_steps = std::max(graph.max_delay_steps, delay_steps);
+    std::vector<unsigned char> has_target(static_cast<std::size_t>(roi_count), 0);
+    for (const auto& [target, source]: group.edges) {
+        const auto matrix_offset = static_cast<std::size_t>(target * roi_count + source);
+        const double weight = weights[matrix_offset];
+        if (weight == 0.0) {
+            continue;
+        }
+        const int delay_steps = static_cast<int>(std::lrint(delays[matrix_offset] / dt_macro));
+        edge_counts[static_cast<std::size_t>(target)] += 1;
+        graph.max_delay_steps = std::max(graph.max_delay_steps, delay_steps);
+        if (has_target[static_cast<std::size_t>(target)] == 0) {
+            has_target[static_cast<std::size_t>(target)] = 1;
+            graph.targets.push_back(target);
         }
     }
     graph.target_edge_offsets.assign(static_cast<std::size_t>(roi_count + 1), 0);
@@ -51,20 +100,18 @@ CouplingGraph build_coupling_graph(const mind_sim::macro::frontend::Network& net
     graph.edge_weights.resize(edge_count);
     graph.edge_delay_steps.resize(edge_count);
     std::vector<int> write_positions = graph.target_edge_offsets;
-    for (int target: projection.target_rois) {
-        for (int source: projection.source_rois) {
-            const auto matrix_offset = static_cast<std::size_t>(target * roi_count + source);
-            const float weight = weights[matrix_offset];
-            if (weight == 0.0F) {
-                continue;
-            }
-            const int delay_steps = static_cast<int>(std::lrint(delays[matrix_offset] / dt_macro));
-            const auto index = static_cast<std::size_t>(
-                write_positions[static_cast<std::size_t>(target)]++);
-            graph.edge_sources[index] = source;
-            graph.edge_weights[index] = weight;
-            graph.edge_delay_steps[index] = delay_steps;
+    for (const auto& [target, source]: group.edges) {
+        const auto matrix_offset = static_cast<std::size_t>(target * roi_count + source);
+        const double weight = weights[matrix_offset];
+        if (weight == 0.0) {
+            continue;
         }
+        const int delay_steps = static_cast<int>(std::lrint(delays[matrix_offset] / dt_macro));
+        const auto index = static_cast<std::size_t>(
+            write_positions[static_cast<std::size_t>(target)]++);
+        graph.edge_sources[index] = source;
+        graph.edge_weights[index] = weight;
+        graph.edge_delay_steps[index] = delay_steps;
     }
     return graph;
 }
@@ -74,8 +121,8 @@ CouplingGraph build_coupling_graph(const mind_sim::macro::frontend::Network& net
 CouplingRuntime build_coupling_runtime(const mind_sim::macro::frontend::Network& network,
                                        double dt_macro) {
     CouplingRuntime runtime;
-    for (const auto& projection: network.coupling_projections()) {
-        auto graph = build_coupling_graph(network, projection, dt_macro);
+    for (const auto& group: group_coupling_projections(network.coupling_projections())) {
+        auto graph = build_coupling_graph(network, group, dt_macro);
         runtime.history_capacity = std::max(runtime.history_capacity, graph.max_delay_steps + 1);
         runtime.graphs.push_back(std::move(graph));
     }
@@ -115,7 +162,7 @@ CouplingEvaluation coupling_evaluation_for_targets(
         const auto& input = dc_inputs[static_cast<std::size_t>(roi)];
         for (int input_index = 0; input_index < input_count; ++input_index) {
             const auto value = input.values[static_cast<std::size_t>(input_index)];
-            if (value != 0.0F) {
+            if (value != 0.0) {
                 evaluation.dc_inputs.push_back(DcInputEntry{
                     .offset = input_index * roi_count + roi,
                     .value = value,
@@ -141,20 +188,22 @@ CouplingEvaluation coupling_evaluation_for_targets(
 void apply_couplings(const CouplingEvaluation& evaluation,
                      int roi_count,
                      int input_count,
+                     int exposure_count,
                      int step,
-                     const std::vector<float>& history,
-                     std::vector<float>& input_soa) {
+                     const std::vector<double>& history,
+                     std::vector<double>& input_soa) {
     const auto input_size = static_cast<std::size_t>(roi_count * input_count);
     if (input_soa.size() != input_size) {
         input_soa.resize(input_size);
     }
     for (int offset: evaluation.clear_offsets) {
-        input_soa[static_cast<std::size_t>(offset)] = 0.0F;
+        input_soa[static_cast<std::size_t>(offset)] = 0.0;
     }
     for (const auto& graph_view: evaluation.graphs) {
         const auto& graph = *graph_view.graph;
         graph.rule->apply_flat(roi_count,
                                input_count,
+                               exposure_count,
                                evaluation.history_capacity,
                                step,
                                graph_view.targets,
@@ -165,18 +214,20 @@ void apply_couplings(const CouplingEvaluation& evaluation,
                                graph.edge_delay_offsets,
                                history,
                                input_soa,
-                               graph.params);
+                               graph.params,
+                               graph.read_exposure_offsets,
+                               graph.write_input_offsets);
     }
     for (const auto& input: evaluation.dc_inputs) {
         input_soa[static_cast<std::size_t>(input.offset)] += input.value;
     }
 }
 
-std::vector<float> exposure_buffers_to_soa(
+std::vector<double> exposure_buffers_to_soa(
     const std::vector<mind_sim::macro::sim::ScalarBuffer>& exposures,
     int roi_count,
     int exposure_count) {
-    std::vector<float> soa(static_cast<std::size_t>(roi_count * exposure_count), 0.0F);
+    std::vector<double> soa(static_cast<std::size_t>(roi_count * exposure_count), 0.0);
     for (int roi = 0; roi < roi_count; ++roi) {
         const auto& buffer = exposures[static_cast<std::size_t>(roi)];
         for (int exposure = 0; exposure < exposure_count; ++exposure) {
@@ -187,11 +238,11 @@ std::vector<float> exposure_buffers_to_soa(
     return soa;
 }
 
-void initialize_history(std::vector<float>& history,
+void initialize_history(std::vector<double>& history,
                         int history_capacity,
                         int roi_count,
                         int exposure_count,
-                        const std::vector<float>& exposure_soa) {
+                        const std::vector<double>& exposure_soa) {
     const auto slot_size = static_cast<std::size_t>(roi_count * exposure_count);
     for (int slot = 0; slot < history_capacity; ++slot) {
         const auto base = static_cast<std::size_t>(slot) * slot_size;
@@ -201,11 +252,11 @@ void initialize_history(std::vector<float>& history,
     }
 }
 
-void write_history_slot(std::vector<float>& history,
+void write_history_slot(std::vector<double>& history,
                         int slot,
                         int roi_count,
                         int exposure_count,
-                        const std::vector<float>& exposure_soa) {
+                        const std::vector<double>& exposure_soa) {
     const auto slot_size = static_cast<std::size_t>(roi_count * exposure_count);
     const auto base = static_cast<std::size_t>(slot) * slot_size;
     std::copy(exposure_soa.begin(),
@@ -214,7 +265,7 @@ void write_history_slot(std::vector<float>& history,
 }
 
 void append_exposure_record(mind_sim::macro::sim::ExposureRecord& record,
-                            const std::vector<float>& exposure_soa) {
+                            const std::vector<double>& exposure_soa) {
     const int roi_count = record.roi_count;
     const int exposure_count = record.exposure_count;
     const auto base = record.values.size();

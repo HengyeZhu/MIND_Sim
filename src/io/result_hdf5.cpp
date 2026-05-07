@@ -107,13 +107,6 @@ void write_double_dataset(hid_t file,
     write_dataset(file, name, H5T_NATIVE_DOUBLE, dims, data);
 }
 
-void write_float_dataset(hid_t file,
-                         const std::string& name,
-                         const std::vector<hsize_t>& dims,
-                         const float* data) {
-    write_dataset(file, name, H5T_NATIVE_FLOAT, dims, data);
-}
-
 void write_int_dataset(hid_t file,
                        const std::string& name,
                        const std::vector<hsize_t>& dims,
@@ -221,10 +214,10 @@ void write_macro_result(hid_t file,
                       "recorded_rois",
                       {recorded_roi_count},
                       record.roi_indices.data());
-    write_float_dataset(file,
-                        "roi_exposures",
-                        {step_count, recorded_roi_count, exposure_count},
-                        record.values.data() + (times.empty() ? 0 : stride));
+    write_double_dataset(file,
+                         "roi_exposures",
+                         {step_count, recorded_roi_count, exposure_count},
+                         record.values.data() + (times.empty() ? 0 : stride));
     write_double_dataset(file, "timing_s", {timing_s.size()}, timing_s.data());
     write_double_dataset(file, "metadata", {metadata.size()}, metadata.data());
     write_int_attribute(file, "roi_count", record.roi_count);

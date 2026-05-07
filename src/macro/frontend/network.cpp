@@ -11,8 +11,8 @@
 namespace mind_sim::macro::frontend {
 
 Connectivity::Connectivity(std::vector<std::string> labels,
-                           std::vector<std::vector<float>> weights,
-                           std::vector<std::vector<float>> delays)
+                           std::vector<std::vector<double>> weights,
+                           std::vector<std::vector<double>> delays)
     : labels_(std::move(labels)) {
     if (labels_.empty()) {
         throw std::runtime_error("Connectivity requires at least one ROI");
@@ -45,30 +45,30 @@ const std::vector<std::string>& Connectivity::labels() const noexcept {
     return labels_;
 }
 
-const std::vector<float>& Connectivity::weights() const noexcept {
+const std::vector<double>& Connectivity::weights() const noexcept {
     return weights_;
 }
 
-const std::vector<float>& Connectivity::delays() const noexcept {
+const std::vector<double>& Connectivity::delays() const noexcept {
     return delays_;
 }
 
-float Connectivity::weight_at(int target_roi, int source_roi) const {
+double Connectivity::weight_at(int target_roi, int source_roi) const {
     return weights_[matrix_offset(target_roi, source_roi)];
 }
 
-float Connectivity::delay_at(int target_roi, int source_roi) const {
+double Connectivity::delay_at(int target_roi, int source_roi) const {
     return delays_[matrix_offset(target_roi, source_roi)];
 }
 
-float Connectivity::min_positive_delay() const noexcept {
-    float value = std::numeric_limits<float>::infinity();
-    for (float delay: delays_) {
-        if (delay > 0.0F && delay < value) {
+double Connectivity::min_positive_delay() const noexcept {
+    double value = std::numeric_limits<double>::infinity();
+    for (double delay: delays_) {
+        if (delay > 0.0 && delay < value) {
             value = delay;
         }
     }
-    return std::isfinite(value) ? value : 0.0F;
+    return std::isfinite(value) ? value : 0.0;
 }
 
 int Connectivity::roi_index(const std::string& label) const {
@@ -79,25 +79,25 @@ int Connectivity::roi_index(const std::string& label) const {
     return iter->second;
 }
 
-std::vector<float> Connectivity::flatten_square_matrix(
-    const std::vector<std::vector<float>>& matrix,
+std::vector<double> Connectivity::flatten_square_matrix(
+    const std::vector<std::vector<double>>& matrix,
     const std::string& name,
     bool require_non_negative) const {
     const auto n = labels_.size();
     if (matrix.size() != n) {
         throw std::runtime_error(name + " row count must match ROI count");
     }
-    std::vector<float> out;
+    std::vector<double> out;
     out.reserve(n * n);
     for (const auto& row: matrix) {
         if (row.size() != n) {
             throw std::runtime_error(name + " must be square");
         }
-        for (float value: row) {
+        for (double value: row) {
             if (!std::isfinite(value)) {
                 throw std::runtime_error(name + " must contain finite values");
             }
-            if (require_non_negative && value < 0.0F) {
+            if (require_non_negative && value < 0.0) {
                 throw std::runtime_error(name + " must be non-negative");
             }
             out.push_back(value);
@@ -155,8 +155,8 @@ Network::Network(Connectivity connectivity,
 }
 
 Network::Network(std::vector<std::string> roi_labels,
-                 std::vector<std::vector<float>> weights,
-                 std::vector<std::vector<float>> delays,
+                 std::vector<std::vector<double>> weights,
+                 std::vector<std::vector<double>> delays,
                  std::vector<std::string> inputs,
                  std::vector<std::string> exposures,
                  std::vector<int> recorded_rois)
@@ -226,23 +226,23 @@ void Network::set_recorded_rois(std::vector<int> recorded_rois) {
     recorded_rois_ = normalize_roi_indices(std::move(recorded_rois), "record ROI");
 }
 
-float Network::weight_at(int target_roi, int source_roi) const {
+double Network::weight_at(int target_roi, int source_roi) const {
     return connectivity_.weight_at(target_roi, source_roi);
 }
 
-float Network::delay_at(int target_roi, int source_roi) const {
+double Network::delay_at(int target_roi, int source_roi) const {
     return connectivity_.delay_at(target_roi, source_roi);
 }
 
-float Network::min_positive_delay() const noexcept {
+double Network::min_positive_delay() const noexcept {
     return connectivity_.min_positive_delay();
 }
 
-const std::vector<float>& Network::weights_flat() const noexcept {
+const std::vector<double>& Network::weights_flat() const noexcept {
     return connectivity_.weights();
 }
 
-const std::vector<float>& Network::delays_flat() const noexcept {
+const std::vector<double>& Network::delays_flat() const noexcept {
     return connectivity_.delays();
 }
 
@@ -261,7 +261,7 @@ void Network::set_initial_exposure_value(const ROI& roi_value,
         throw std::runtime_error("initial exposure value must be finite");
     }
     initial_exposures_[static_cast<std::size_t>(roi_value.index)]
-        .values[static_cast<std::size_t>(exposure_index(exposure_name))] = static_cast<float>(value);
+        .values[static_cast<std::size_t>(exposure_index(exposure_name))] = value;
 }
 
 const std::vector<mind_sim::macro::sim::ScalarBuffer>& Network::initial_exposures() const noexcept {
@@ -283,40 +283,40 @@ void Network::set_dc_input_value(const ROI& roi_value,
         throw std::runtime_error("dc input value must be finite");
     }
     dc_inputs_[static_cast<std::size_t>(roi_value.index)]
-        .values[static_cast<std::size_t>(input_index(input_name))] = static_cast<float>(value);
+        .values[static_cast<std::size_t>(input_index(input_name))] = value;
 }
 
 const std::vector<mind_sim::macro::sim::ScalarBuffer>& Network::dc_inputs() const noexcept {
     return dc_inputs_;
 }
 
-void Network::couple(std::vector<int> source_rois,
-                     std::vector<int> target_rois,
+void Network::couple(const ROI& source_roi,
+                     const ROI& target_roi,
                      std::shared_ptr<mind_sim::macro::sim::CouplingRule> rule,
-                     std::vector<double> params) {
+                     std::vector<double> params,
+                     std::vector<int> read_exposure_offsets,
+                     std::vector<int> write_input_offsets) {
+    validate_roi_index(source_roi.index, "coupling source ROI");
+    validate_roi_index(target_roi.index, "coupling target ROI");
     if (!rule) {
         throw std::runtime_error("Network coupling rule cannot be null");
     }
     validate_coupling_rule_schema(*rule);
     rule->validate_params(params);
+    if (read_exposure_offsets.size() != static_cast<std::size_t>(rule->exposure_count())) {
+        throw std::runtime_error("CouplingRule READ offset count does not match rule");
+    }
+    if (write_input_offsets.size() != static_cast<std::size_t>(rule->input_count())) {
+        throw std::runtime_error("CouplingRule WRITE offset count does not match rule");
+    }
     coupling_projections_.push_back(CouplingProjection{
-        .source_rois = normalize_roi_indices(std::move(source_rois), "coupling source ROI"),
-        .target_rois = normalize_roi_indices(std::move(target_rois), "coupling target ROI"),
+        .source_roi = source_roi.index,
+        .target_roi = target_roi.index,
         .rule = std::move(rule),
         .params = std::move(params),
+        .read_exposure_offsets = std::move(read_exposure_offsets),
+        .write_input_offsets = std::move(write_input_offsets),
     });
-}
-
-void Network::couple_all(std::shared_ptr<mind_sim::macro::sim::CouplingRule> rule,
-                         std::vector<double> params) {
-    couple(all_roi_indices(), all_roi_indices(), std::move(rule), std::move(params));
-}
-
-void Network::couple_from(const ROI& source_roi,
-                          std::shared_ptr<mind_sim::macro::sim::CouplingRule> rule,
-                          std::vector<double> params) {
-    validate_roi_index(source_roi.index, "coupling source ROI");
-    couple({source_roi.index}, all_roi_indices(), std::move(rule), std::move(params));
 }
 
 void Network::use_region_rule(const ROI& roi_value,
@@ -365,44 +365,78 @@ int Network::use_micro(std::string name,
 
 void Network::bind_micro_roi(int micro_circuit_index,
                              const ROI& roi_value,
-                             std::vector<GidRange> gid_ranges,
-                             std::shared_ptr<mind_sim::bridge::sim::MicroInputRule> input_rule,
-                             std::vector<double> input_state,
-                             std::vector<double> input_params,
-                             std::vector<int> input_port_bases,
-                             std::shared_ptr<mind_sim::bridge::sim::MicroOutputRule> output_rule,
-                             std::vector<double> output_state,
-                             std::vector<double> output_params) {
+                             std::vector<GidRange> gid_ranges) {
     validate_roi_index(roi_value.index, "micro ROI");
     validate_gid_ranges(gid_ranges);
-    if (!input_rule) {
-        throw std::runtime_error("Network.bind_micro_roi requires MicroInputRule");
-    }
-    if (!output_rule) {
-        throw std::runtime_error("Network.bind_micro_roi requires MicroOutputRule");
-    }
-    validate_bridge_rule_schema(*input_rule, *output_rule);
-    input_rule->validate_state(input_state);
-    input_rule->validate_params(input_params);
-    if (input_port_bases.size() != static_cast<std::size_t>(input_rule->input_port_count())) {
-        throw std::runtime_error("MicroInputRule input port count does not match binding ports");
-    }
-    output_rule->validate_state(output_state);
-    output_rule->validate_params(output_params);
     claim_roi(roi_value.index, OwnerKind::Micro);
     auto& circuit = require_micro_circuit(micro_circuit_index);
     circuit.bindings.push_back(MicroRoiBinding{
         .roi_index = roi_value.index,
         .gid_ranges = std::move(gid_ranges),
-        .input_rule = std::move(input_rule),
-        .input_state = std::move(input_state),
-        .input_params = std::move(input_params),
-        .input_port_bases = std::move(input_port_bases),
-        .output_rule = std::move(output_rule),
-        .output_state = std::move(output_state),
-        .output_params = std::move(output_params),
     });
     rebuild_micro_gid_index(circuit);
+}
+
+void Network::configure_micro_input_rule(
+    const ROI& roi_value,
+    std::shared_ptr<mind_sim::bridge::sim::MicroInputRule> input_rule,
+    std::vector<double> input_state,
+    std::vector<double> input_params,
+    std::vector<mind_sim::bridge::sim::RandomStreamBinding> input_random_streams,
+    std::vector<int> input_port_bases,
+    std::vector<int> input_read_offsets) {
+    validate_roi_index(roi_value.index, "micro input ROI");
+    if (!input_rule) {
+        throw std::runtime_error("micro input connection requires MicroInputRule");
+    }
+    input_rule->validate_state(input_state);
+    input_rule->validate_params(input_params);
+    if (input_random_streams.size() != static_cast<std::size_t>(input_rule->random_count())) {
+        throw std::runtime_error("MicroInputRule RANDOM stream count does not match providers");
+    }
+    for (const auto& random_stream: input_random_streams) {
+        if (!random_stream.rule) {
+            throw std::runtime_error("MicroInputRule RANDOM stream is missing provider");
+        }
+        if (random_stream.state.size() != static_cast<std::size_t>(random_stream.rule->state_count())) {
+            throw std::runtime_error("MicroInputRule RANDOM stream state size mismatch");
+        }
+    }
+    if (input_port_bases.size() != static_cast<std::size_t>(input_rule->input_port_count())) {
+        throw std::runtime_error("MicroInputRule input port count does not match binding ports");
+    }
+    if (input_read_offsets.size() != static_cast<std::size_t>(input_rule->input_count())) {
+        throw std::runtime_error("MicroInputRule READ offset count does not match rule");
+    }
+    auto& binding = require_micro_binding(roi_value.index);
+    binding.input_rule = std::move(input_rule);
+    binding.input_state = std::move(input_state);
+    binding.input_params = std::move(input_params);
+    binding.input_random_streams = std::move(input_random_streams);
+    binding.input_port_bases = std::move(input_port_bases);
+    binding.input_read_offsets = std::move(input_read_offsets);
+}
+
+void Network::configure_micro_output_rule(
+    const ROI& roi_value,
+    std::shared_ptr<mind_sim::bridge::sim::MicroOutputRule> output_rule,
+    std::vector<double> output_state,
+    std::vector<double> output_params,
+    std::vector<int> output_write_offsets) {
+    validate_roi_index(roi_value.index, "micro output ROI");
+    if (!output_rule) {
+        throw std::runtime_error("micro output connection requires MicroOutputRule");
+    }
+    output_rule->validate_state(output_state);
+    output_rule->validate_params(output_params);
+    if (output_write_offsets.size() != static_cast<std::size_t>(output_rule->exposure_count())) {
+        throw std::runtime_error("MicroOutputRule WRITE offset count does not match rule");
+    }
+    auto& binding = require_micro_binding(roi_value.index);
+    binding.output_rule = std::move(output_rule);
+    binding.output_state = std::move(output_state);
+    binding.output_params = std::move(output_params);
+    binding.output_write_offsets = std::move(output_write_offsets);
 }
 
 const std::vector<CouplingProjection>& Network::coupling_projections() const noexcept {
@@ -456,22 +490,7 @@ void Network::validate_region_rule_schema(const mind_sim::macro::sim::RegionRule
 }
 
 void Network::validate_coupling_rule_schema(const mind_sim::macro::sim::CouplingRule& rule) const {
-    if (rule.input_count() != input_count()) {
-        throw std::runtime_error("CouplingRule input count does not match Network");
-    }
-    if (rule.exposure_count() != exposure_count()) {
-        throw std::runtime_error("CouplingRule exposure count does not match Network");
-    }
-}
-
-void Network::validate_bridge_rule_schema(const mind_sim::bridge::sim::MicroInputRule& input_rule,
-                                          const mind_sim::bridge::sim::MicroOutputRule& output_rule) const {
-    if (input_rule.input_count() != input_count()) {
-        throw std::runtime_error("MicroInputRule input count does not match Network");
-    }
-    if (output_rule.exposure_count() != exposure_count()) {
-        throw std::runtime_error("MicroOutputRule exposure count does not match Network");
-    }
+    (void)rule;
 }
 
 void Network::validate_gid_ranges(const std::vector<GidRange>& gid_ranges) const {
@@ -491,6 +510,18 @@ MicroCircuitOwner& Network::require_micro_circuit(int micro_circuit_index) {
         throw std::runtime_error("micro circuit index out of range");
     }
     return micro_circuits_[static_cast<std::size_t>(micro_circuit_index)];
+}
+
+MicroRoiBinding& Network::require_micro_binding(int roi_index_value) {
+    validate_roi_index(roi_index_value, "micro binding ROI");
+    for (auto& circuit: micro_circuits_) {
+        for (auto& binding: circuit.bindings) {
+            if (binding.roi_index == roi_index_value) {
+                return binding;
+            }
+        }
+    }
+    throw std::runtime_error("ROI is not bound to a micro circuit");
 }
 
 void Network::rebuild_micro_gid_index(MicroCircuitOwner& circuit) const {
@@ -525,14 +556,6 @@ void Network::rebuild_micro_gid_index(MicroCircuitOwner& circuit) const {
             }
         }
     }
-}
-
-std::vector<int> Network::all_roi_indices() const {
-    std::vector<int> indices(static_cast<std::size_t>(roi_count()));
-    for (int roi = 0; roi < roi_count(); ++roi) {
-        indices[static_cast<std::size_t>(roi)] = roi;
-    }
-    return indices;
 }
 
 std::vector<int> Network::normalize_roi_indices(std::vector<int> roi_indices,

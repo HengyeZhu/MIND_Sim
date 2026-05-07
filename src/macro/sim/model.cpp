@@ -21,6 +21,28 @@ void validate_vector_size(const std::vector<double>& values, int expected, const
     }
 }
 
+const mind_sim::mind_mod::AbiRuleDescriptor& descriptor_of(
+    const mind_sim::utils::DynamicLibrary& library,
+    mind_sim::mind_mod::AbiRuleKind expected,
+    const char* what) {
+    const auto descriptor_fn =
+        reinterpret_cast<mind_sim::mind_mod::DescriptorFn>(library.symbol("mind_rule_descriptor"));
+    const auto* descriptor = descriptor_fn();
+    if (!descriptor) {
+        throw std::runtime_error(std::string(what) + " has null descriptor");
+    }
+    if (descriptor->abi_version != mind_sim::mind_mod::kMindModAbiVersion) {
+        throw std::runtime_error(std::string(what) + " ABI version mismatch");
+    }
+    if (descriptor->kind != static_cast<int>(expected)) {
+        throw std::runtime_error(std::string(what) + " rule kind mismatch");
+    }
+    if (!descriptor->name || descriptor->name[0] == '\0') {
+        throw std::runtime_error(std::string(what) + " descriptor has empty name");
+    }
+    return *descriptor;
+}
+
 }  // namespace
 
 RegionRule::RegionRule(std::string name,
@@ -82,8 +104,8 @@ void RegionRule::validate_params(const std::vector<double>& params) const {
 
 void RegionRule::step_group(const std::vector<int>& roi_indices,
                             int roi_count,
-                            const std::vector<float>& input_soa,
-                            std::vector<float>& exposure_soa,
+                            const std::vector<double>& input_soa,
+                            std::vector<double>& exposure_soa,
                             std::vector<double>& state_soa,
                             const std::vector<double>& params_soa,
                             double t,
@@ -126,6 +148,18 @@ CouplingRule::CouplingRule(std::string name,
     }
 }
 
+CouplingRule::CouplingRule(std::string library_path)
+    : library_(mind_sim::utils::load_dynamic_library(std::move(library_path))),
+      apply_(reinterpret_cast<mind_sim::mind_mod::CouplingApplyFn>(
+          library_->symbol("mind_coupling_rule_apply"))) {
+    const auto& descriptor =
+        descriptor_of(*library_, mind_sim::mind_mod::AbiRuleKind::Coupling, "CouplingRule");
+    name_ = descriptor.name;
+    input_count_ = descriptor.write_count;
+    exposure_count_ = descriptor.read_count;
+    param_count_ = descriptor.param_count;
+}
+
 const std::string& CouplingRule::name() const noexcept {
     return name_;
 }
@@ -152,33 +186,41 @@ void CouplingRule::validate_params(const std::vector<double>& params) const {
 
 void CouplingRule::apply_flat(int roi_count,
                               int input_count,
+                              int exposure_count,
                               int history_capacity,
                               int step,
                               const std::vector<int>& target_indices,
                               const std::vector<int>& target_edge_offsets,
                               const std::vector<int>& edge_sources,
-                              const std::vector<float>& edge_weights,
+                              const std::vector<double>& edge_weights,
                               const std::vector<int>& edge_delay_steps,
                               const std::vector<int>& edge_delay_offsets,
-                              const std::vector<float>& history,
-                              std::vector<float>& inputs,
-                              const std::vector<double>& params) const {
-    apply_(roi_count,
-           input_count,
-           exposure_count_,
-           history_capacity,
-           step,
-           static_cast<int>(target_indices.size()),
-           target_indices.data(),
-           target_edge_offsets.data(),
-           edge_sources.data(),
-           edge_weights.data(),
-           edge_delay_steps.data(),
-           edge_delay_offsets.data(),
-           history.data(),
-           inputs.data(),
-           param_count_,
-           params.data());
+                              const std::vector<double>& history,
+                              std::vector<double>& inputs,
+                              const std::vector<double>& params,
+                              const std::vector<int>& read_exposure_offsets,
+                              const std::vector<int>& write_input_offsets) const {
+    mind_sim::mind_mod::AbiCouplingContext context{
+        .roi_count = roi_count,
+        .input_count = input_count,
+        .exposure_count = exposure_count,
+        .history_capacity = history_capacity,
+        .step = step,
+        .target_count = static_cast<int>(target_indices.size()),
+        .target_indices = target_indices.data(),
+        .target_edge_offsets = target_edge_offsets.data(),
+        .edge_sources = edge_sources.data(),
+        .edge_weights = edge_weights.data(),
+        .edge_delay_steps = edge_delay_steps.data(),
+        .edge_delay_offsets = edge_delay_offsets.data(),
+        .history = history.data(),
+        .inputs = inputs.data(),
+        .param_count = param_count_,
+        .params = params.data(),
+        .read_exposure_offsets = read_exposure_offsets.data(),
+        .write_input_offsets = write_input_offsets.data(),
+    };
+    apply_(&context);
 }
 
 }  // namespace mind_sim::macro::sim
