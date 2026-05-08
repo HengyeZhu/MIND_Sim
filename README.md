@@ -23,6 +23,8 @@
 
 Currently, it is intended for personal research use, with features added as needed.
 
+The central modeling semantics are ROI-first. In this view, an ROI is the public coupling interface of the network, not a fixed commitment to one internal scale of description. Users can choose the scale that is meaningful for each ROI, such as a neural mass model, a neural field model, a detailed microcircuit. Coupling between ROIs is expressed through ROI-level exposures, while the values of those exposures are produced entirely by the internal dynamics owned by each ROI. This keeps the network-level interface simple and explicit, while allowing high freedom in how each ROI is modeled internally. Bridge rules then translate ROI-level exposures into the concrete values required by each downstream dynamical simulation.
+
 This is my first public release of a simulator project. Its main motivation is the lack of a unified framework for multiscale simulation. While learning from the existing ecosystem, I tried to formulate my own frontend modeling approach. For backend computation, I reused established workflows wherever possible: the micro-scale execution is built on CoreNEURON, and the macro-scale layer was informed by TVB-style computation. I have made efforts to comply with the licenses of the open-source projects on which this work depends, but I may still have overlooked some details. If you notice any issue or believe any attribution or reuse requirement has not been handled correctly, please contact me at [gluciferd@gmail.com](mailto:gluciferd@gmail.com).
 
 ## Architecture
