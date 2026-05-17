@@ -1,13 +1,16 @@
 from . import _native
 from ._codegen import (
     Connectivity,
+    LocalConnectivity,
     MacroSimulator,
     MicroCircuit,
     Network,
-    RegionRule,
+    NeuralField,
+    NodeToRoiMap,
     ROI,
     Simulator,
 )
+from ._io import load_connectivity, load_network
 
 Sim = _native.Sim
 Vector = _native.Vector
@@ -29,12 +32,14 @@ SimulationResult = _native.SimulationResult
 __all__ = [
     "Connectivity",
     "ExposureRecord",
+    "LocalConnectivity",
     "MacroSimulator",
     "MacroSimulationResult",
     "MicroCircuit",
     "MicroSpikeTable",
     "Network",
-    "RegionRule",
+    "NeuralField",
+    "NodeToRoiMap",
     "ROI",
     "ScalarBuffer",
     "Sim",
@@ -44,6 +49,8 @@ __all__ = [
     "build_section_distance_layout",
     "load_asc_section_list",
     "load_asc_sections",
+    "load_connectivity",
+    "load_network",
     "load_swc_section_list",
     "load_swc_sections",
     "section",

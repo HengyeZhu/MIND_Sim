@@ -164,42 +164,41 @@ with suppress_native_output():
         weights=weights.tolist(),
         delays=delays.tolist(),
     )
-    network.load_mod_metadata(EXAMPLE_DIR / "mind_mod")
     network.record(rois="all")
+    mind_mod_dir = EXAMPLE_DIR / "mind_mod"
+    mean_h_input = mind_mod_dir / "mean_h_input.mod"
+    h_to_netcon = mind_mod_dir / "h_to_netcon.mod"
+    spikes_to_exposure = mind_mod_dir / "spikes_to_exposure.mod"
+    rww_s_coupling = mind_mod_dir / "rww_s_coupling.mod"
+    rww_owner = """
+  current = w * J_N * S + I_o + J_N * coupled_S;
+  numerator = a * current - b;
+  denominator = 1.0 - exp(-d * numerator);
+  H = fabs(denominator) < 1e-12 ? (1.0 / d) : (numerator / denominator);
+  S += dt * (-(S / tau_s) + (1.0 - S) * H * gamma);
+  S = clamp(S, 0.0, 1.0);
+"""
+    rww_params = {
+        "a": 0.27,
+        "b": 0.108,
+        "d": 154.0,
+        "gamma": 0.641,
+        "tau_s": 100.0,
+        "w": 1.0,
+        "J_N": 0.2609,
+        "I_o": 0.3,
+    }
 
     micro_roi = network.roi(MICRO_ROI)
     all_rois = network.rois()
     macro_rois = [roi for roi in all_rois if roi.index != micro_roi.index]
 
-    network.use_micro(micro).bind_roi(
-        micro_roi,
+    micro_owner = ms.MicroCircuit(micro).bind_roi(
+        MICRO_ROI,
         gid_ranges=population,
         ports={"afferent": spike_inputs},
     )
-
-    # Macro ROI dynamics stays in RegionRule; all exchange between ROIs is in .mod rules.
-    region = ms.RegionRule(
-        name="rww",
-        state={"S": 0.0},
-        params={
-            "a": 0.27,
-            "b": 0.108,
-            "d": 154.0,
-            "gamma": 0.641,
-            "tau_s": 100.0,
-            "w": 1.0,
-            "J_N": 0.2609,
-            "I_o": 0.3,
-        },
-        step=r"""
-current = w * J_N * S + I_o + J_N * coupled_S;
-numerator = a * current - b;
-denominator = 1.0 - exp(-d * numerator);
-H = fabs(denominator) < 1e-12 ? (1.0 / d) : (numerator / denominator);
-S += dt * (-(S / tau_s) + (1.0 - S) * H * gamma);
-S = clamp(S, 0.0, 1.0);
-""",
-    )
+    network.use_micro(micro_owner)
 
     rng = np.random.default_rng(SEED)
     for roi in all_rois:
@@ -212,17 +211,24 @@ S = clamp(S, 0.0, 1.0);
             roi.initial_output({"S": 0.0, "H": 0.0})
             continue
         roi.initial_output({"S": initial_s, "H": initial_h})
-        roi.use(region, state={"S": initial_s})
+        roi.use(
+            rww_owner,
+            inputs={"coupled_S": 0.0},
+            exposures=["S", "H"],
+            state={"S": initial_s},
+            params=rww_params,
+            name="rww",
+        )
 
     for source_roi in macro_rois:
         micro_roi.connect(
             source_roi,
-            "mean_h_input",
+            mean_h_input,
             params={"inv_source_count": 1.0 / float(len(macro_rois))},
         )
     micro_roi.connect(
         micro_roi,
-        "h_to_netcon",
+        h_to_netcon,
         params={
             "cells": float(cells),
             "scale": INPUT_SPIKE_SCALE,
@@ -242,7 +248,7 @@ S = clamp(S, 0.0, 1.0);
     )
     micro_roi.connect(
         micro_roi,
-        "spikes_to_exposure",
+        spikes_to_exposure,
         state={"ca": 0.0},
         params={
             "cells": float(cells),
@@ -253,7 +259,7 @@ S = clamp(S, 0.0, 1.0);
 
     for target_roi in macro_rois:
         for source_roi in all_rois:
-            target_roi.connect(source_roi, "rww_s_coupling", params={"a": COUPLING_A})
+            target_roi.connect(source_roi, rww_s_coupling, params={"a": COUPLING_A})
 
 pre_run_s = time.perf_counter() - pre_start
 

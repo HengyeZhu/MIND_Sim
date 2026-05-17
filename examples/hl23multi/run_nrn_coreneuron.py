@@ -212,6 +212,7 @@ DEFAULT_PV_BIOPHYS_HOC = MICROCIRCUIT_DIR / "biophys_HL23PV.hoc"
 DEFAULT_VIP_BIOPHYS_HOC = MICROCIRCUIT_DIR / "biophys_HL23VIP.hoc"
 DEFAULT_MOD_DIR = MICROCIRCUIT_DIR / "mod"
 DEFAULT_EXPORT_VIA_NEURON = MICROCIRCUIT_DIR / "export_via_neuron.py"
+DEFAULT_HOC_CACHE_DIR = MICROCIRCUIT_DIR / "hoc_templates"
 
 
 def try_load_local_mechs(search_dirs: List[str]) -> str | None:
@@ -480,7 +481,7 @@ def main() -> None:
     elif args.save_traces:
         cache_dir = Path(args.save_traces).expanduser().resolve().parent / "hoc_templates"
     else:
-        cache_dir = Path.cwd() / "hoc_templates"
+        cache_dir = DEFAULT_HOC_CACHE_DIR
 
     pyr_template_out = cache_dir / "HL23PYR.axon.hoc"
     sst_template_out = cache_dir / "HL23SST.axon.hoc"

@@ -15,7 +15,7 @@ def require(condition: bool, message: str) -> None:
 def require_raises(callable_obj, message_fragment: str) -> None:
     try:
         callable_obj()
-    except RuntimeError as exc:
+    except Exception as exc:
         require(message_fragment in str(exc), f"unexpected error: {exc}")
         return
     raise RuntimeError(f"expected error containing: {message_fragment}")
@@ -30,7 +30,7 @@ def write_mod(directory: Path, name: str, source: str):
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
-        write_mod(
+        count_coupling = write_mod(
             tmpdir,
             "count_coupling.mod",
             """
@@ -45,6 +45,7 @@ EDGE {
 }
 """,
         )
+        copy_region = "S = drive"
         network = ms.Network(
             labels=["a", "b", "c"],
             weights=[
@@ -58,18 +59,25 @@ EDGE {
                 [0.0, 0.0, 0.0],
             ],
         )
-        network.load_mod_metadata(tmpdir)
-
-        region = ms.RegionRule(
-            name="copy_input",
-            step="S = drive;",
-        )
         for roi in network.rois():
-            roi.use(region)
+            roi.use(copy_region, inputs={"drive": 0.0}, exposures="S")
 
         for target in network.rois():
             for source in network.rois():
-                target.connect(source, "count_coupling")
+                target.connect(source, count_coupling)
+
+        require_raises(
+            lambda: network.roi("a").connect("b", count_coupling),
+            "ROI.connect source must be a ROI handle",
+        )
+        require_raises(
+            lambda: network.roi("a").connect(1, count_coupling),
+            "ROI.connect source must be a ROI handle",
+        )
+        require_raises(
+            lambda: network.roi("a").use(count_coupling, inputs={"drive": 0.0}, exposures="S"),
+            "owner equations must be a string",
+        )
 
         result = ms.MacroSimulator(network, dt_macro=0.1).run(0.1)
         values = result.exposures.values
@@ -81,31 +89,12 @@ EDGE {
         for got, want in zip(final_values, expected):
             require(math.isclose(got, want, rel_tol=0.0, abs_tol=1e-7), f"coupling value {got} != {want}")
 
-        strict_network = ms.Network(
-            labels=["strict"],
+        one_roi = ms.Network(
+            labels=["roi"],
             weights=[[0.0]],
             delays=[[1.0]],
         )
-        require_raises(
-            lambda: strict_network.roi(0).use(ms.RegionRule(
-                name="unused_region_param",
-                params={"unused": 1.0},
-                step="S = drive;",
-            )),
-            "declared param is unused: unused",
-        )
-        require_raises(
-            lambda: strict_network.roi(0).use(ms.RegionRule(
-                name="unused_region_state",
-                state={"x": 0.0},
-                step="S = drive;",
-            )),
-            "declared state is unused: x",
-        )
-        strict_network.roi(0).use(ms.RegionRule(
-            name="strict_copy",
-            step="S = drive;",
-        ))
+        one_roi.roi(0).use("S = drive", inputs={"drive": 0.0}, exposures="S")
         def load_unused_param():
             path = write_mod(
                 tmpdir,
@@ -124,7 +113,7 @@ EDGE {
 }
 """,
             )
-            return strict_network.load_mod_metadata(path)
+            return one_roi.roi(0).connect(one_roi.roi(0), path)
         require_raises(
             load_unused_param,
             "declared param is unused: G",
@@ -144,7 +133,7 @@ INPUT {
 }
 """,
             )
-            return strict_network.load_mod_metadata(path)
+            return one_roi.roi(0).connect(one_roi.roi(0), path)
         require_raises(
             load_unused_port,
             "declared EMIT port is unused: afferent",
@@ -166,7 +155,7 @@ BREAKPOINT {
 }
 """,
             )
-            return strict_network.load_mod_metadata(path)
+            return one_roi.roi(0).connect(one_roi.roi(0), path)
         require_raises(
             load_unused_output_state,
             "declared state is unused: count",

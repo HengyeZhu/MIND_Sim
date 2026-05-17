@@ -1,231 +1,42 @@
 #include "mind_mod/rule_mod.hpp"
 
+#include "mind_mod/rule_mod_internal.hpp"
 #include "utils/rule_source_common.hpp"
 
 #include <algorithm>
-#include <cctype>
-#include <cmath>
 #include <cstddef>
-#include <cstdlib>
+#include <initializer_list>
 #include <sstream>
-#include <stdexcept>
 #include <string_view>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace mind_sim::mind_mod {
 
 namespace {
 
 using namespace mind_sim::utils::rule_source;
+using internal::add_field;
+using internal::analyze_bare_code;
 
-[[nodiscard]] std::string trim(std::string_view value) {
-    std::size_t begin = 0;
-    while (begin < value.size() &&
-           std::isspace(static_cast<unsigned char>(value[begin])) != 0) {
-        ++begin;
-    }
-    std::size_t end = value.size();
-    while (end > begin &&
-           std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
-        --end;
-    }
-    return std::string(value.substr(begin, end - begin));
-}
+struct RegionStepAnalysis {
+    std::vector<std::string> read{};
+    std::vector<std::string> state{};
+    std::vector<std::string> params{};
+    std::vector<std::string> locals{};
+    std::vector<std::string> values{};
+    std::string code{};
+};
 
-[[nodiscard]] std::string upper(std::string value) {
-    for (char& c: value) {
-        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    }
-    return value;
-}
-
-[[nodiscard]] bool is_word_boundary(char c) {
-    return std::isalnum(static_cast<unsigned char>(c)) == 0 && c != '_';
-}
-
-[[nodiscard]] bool starts_keyword_at(std::string_view source,
-                                     std::size_t index,
-                                     std::string_view keyword) {
-    if (index + keyword.size() > source.size()) {
-        return false;
-    }
-    for (std::size_t i = 0; i < keyword.size(); ++i) {
-        if (std::toupper(static_cast<unsigned char>(source[index + i])) !=
-            std::toupper(static_cast<unsigned char>(keyword[i]))) {
-            return false;
-        }
-    }
-    const bool before_ok =
-        index == 0 || is_word_boundary(source[index - 1]);
-    const bool after_ok =
-        index + keyword.size() == source.size() ||
-        is_word_boundary(source[index + keyword.size()]);
-    return before_ok && after_ok;
-}
-
-[[nodiscard]] std::string strip_line_comment(std::string_view line) {
-    bool in_string = false;
-    char quote = '\0';
-    bool escaped = false;
-    for (std::size_t i = 0; i + 1 < line.size(); ++i) {
-        const char c = line[i];
-        if (escaped) {
-            escaped = false;
-            continue;
-        }
-        if (in_string) {
-            if (c == '\\') {
-                escaped = true;
-            } else if (c == quote) {
-                in_string = false;
-            }
-            continue;
-        }
-        if (c == '"' || c == '\'') {
-            in_string = true;
-            quote = c;
-            continue;
-        }
-        if (c == '/' && line[i + 1] == '/') {
-            return std::string(line.substr(0, i));
-        }
-    }
-    return std::string(line);
-}
-
-[[nodiscard]] std::vector<std::string> split_words(std::string_view line) {
-    std::vector<std::string> out;
-    std::string word;
-    for (char c: line) {
-        if (std::isspace(static_cast<unsigned char>(c)) != 0 || c == ',') {
-            if (!word.empty()) {
-                out.push_back(std::move(word));
-                word.clear();
-            }
-            continue;
-        }
-        word.push_back(c);
-    }
-    if (!word.empty()) {
-        out.push_back(std::move(word));
-    }
-    return out;
-}
-
-[[noreturn]] void parse_fail(const std::string& origin, const std::string& message) {
-    throw std::runtime_error(origin + ": " + message);
-}
-
-[[nodiscard]] std::string block_body(std::string_view source,
-                                     std::string_view keyword,
-                                     const std::string& origin,
-                                     bool required) {
-    std::size_t search = 0;
-    while (search < source.size()) {
-        const auto found = source.find(keyword, search);
-        if (found == std::string_view::npos) {
-            break;
-        }
-        if (!starts_keyword_at(source, found, keyword)) {
-            search = found + keyword.size();
-            continue;
-        }
-        auto open = source.find('{', found + keyword.size());
-        if (open == std::string_view::npos) {
-            parse_fail(origin, "block '" + std::string(keyword) + "' is missing '{'");
-        }
-        int depth = 1;
-        bool in_string = false;
-        char quote = '\0';
-        bool escaped = false;
-        for (std::size_t index = open + 1; index < source.size(); ++index) {
-            const char c = source[index];
-            if (escaped) {
-                escaped = false;
-                continue;
-            }
-            if (in_string) {
-                if (c == '\\') {
-                    escaped = true;
-                } else if (c == quote) {
-                    in_string = false;
-                }
-                continue;
-            }
-            if (c == '"' || c == '\'') {
-                in_string = true;
-                quote = c;
-                continue;
-            }
-            if (c == '{') {
-                ++depth;
-            } else if (c == '}') {
-                --depth;
-                if (depth == 0) {
-                    return std::string(source.substr(open + 1, index - open - 1));
-                }
-            }
-        }
-        parse_fail(origin, "block '" + std::string(keyword) + "' is missing '}'");
-    }
-    if (required) {
-        parse_fail(origin, "missing required block '" + std::string(keyword) + "'");
-    }
-    return {};
-}
-
-void append_names(std::vector<std::string>& destination,
-                  const std::vector<std::string>& values,
-                  std::string_view what,
-                  const std::string& origin) {
-    for (const auto& value: values) {
-        if (!is_valid_identifier(value)) {
-            parse_fail(origin, std::string(what) + " name is not a valid identifier: " + value);
-        }
-        if (std::find(destination.begin(), destination.end(), value) == destination.end()) {
-            destination.push_back(value);
-        }
-    }
-}
-
-[[nodiscard]] std::vector<NamedDefault> parse_named_defaults(std::string_view body,
-                                                             std::string_view what,
-                                                             const std::string& origin) {
-    std::vector<NamedDefault> out;
-    std::unordered_set<std::string> seen;
-    std::istringstream lines{std::string(body)};
-    std::string line;
-    while (std::getline(lines, line)) {
-        line = trim(strip_line_comment(line));
-        if (line.empty()) {
-            continue;
-        }
-        const auto words = split_words(line);
-        if (words.empty()) {
-            continue;
-        }
-        const auto name = words.front();
-        if (!is_valid_identifier(name)) {
-            parse_fail(origin, std::string(what) + " name is not a valid identifier: " + name);
-        }
-        if (!seen.insert(name).second) {
-            parse_fail(origin, std::string(what) + " is declared more than once: " + name);
-        }
-        double value = 0.0;
-        const auto eq = line.find('=');
-        if (eq != std::string::npos) {
-            const auto tail = trim(std::string_view(line).substr(eq + 1));
-            char* end = nullptr;
-            value = std::strtod(tail.c_str(), &end);
-            if (end == tail.c_str() || !std::isfinite(value)) {
-                parse_fail(origin, std::string(what) + " default is not a finite number: " + name);
-            }
-        }
-        out.push_back(NamedDefault{.name = name, .value = value});
-    }
-    return out;
-}
+struct FieldStepAnalysis {
+    std::vector<std::string> read{};
+    std::vector<std::string> state{};
+    std::vector<std::string> params{};
+    std::vector<std::string> locals{};
+    std::vector<std::string> local_states{};
+    std::string code{};
+};
 
 [[nodiscard]] std::vector<std::string> names_from_defaults(const std::vector<NamedDefault>& values) {
     std::vector<std::string> out;
@@ -235,362 +46,6 @@ void append_names(std::vector<std::string>& destination,
     }
     return out;
 }
-
-void add_field(std::vector<std::string>& ordered,
-               std::unordered_set<std::string>& seen,
-               const std::string& field) {
-    if (seen.insert(field).second) {
-        ordered.push_back(field);
-    }
-}
-
-bool needs_space(const std::string& previous, const std::string& current) {
-    if (previous.empty()) {
-        return false;
-    }
-    if (current == ")" || current == "]" || current == "}" || current == ";" ||
-        current == "," || current == "." || current == "(" || current == "[") {
-        return false;
-    }
-    if (previous == "(" || previous == "[" || previous == "{" || previous == "." ||
-        previous == "!" || previous == "~") {
-        return false;
-    }
-    return true;
-}
-
-void require_disjoint_bare_names(
-    std::string_view kind,
-    std::initializer_list<std::pair<std::string_view, std::vector<std::string>>> groups) {
-    std::unordered_set<std::string> seen;
-    for (const auto& [group_name, values]: groups) {
-        for (const auto& value: values) {
-            if (!seen.insert(value).second) {
-                throw std::runtime_error(std::string(kind) +
-                                         " uses ambiguous bare variable name: " + value +
-                                         " (" + std::string(group_name) + ")");
-            }
-        }
-    }
-}
-
-[[nodiscard]] std::vector<std::string> ordered_used(const std::vector<std::string>& declared,
-                                                    const std::unordered_set<std::string>& used) {
-    std::vector<std::string> out;
-    for (const auto& field: declared) {
-        if (contains(used, field)) {
-            out.push_back(field);
-        }
-    }
-    return out;
-}
-
-struct BareAnalysis {
-    std::vector<std::string> read{};
-    std::vector<std::string> write{};
-    std::vector<std::string> state{};
-    std::vector<std::string> params{};
-    std::vector<std::string> ports{};
-    std::vector<std::string> random{};
-    std::vector<std::string> edge{};
-    std::vector<std::string> locals{};
-    std::string code{};
-};
-
-[[nodiscard]] BareAnalysis analyze_bare_code(std::string_view kind,
-                                             const std::string& code,
-                                             const std::vector<std::string>& read_fields,
-                                             const std::vector<std::string>& write_fields,
-                                             const std::vector<std::string>& state_fields,
-                                             const std::vector<std::string>& param_fields,
-                                             const std::vector<std::string>& port_names,
-                                             const std::vector<std::string>& random_fields,
-                                             const std::vector<std::string>& edge_fields,
-                                             const std::vector<std::string>& runtime_fields) {
-    const auto read_set = member_set(read_fields);
-    const auto write_set = member_set(write_fields);
-    const auto state_set = member_set(state_fields);
-    const auto param_set = member_set(param_fields);
-    const auto port_set = member_set(port_names);
-    const auto random_set = member_set(random_fields);
-    const auto edge_set = member_set(edge_fields);
-    const auto runtime_set = member_set(runtime_fields);
-    require_disjoint_bare_names(kind,
-                                {{"READ", read_fields},
-                                 {"WRITE", write_fields},
-                                 {"STATE", state_fields},
-                                 {"PARAMETER", param_fields},
-                                 {"EMIT", port_names},
-                                 {"RANDOM", random_fields},
-                                 {"runtime", runtime_fields},
-                                 {"edge", edge_fields}});
-
-    const auto tokens = scan(code, kind);
-    check_balanced(tokens, kind);
-    std::unordered_set<std::string> locals = declared_locals(tokens, kind);
-    std::vector<std::string> local_fields;
-    std::unordered_set<std::string> local_seen;
-    for (const auto& token: tokens) {
-        if (token.kind == TokenKind::Identifier && contains(locals, token.text)) {
-            add_field(local_fields, local_seen, token.text);
-        }
-    }
-
-    BareAnalysis analysis;
-    std::unordered_set<std::string> read_used;
-    std::unordered_set<std::string> write_used;
-    std::unordered_set<std::string> state_used;
-    std::unordered_set<std::string> param_used;
-    std::unordered_set<std::string> port_used;
-    std::unordered_set<std::string> random_used;
-    std::unordered_set<std::string> edge_used;
-
-    std::ostringstream out;
-    std::string previous;
-    bool statement_start = true;
-    int paren_depth = 0;
-    int bracket_depth = 0;
-    for (std::size_t index = 0; index < tokens.size(); ++index) {
-        const auto& token = tokens[index];
-        if (token.kind == TokenKind::Identifier && contains(forbidden_identifiers(), token.text)) {
-            fail(kind, token, "unsupported C++ construct '" + token.text + "'");
-        }
-        if (token.kind == TokenKind::Identifier && token.text == "static_cast") {
-            fail(kind, token, "MIND .mod snippets use double values directly; C++ casts are not supported");
-        }
-        const bool top_level = paren_depth == 0 && bracket_depth == 0;
-        const bool member_access = index > 0 && tokens[index - 1].text == ".";
-        if (!member_access && index + 1 < tokens.size() && tokens[index + 1].text == ".") {
-            fail(kind,
-                 token,
-                 "MIND .mod rules use bare variable names; member access like '" + token.text +
-                     ".' is not supported");
-        }
-
-        const bool known_symbol =
-            contains(locals, token.text) || contains(read_set, token.text) ||
-            contains(write_set, token.text) || contains(state_set, token.text) ||
-            contains(param_set, token.text) || contains(port_set, token.text) ||
-            contains(random_set, token.text) || contains(edge_set, token.text) ||
-            contains(runtime_set, token.text) ||
-            contains(keywords(), token.text) || contains(type_words(), token.text) ||
-            contains(helper_symbols(), token.text);
-        const bool local_assignment = statement_start && top_level &&
-                                      token.kind == TokenKind::Identifier &&
-                                      index + 1 < tokens.size() &&
-                                      tokens[index + 1].text == "=" &&
-                                      !member_access &&
-                                      !known_symbol;
-        if (local_assignment) {
-            names({token.text}, "local");
-            if (needs_space(previous, "double")) {
-                out << ' ';
-            }
-            out << "double";
-            previous = "double";
-            locals.insert(token.text);
-            add_field(local_fields, local_seen, token.text);
-        }
-
-        if (needs_space(previous, token.text)) {
-            out << ' ';
-        }
-        out << token.text;
-        previous = token.text;
-
-        if (token.kind == TokenKind::Identifier && !member_access) {
-            if (contains(read_set, token.text)) {
-                read_used.insert(token.text);
-            } else if (contains(write_set, token.text)) {
-                write_used.insert(token.text);
-            } else if (contains(state_set, token.text)) {
-                state_used.insert(token.text);
-            } else if (contains(param_set, token.text)) {
-                param_used.insert(token.text);
-            } else if (contains(port_set, token.text)) {
-                if (index + 1 >= tokens.size() || tokens[index + 1].text != "(") {
-                    fail(kind, token, "EMIT port '" + token.text + "' must be called as a function");
-                }
-                port_used.insert(token.text);
-            } else if (contains(random_set, token.text)) {
-                const bool first_uniform_arg = index >= 2 && tokens[index - 1].text == "(" &&
-                                               tokens[index - 2].text == "uniform";
-                if (!first_uniform_arg) {
-                    fail(kind,
-                         token,
-                         "RANDOM stream '" + token.text +
-                             "' may only be used as the first argument to uniform(...)");
-                }
-                random_used.insert(token.text);
-            } else if (contains(edge_set, token.text)) {
-                edge_used.insert(token.text);
-            } else if (token.text == "uniform") {
-                if (index + 2 >= tokens.size() || tokens[index + 1].text != "(" ||
-                    token.kind != TokenKind::Identifier ||
-                    tokens[index + 2].kind != TokenKind::Identifier ||
-                    !contains(random_set, tokens[index + 2].text)) {
-                    fail(kind, token, "uniform(...) requires a declared RANDOM stream as its first argument");
-                }
-            } else if (!contains(locals, token.text) && !contains(runtime_set, token.text) &&
-                       !contains(keywords(), token.text) && !contains(type_words(), token.text) &&
-                       !contains(helper_symbols(), token.text)) {
-                names({token.text}, "symbol");
-                fail(kind, token, "unknown symbol '" + token.text + "'");
-            }
-        }
-
-        if (token.text == "(") {
-            ++paren_depth;
-        } else if (token.text == ")" && paren_depth > 0) {
-            --paren_depth;
-        } else if (token.text == "[") {
-            ++bracket_depth;
-        } else if (token.text == "]" && bracket_depth > 0) {
-            --bracket_depth;
-        }
-
-        if ((token.text == ";" && top_level) || token.text == "{" || token.text == "}") {
-            statement_start = true;
-        } else {
-            statement_start = false;
-        }
-    }
-
-    analysis.read = ordered_used(read_fields, read_used);
-    analysis.write = ordered_used(write_fields, write_used);
-    analysis.state = ordered_used(state_fields, state_used);
-    analysis.params = ordered_used(param_fields, param_used);
-    analysis.ports = ordered_used(port_names, port_used);
-    analysis.random = ordered_used(random_fields, random_used);
-    analysis.edge = ordered_used(edge_fields, edge_used);
-    analysis.locals = std::move(local_fields);
-    analysis.code = out.str();
-    return analysis;
-}
-
-}  // namespace
-
-std::string kind_name(RuleKind kind) {
-    switch (kind) {
-    case RuleKind::Coupling:
-        return "coupling";
-    case RuleKind::MicroInput:
-        return "micro_input";
-    case RuleKind::MicroOutput:
-        return "micro_output";
-    }
-    return "unknown";
-}
-
-RuleSpec parse_rule_source(const std::string& source, const std::string& origin) {
-    RuleSpec spec;
-    const auto mind = block_body(source, "MIND", origin, true);
-    bool kind_set = false;
-    std::istringstream lines(mind);
-    std::string line;
-    while (std::getline(lines, line)) {
-        line = trim(strip_line_comment(line));
-        if (line.empty()) {
-            continue;
-        }
-        const auto words = split_words(line);
-        if (words.empty()) {
-            continue;
-        }
-        const auto key = upper(words.front());
-        if (key == "COUPLING" || key == "MICRO_INPUT" || key == "MICRO_OUTPUT") {
-            if (kind_set) {
-                parse_fail(origin, "MIND block declares the rule kind more than once");
-            }
-            kind_set = true;
-            if (words.size() != 2) {
-                parse_fail(origin, key + " declaration requires exactly one rule name");
-            }
-            if (key == "COUPLING") {
-                spec.kind = RuleKind::Coupling;
-            } else if (key == "MICRO_INPUT") {
-                spec.kind = RuleKind::MicroInput;
-            } else {
-                spec.kind = RuleKind::MicroOutput;
-            }
-            spec.name = words[1];
-            if (!is_valid_identifier(spec.name)) {
-                parse_fail(origin, "rule name is not a valid identifier: " + spec.name);
-            }
-        } else if (key == "READ") {
-            append_names(spec.read,
-                         std::vector<std::string>(words.begin() + 1, words.end()),
-                         "READ",
-                         origin);
-        } else if (key == "WRITE") {
-            append_names(spec.write,
-                         std::vector<std::string>(words.begin() + 1, words.end()),
-                         "WRITE",
-                         origin);
-        } else if (key == "EMIT") {
-            append_names(spec.emit,
-                         std::vector<std::string>(words.begin() + 1, words.end()),
-                         "EMIT",
-                         origin);
-        } else if (key == "RANDOM") {
-            append_names(spec.random,
-                         std::vector<std::string>(words.begin() + 1, words.end()),
-                         "RANDOM",
-                         origin);
-        } else {
-            parse_fail(origin, "unknown MIND directive: " + words.front());
-        }
-    }
-    if (!kind_set) {
-        parse_fail(origin, "MIND block must declare COUPLING, MICRO_INPUT, or MICRO_OUTPUT");
-    }
-
-    spec.params = parse_named_defaults(block_body(source, "PARAMETER", origin, false),
-                                       "PARAMETER",
-                                       origin);
-    spec.state = parse_named_defaults(block_body(source, "STATE", origin, false),
-                                      "STATE",
-                                      origin);
-    spec.edge = block_body(source, "EDGE", origin, false);
-    spec.input = block_body(source, "INPUT", origin, false);
-    spec.net_receive = block_body(source, "NET_RECEIVE", origin, false);
-    spec.breakpoint = block_body(source, "BREAKPOINT", origin, false);
-
-    if (spec.kind == RuleKind::Coupling) {
-        if (spec.read.empty()) {
-            parse_fail(origin, "COUPLING rule requires at least one READ exposure");
-        }
-        if (spec.write.empty()) {
-            parse_fail(origin, "COUPLING rule requires at least one WRITE input");
-        }
-        if (trim(spec.edge).empty()) {
-            parse_fail(origin, "COUPLING rule requires an EDGE block");
-        }
-    } else if (spec.kind == RuleKind::MicroInput) {
-        if (spec.emit.empty()) {
-            parse_fail(origin, "MICRO_INPUT rule requires at least one EMIT port");
-        }
-        if (trim(spec.input).empty()) {
-            parse_fail(origin, "MICRO_INPUT rule requires an INPUT block");
-        }
-    } else if (spec.kind == RuleKind::MicroOutput) {
-        if (!spec.random.empty()) {
-            parse_fail(origin, "RANDOM streams are currently supported only by MICRO_INPUT rules");
-        }
-        if (spec.write.empty()) {
-            parse_fail(origin, "MICRO_OUTPUT rule requires at least one WRITE exposure");
-        }
-        if (trim(spec.net_receive).empty() && trim(spec.breakpoint).empty()) {
-            parse_fail(origin, "MICRO_OUTPUT rule requires NET_RECEIVE or BREAKPOINT code");
-        }
-    }
-    if (spec.kind == RuleKind::Coupling && !spec.random.empty()) {
-        parse_fail(origin, "RANDOM streams are currently supported only by MICRO_INPUT rules");
-    }
-    return spec;
-}
-
-namespace {
 
 [[nodiscard]] std::string cpp_string(std::string_view value) {
     std::ostringstream out;
@@ -619,6 +74,349 @@ namespace {
     }
     out << '"';
     return out.str();
+}
+
+bool needs_space(const std::string& previous, const std::string& current) {
+    if (previous.empty()) {
+        return false;
+    }
+    if (current == ")" || current == "]" || current == "}" || current == ";" ||
+        current == "," || current == "." || current == "(" || current == "[") {
+        return false;
+    }
+    if (previous == "(" || previous == "[" || previous == "{" || previous == "." ||
+        previous == "!" || previous == "~") {
+        return false;
+    }
+    return true;
+}
+
+void require_disjoint_names(
+    std::string_view kind,
+    std::initializer_list<std::pair<std::string_view, std::vector<std::string>>> groups) {
+    std::unordered_set<std::string> seen;
+    for (const auto& [group_name, values]: groups) {
+        for (const auto& value: values) {
+            if (!seen.insert(value).second) {
+                throw std::runtime_error(std::string(kind) +
+                                         " uses ambiguous bare variable name: " + value +
+                                         " (" + std::string(group_name) + ")");
+            }
+        }
+    }
+}
+
+[[nodiscard]] std::vector<std::string> ordered_used(const std::vector<std::string>& declared,
+                                                    const std::unordered_set<std::string>& used) {
+    std::vector<std::string> out;
+    for (const auto& field: declared) {
+        if (contains(used, field)) {
+            out.push_back(field);
+        }
+    }
+    return out;
+}
+
+[[nodiscard]] RegionStepAnalysis analyze_region_step(const RuleSpec& spec) {
+    constexpr std::string_view kind = "MindMod region STEP";
+    const auto input_fields = names(spec.read, "READ input");
+    const auto output_fields = names(spec.write, "WRITE exposure");
+    const auto state_fields = names_from_defaults(spec.state);
+    const auto param_fields = names_from_defaults(spec.params);
+    names(state_fields, "STATE");
+    names(param_fields, "PARAMETER");
+    const std::vector<std::string> runtime_fields{"t", "dt", "roi"};
+    require_disjoint_names(kind,
+                           {{"READ", input_fields},
+                            {"STATE", state_fields},
+                            {"PARAMETER", param_fields},
+                            {"runtime", runtime_fields}});
+
+    const auto input_set = member_set(input_fields);
+    const auto state_set = member_set(state_fields);
+    const auto param_set = member_set(param_fields);
+    const auto runtime_set = member_set(runtime_fields);
+    const auto tokens = scan(spec.step, kind);
+    check_balanced(tokens, kind);
+
+    std::unordered_set<std::string> locals = declared_locals(tokens, kind);
+    std::vector<std::string> local_fields;
+    std::unordered_set<std::string> local_seen;
+    for (const auto& token: tokens) {
+        if (token.kind == TokenKind::Identifier && contains(locals, token.text)) {
+            add_field(local_fields, local_seen, token.text);
+        }
+    }
+
+    RegionStepAnalysis analysis;
+    std::unordered_set<std::string> input_used;
+    std::unordered_set<std::string> state_used;
+    std::unordered_set<std::string> param_used;
+    std::ostringstream out;
+    std::string previous;
+    bool statement_start = true;
+    int paren_depth = 0;
+    int bracket_depth = 0;
+
+    for (std::size_t index = 0; index < tokens.size(); ++index) {
+        const auto& token = tokens[index];
+        if (token.kind == TokenKind::Identifier &&
+            (contains(forbidden_identifiers(), token.text) || token.text == "static_cast")) {
+            fail(kind, token, "unsupported C++ construct '" + token.text + "'");
+        }
+        const bool top_level = paren_depth == 0 && bracket_depth == 0;
+        const bool member_access = index > 0 && tokens[index - 1].text == ".";
+        if (!member_access && index + 1 < tokens.size() && tokens[index + 1].text == ".") {
+            fail(kind,
+                 token,
+                 "MIND .mod rules use bare variable names; member access like '" + token.text +
+                     ".' is not supported");
+        }
+        const bool known_symbol =
+            contains(locals, token.text) || contains(input_set, token.text) ||
+            contains(state_set, token.text) || contains(param_set, token.text) ||
+            contains(runtime_set, token.text) || contains(keywords(), token.text) ||
+            contains(type_words(), token.text) || contains(helper_symbols(), token.text);
+        const bool local_assignment = statement_start && top_level &&
+                                      token.kind == TokenKind::Identifier &&
+                                      index + 1 < tokens.size() &&
+                                      tokens[index + 1].text == "=" &&
+                                      !member_access &&
+                                      !known_symbol;
+        if (local_assignment) {
+            names({token.text}, "local");
+            if (needs_space(previous, "double")) {
+                out << ' ';
+            }
+            out << "double";
+            previous = "double";
+            locals.insert(token.text);
+            add_field(local_fields, local_seen, token.text);
+        }
+
+        if (needs_space(previous, token.text)) {
+            out << ' ';
+        }
+        out << token.text;
+        previous = token.text;
+
+        if (token.kind == TokenKind::Identifier && !member_access) {
+            if (contains(input_set, token.text)) {
+                input_used.insert(token.text);
+            } else if (contains(state_set, token.text)) {
+                state_used.insert(token.text);
+            } else if (contains(param_set, token.text)) {
+                param_used.insert(token.text);
+            } else if (!contains(locals, token.text) && !contains(runtime_set, token.text) &&
+                       !contains(keywords(), token.text) && !contains(type_words(), token.text) &&
+                       !contains(helper_symbols(), token.text)) {
+                names({token.text}, "symbol");
+                fail(kind, token, "unknown symbol '" + token.text + "'");
+            }
+        }
+
+        if (token.text == "(") {
+            ++paren_depth;
+        } else if (token.text == ")" && paren_depth > 0) {
+            --paren_depth;
+        } else if (token.text == "[") {
+            ++bracket_depth;
+        } else if (token.text == "]" && bracket_depth > 0) {
+            --bracket_depth;
+        }
+
+        if ((token.text == ";" && top_level) || token.text == "{" || token.text == "}") {
+            statement_start = true;
+        } else {
+            statement_start = false;
+        }
+    }
+
+    analysis.read = ordered_used(input_fields, input_used);
+    analysis.state = ordered_used(state_fields, state_used);
+    analysis.params = ordered_used(param_fields, param_used);
+    require_declared_fields_used("MindMod region", "READ input", analysis.read, input_fields);
+    require_declared_fields_used("MindMod region", "state", analysis.state, state_fields);
+    require_declared_fields_used("MindMod region", "param", analysis.params, param_fields);
+
+    analysis.values = state_fields;
+    std::unordered_set<std::string> value_seen = member_set(analysis.values);
+    for (const auto& local: local_fields) {
+        add_field(analysis.values, value_seen, local);
+    }
+    const auto value_set = member_set(analysis.values);
+    for (const auto& output: output_fields) {
+        if (!contains(value_set, output)) {
+            throw std::runtime_error("MindMod region WRITE exposure is not a state or STEP local: " + output);
+        }
+    }
+    analysis.locals = std::move(local_fields);
+    analysis.code = out.str();
+    return analysis;
+}
+
+[[nodiscard]] FieldStepAnalysis analyze_field_step(const RuleSpec& spec) {
+    constexpr std::string_view kind = "MindMod neural field STEP";
+    const auto input_fields = names(spec.read, "READ input");
+    const auto output_fields = names(spec.write, "WRITE exposure");
+    const auto state_fields = names_from_defaults(spec.state);
+    const auto param_fields = names_from_defaults(spec.params);
+    names(state_fields, "STATE");
+    names(param_fields, "PARAMETER");
+    const std::vector<std::string> runtime_fields{"t", "dt", "roi", "node"};
+    require_disjoint_names(kind,
+                           {{"READ", input_fields},
+                            {"STATE", state_fields},
+                            {"PARAMETER", param_fields},
+                            {"runtime", runtime_fields}});
+
+    const auto input_set = member_set(input_fields);
+    const auto state_set = member_set(state_fields);
+    const auto param_set = member_set(param_fields);
+    const auto runtime_set = member_set(runtime_fields);
+    for (const auto& output: output_fields) {
+        if (!contains(state_set, output)) {
+            throw std::runtime_error("MindMod neural field WRITE exposure must name a STATE: " + output);
+        }
+    }
+
+    const auto tokens = scan(spec.step, kind);
+    check_balanced(tokens, kind);
+    std::unordered_set<std::string> locals = declared_locals(tokens, kind);
+    std::vector<std::string> local_fields;
+    std::unordered_set<std::string> local_seen;
+    for (const auto& token: tokens) {
+        if (token.kind == TokenKind::Identifier && contains(locals, token.text)) {
+            add_field(local_fields, local_seen, token.text);
+        }
+    }
+
+    FieldStepAnalysis analysis;
+    std::unordered_set<std::string> input_used;
+    std::unordered_set<std::string> state_used;
+    std::unordered_set<std::string> param_used;
+    std::unordered_set<std::string> local_state_seen;
+    std::ostringstream out;
+    std::string previous;
+    bool statement_start = true;
+    int paren_depth = 0;
+    int bracket_depth = 0;
+
+    for (std::size_t index = 0; index < tokens.size(); ++index) {
+        const auto& token = tokens[index];
+        if (token.kind == TokenKind::Identifier &&
+            (contains(forbidden_identifiers(), token.text) || token.text == "static_cast")) {
+            fail(kind, token, "unsupported C++ construct '" + token.text + "'");
+        }
+        const bool top_level = paren_depth == 0 && bracket_depth == 0;
+        const bool member_access = index > 0 && tokens[index - 1].text == ".";
+        if (!member_access && index + 1 < tokens.size() && tokens[index + 1].text == ".") {
+            fail(kind,
+                 token,
+                 "MIND .mod rules use bare variable names; member access like '" + token.text +
+                     ".' is not supported");
+        }
+
+        if (token.kind == TokenKind::Identifier && token.text == "local" && !member_access) {
+            if (index + 3 >= tokens.size() || tokens[index + 1].text != "(" ||
+                tokens[index + 2].kind != TokenKind::Identifier ||
+                tokens[index + 3].text != ")") {
+                fail(kind, token, "local coupling must be written as local(state_name)");
+            }
+            const auto& state = tokens[index + 2];
+            if (!contains(state_set, state.text)) {
+                fail(kind, state, "local() argument must be a declared STATE");
+            }
+            state_used.insert(state.text);
+            add_field(analysis.local_states, local_state_seen, state.text);
+            const auto replacement = "local_" + state.text;
+            if (needs_space(previous, replacement)) {
+                out << ' ';
+            }
+            out << replacement;
+            previous = replacement;
+            index += 3;
+            statement_start = false;
+            continue;
+        }
+
+        const bool known_symbol =
+            contains(locals, token.text) || contains(input_set, token.text) ||
+            contains(state_set, token.text) || contains(param_set, token.text) ||
+            contains(runtime_set, token.text) || contains(keywords(), token.text) ||
+            contains(type_words(), token.text) || contains(helper_symbols(), token.text) ||
+            token.text == "local";
+        const bool local_assignment = statement_start && top_level &&
+                                      token.kind == TokenKind::Identifier &&
+                                      index + 1 < tokens.size() &&
+                                      tokens[index + 1].text == "=" &&
+                                      !member_access &&
+                                      !known_symbol;
+        if (local_assignment) {
+            names({token.text}, "local");
+            if (needs_space(previous, "double")) {
+                out << ' ';
+            }
+            out << "double";
+            previous = "double";
+            locals.insert(token.text);
+            add_field(local_fields, local_seen, token.text);
+        }
+
+        if (needs_space(previous, token.text)) {
+            out << ' ';
+        }
+        out << token.text;
+        previous = token.text;
+
+        if (token.kind == TokenKind::Identifier && !member_access) {
+            if (contains(input_set, token.text)) {
+                input_used.insert(token.text);
+            } else if (contains(state_set, token.text)) {
+                state_used.insert(token.text);
+            } else if (contains(param_set, token.text)) {
+                param_used.insert(token.text);
+            } else if (!contains(locals, token.text) && !contains(runtime_set, token.text) &&
+                       !contains(keywords(), token.text) && !contains(type_words(), token.text) &&
+                       !contains(helper_symbols(), token.text) && token.text != "local") {
+                names({token.text}, "symbol");
+                fail(kind, token, "unknown symbol '" + token.text + "'");
+            }
+        }
+
+        if (token.text == "(") {
+            ++paren_depth;
+        } else if (token.text == ")" && paren_depth > 0) {
+            --paren_depth;
+        } else if (token.text == "[") {
+            ++bracket_depth;
+        } else if (token.text == "]" && bracket_depth > 0) {
+            --bracket_depth;
+        }
+
+        if ((token.text == ";" && top_level) || token.text == "{" || token.text == "}") {
+            statement_start = true;
+        } else {
+            statement_start = false;
+        }
+    }
+
+    analysis.read = ordered_used(input_fields, input_used);
+    analysis.state = ordered_used(state_fields, state_used);
+    analysis.params = ordered_used(param_fields, param_used);
+    require_declared_fields_used("MindMod neural field", "READ input", analysis.read, input_fields);
+    require_declared_fields_used("MindMod neural field", "state", analysis.state, state_fields);
+    require_declared_fields_used("MindMod neural field", "param", analysis.params, param_fields);
+    for (const auto& state: analysis.local_states) {
+        const auto generated = "local_" + state;
+        if (contains(locals, generated) || contains(param_set, generated) ||
+            contains(state_set, generated) || contains(input_set, generated)) {
+            throw std::runtime_error("MindMod neural field local() helper conflicts with name: " + generated);
+        }
+    }
+    analysis.locals = std::move(local_fields);
+    analysis.code = out.str();
+    return analysis;
 }
 
 void append_name_array(std::ostringstream& source,
@@ -683,6 +481,8 @@ struct mind_rule_descriptor {
     const double* state_defaults;
     int random_count;
     const char* const* random_names;
+    int local_state_count;
+    const char* const* local_state_names;
 };
 
 struct mind_event_writer {
@@ -759,16 +559,56 @@ struct mind_micro_output_context {
     double stop_time;
     const int* write_exposure_offsets;
 };
+
+struct mind_region_context {
+    int owner_count;
+    const int* roi_indices;
+    int roi_count;
+    int input_count;
+    const double* input_soa;
+    int exposure_count;
+    double* exposure_soa;
+    int state_count;
+    double* state_soa;
+    int param_count;
+    const double* params_soa;
+    const int* read_input_offsets;
+    const int* write_exposure_offsets;
+    double t;
+    double dt;
+};
+
+struct mind_neural_field_context {
+    int node_count;
+    const int* node_to_roi;
+    int roi_count;
+    int input_count;
+    const double* input_soa;
+    int state_count;
+    const double* previous_state_soa;
+    double* state_soa;
+    int param_count;
+    const double* params;
+    const int* local_indptr;
+    const int* local_indices;
+    const double* local_weights;
+    const int* read_input_offsets;
+    double t;
+    double dt;
+};
 )cpp";
 }
 
-void append_descriptor(std::ostringstream& source, const RuleSpec& spec) {
+void append_descriptor(std::ostringstream& source,
+                       const RuleSpec& spec,
+                       const std::vector<std::string>& local_states) {
     const auto param_names = names_from_defaults(spec.params);
     const auto state_names = names_from_defaults(spec.state);
     append_name_array(source, "mind_read_names", spec.read);
     append_name_array(source, "mind_write_names", spec.write);
     append_name_array(source, "mind_emit_names", spec.emit);
     append_name_array(source, "mind_random_names", spec.random);
+    append_name_array(source, "mind_local_state_names", local_states);
     append_name_array(source, "mind_param_names", param_names);
     append_name_array(source, "mind_state_names", state_names);
     append_default_array(source, "mind_param_defaults", spec.params);
@@ -778,9 +618,13 @@ void append_descriptor(std::ostringstream& source, const RuleSpec& spec) {
         kind = 1;
     } else if (spec.kind == RuleKind::MicroOutput) {
         kind = 2;
+    } else if (spec.kind == RuleKind::Region) {
+        kind = 3;
+    } else if (spec.kind == RuleKind::NeuralField) {
+        kind = 4;
     }
     source << "static const mind_rule_descriptor mind_descriptor = {\n";
-    source << "    2,\n";
+    source << "    3,\n";
     source << "    " << kind << ",\n";
     source << "    " << cpp_string(spec.name) << ",\n";
     source << "    " << spec.read.size() << ", " << array_pointer("mind_read_names", spec.read) << ",\n";
@@ -794,6 +638,8 @@ void append_descriptor(std::ostringstream& source, const RuleSpec& spec) {
            << default_pointer("mind_state_defaults", spec.state) << ",\n";
     source << "    " << spec.random.size() << ", "
            << array_pointer("mind_random_names", spec.random) << ",\n";
+    source << "    " << local_states.size() << ", "
+           << array_pointer("mind_local_state_names", local_states) << ",\n";
     source << "};\n";
     source << R"cpp(
 extern "C" const mind_rule_descriptor* mind_rule_descriptor() {
@@ -818,6 +664,125 @@ void append_state_refs(std::ostringstream& source,
     for (std::size_t index = 0; index < fields.size(); ++index) {
         source << spaces << "double& " << fields[index] << " = state[" << index << "];\n";
     }
+}
+
+void append_compiled_region(std::ostringstream& source,
+                            const RuleSpec& spec,
+                            const RegionStepAnalysis& analysis) {
+    const auto input_fields = names(spec.read, "READ input");
+    const auto output_fields = names(spec.write, "WRITE exposure");
+    const auto state_fields = names_from_defaults(spec.state);
+    const auto param_fields = names_from_defaults(spec.params);
+
+    source << R"cpp(
+extern "C" void mind_region_rule_apply(const mind_region_context* ctx) {
+    const int owner_count = ctx->owner_count;
+    const int* roi_indices = ctx->roi_indices;
+    const int roi_count = ctx->roi_count;
+    const double* input_soa = ctx->input_soa;
+    double* exposure_soa = ctx->exposure_soa;
+    double* state_soa = ctx->state_soa;
+    const double* params_soa = ctx->params_soa;
+    const int* read_offsets = ctx->read_input_offsets;
+    const int* write_offsets = ctx->write_exposure_offsets;
+    const double t = ctx->t;
+    const double dt = ctx->dt;
+    (void)owner_count;
+    (void)roi_count;
+    (void)input_soa;
+    (void)exposure_soa;
+    (void)state_soa;
+    (void)params_soa;
+    (void)read_offsets;
+    (void)write_offsets;
+    (void)t;
+    (void)dt;
+    for (int unit = 0; unit < owner_count; ++unit) {
+        const int roi = roi_indices[unit];
+)cpp";
+    for (std::size_t index = 0; index < input_fields.size(); ++index) {
+        source << "        const double " << input_fields[index]
+               << " = input_soa[read_offsets[" << index << "] + roi];\n";
+    }
+    for (std::size_t state = 0; state < state_fields.size(); ++state) {
+        source << "        double& " << state_fields[state] << " = state_soa[("
+               << state << " * owner_count) + unit];\n";
+    }
+    for (std::size_t param = 0; param < param_fields.size(); ++param) {
+        source << "        const double " << param_fields[param] << " = params_soa[("
+               << param << " * owner_count) + unit];\n";
+    }
+    source << indent_block(analysis.code, 8);
+    for (std::size_t index = 0; index < output_fields.size(); ++index) {
+        source << "        exposure_soa[write_offsets[" << index << "] + roi] = "
+               << output_fields[index] << ";\n";
+    }
+    source << R"cpp(    }
+}
+)cpp";
+}
+
+void append_compiled_neural_field(std::ostringstream& source,
+                                  const RuleSpec& spec,
+                                  const FieldStepAnalysis& analysis) {
+    const auto input_fields = names(spec.read, "READ input");
+    const auto state_fields = names_from_defaults(spec.state);
+    const auto param_fields = names_from_defaults(spec.params);
+
+    source << R"cpp(
+extern "C" void mind_neural_field_rule_apply(const mind_neural_field_context* ctx) {
+    const int node_count = ctx->node_count;
+    const int* node_to_roi = ctx->node_to_roi;
+    const int roi_count = ctx->roi_count;
+    const double* input_soa = ctx->input_soa;
+    const double* previous_state_soa = ctx->previous_state_soa;
+    double* state_soa = ctx->state_soa;
+    const double* params = ctx->params;
+    const int* local_indptr = ctx->local_indptr;
+    const int* local_indices = ctx->local_indices;
+    const double* local_weights = ctx->local_weights;
+    const int* read_offsets = ctx->read_input_offsets;
+    const double t = ctx->t;
+    const double dt = ctx->dt;
+    (void)node_count;
+    (void)node_to_roi;
+    (void)roi_count;
+    (void)input_soa;
+    (void)previous_state_soa;
+    (void)state_soa;
+    (void)params;
+    (void)local_indptr;
+    (void)local_indices;
+    (void)local_weights;
+    (void)read_offsets;
+    (void)t;
+    (void)dt;
+    for (int node = 0; node < node_count; ++node) {
+        const int roi = node_to_roi[node];
+)cpp";
+    for (std::size_t index = 0; index < input_fields.size(); ++index) {
+        source << "        const double " << input_fields[index]
+               << " = input_soa[read_offsets[" << index << "] + roi];\n";
+    }
+    for (std::size_t state = 0; state < state_fields.size(); ++state) {
+        source << "        double& " << state_fields[state] << " = state_soa[("
+               << state << " * node_count) + node];\n";
+    }
+    for (const auto& state: analysis.local_states) {
+        const auto state_index = schema_field_index(state_fields, state);
+        source << "        double local_" << state << " = 0.0;\n";
+        source << "        for (int edge = local_indptr[node]; edge < local_indptr[node + 1]; ++edge) {\n";
+        source << "            local_" << state << " += local_weights[edge] * previous_state_soa[("
+               << state_index << " * node_count) + local_indices[edge]];\n";
+        source << "        }\n";
+    }
+    for (std::size_t param = 0; param < param_fields.size(); ++param) {
+        source << "        const double " << param_fields[param] << " = params[" << param << "];\n";
+    }
+    source << indent_block(analysis.code, 8);
+    source << R"cpp(    }
+}
+)cpp";
 }
 
 void append_compiled_coupling(std::ostringstream& source, const RuleSpec& spec) {
@@ -1051,18 +1016,32 @@ extern "C" void mind_micro_output_rule_apply(const mind_micro_output_context* ct
 std::string compiled_rule_source(const std::string& source_text,
                                  const std::string& origin) {
     const auto spec = parse_rule_source(source_text, origin);
+    RegionStepAnalysis region_analysis;
+    FieldStepAnalysis field_analysis;
+    std::vector<std::string> local_states;
+    if (spec.kind == RuleKind::Region) {
+        region_analysis = analyze_region_step(spec);
+    } else if (spec.kind == RuleKind::NeuralField) {
+        field_analysis = analyze_field_step(spec);
+        local_states = field_analysis.local_states;
+    }
     std::ostringstream source;
     source << common_helpers();
     source << compiled_abi_source();
-    append_descriptor(source, spec);
+    append_descriptor(source, spec, local_states);
     if (spec.kind == RuleKind::Coupling) {
         append_compiled_coupling(source, spec);
     } else if (spec.kind == RuleKind::MicroInput) {
         append_compiled_micro_input(source, spec);
-    } else {
+    } else if (spec.kind == RuleKind::MicroOutput) {
         append_compiled_micro_output(source, spec);
+    } else if (spec.kind == RuleKind::Region) {
+        append_compiled_region(source, spec, region_analysis);
+    } else {
+        append_compiled_neural_field(source, spec, field_analysis);
     }
     return source.str();
 }
+
 
 }  // namespace mind_sim::mind_mod

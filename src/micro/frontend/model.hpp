@@ -268,6 +268,7 @@ class MicroFrontendModel {
     void require_morphology() const;
     [[nodiscard]] std::size_t require_insert_index(int insert_id) const;
     [[nodiscard]] mind_micro_biophysical::ParamList params_for_insert(int insert_id) const;
+    [[nodiscard]] double* resolve_variable_pointer(const VariableRef& ref, const char* action) const;
     void init_section_properties();
     [[nodiscard]] std::size_t section_property_offset(int gid, std::size_t section_index) const;
     void load_default_mechanism_metadata();

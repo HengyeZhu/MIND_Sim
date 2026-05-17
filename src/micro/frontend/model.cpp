@@ -262,16 +262,6 @@ void build_population_layout(const std::vector<TemplateBuildScratch>& built,
     return ranges;
 }
 
-mind_micro_biophysical::ParamValue* find_param(mind_micro_biophysical::ParamList& params,
-                                               const std::string& key) {
-    for (auto& [name, value] : params) {
-        if (name == key) {
-            return &value;
-        }
-    }
-    return nullptr;
-}
-
 const mind_micro_biophysical::ParamValue* find_param(const mind_micro_biophysical::ParamList& params,
                                                      const std::string& key) {
     for (const auto& [name, value] : params) {
@@ -1270,131 +1260,25 @@ int MicroFrontendModel::netcon_source_event_target_id(int connection_id) const {
     return network_registry_.get_netcon_source_event_target_id(connection_id);
 }
 
-double MicroFrontendModel::read_variable(const VariableRef& ref) const {
+double* MicroFrontendModel::resolve_variable_pointer(const VariableRef& ref, const char* action) const {
     require_morphology();
-    auto resolve_voltage_node = [&]() {
-        if (core_neuron_data_->threads.empty()) {
-            throw std::runtime_error("micro variable read requires built CoreNEURON thread data");
-        }
-        const int original_node = resolve_original_node(morph_layout_, ref.gid, ref.section_index, ref.x);
-        const int node_index = runtime_node_for_original(original_node);
-        const auto values = core_neuron_data_->threads.front().actual_v();
-        if (node_index < 0 || static_cast<std::size_t>(node_index) >= values.size()) {
-            throw std::runtime_error("variable read resolved an invalid node index");
-        }
-        return node_index;
-    };
-    if (ref.kind == VariableRef::Kind::LocationVoltage ||
-        (ref.kind == VariableRef::Kind::Location && ref.mech == "global" && ref.var == "v")) {
-        const int node_index = resolve_voltage_node();
-        const auto values = core_neuron_data_->threads.front().actual_v();
-        return values[static_cast<std::size_t>(node_index)];
+    if (core_neuron_data_->threads.empty()) {
+        throw std::runtime_error(std::string("micro variable ") + action +
+                                 " requires built CoreNEURON thread data");
     }
-    if (ref.kind == VariableRef::Kind::Location) {
-        if (ref.mech.empty() || ref.var.empty()) {
-            throw std::runtime_error("mechanism variable read requires non-empty mechanism and variable names");
-        }
-        const int node_index = resolve_voltage_node();
-        const auto type_it = core_neuron_data_->mechanism_type.find(ref.mech);
-        if (type_it == core_neuron_data_->mechanism_type.end()) {
-            throw std::runtime_error("mechanism variable read requested an unbuilt mechanism: " + ref.mech);
-        }
-        const int type = type_it->second;
-        const auto& thread = core_neuron_data_->threads.front();
-        const auto ml_it = std::find_if(
-            thread.memb_lists.begin(),
-            thread.memb_lists.end(),
-            [type](const auto& ml) { return ml.type == type; });
-        if (ml_it == thread.memb_lists.end()) {
-            throw std::runtime_error("mechanism variable read found no Memb_list for: " + ref.mech);
-        }
-        const auto& metadata = mechanism_catalog_.require(ref.mech);
-        const auto field_it = metadata.field_index_by_name.find(ref.var);
-        if (field_it == metadata.field_index_by_name.end()) {
-            throw std::runtime_error("mechanism variable is not a CoreNEURON data field: " +
-                                     ref.mech + "." + ref.var);
-        }
-        const auto& field = metadata.fields[static_cast<std::size_t>(field_it->second)];
-        if (ref.array_index >= field.array_size) {
-            throw std::runtime_error("mechanism variable array index is out of range for: " +
-                                     ref.mech + "." + ref.var);
-        }
-        const int field_offset =
-            metadata.field_data_offsets[static_cast<std::size_t>(field_it->second)] +
-            std::max(ref.array_index, 0);
-        if (field_offset < 0) {
-            throw std::runtime_error("mechanism variable is not stored in CoreNEURON data: " +
-                                     ref.mech + "." + ref.var);
-        }
-        const auto instance_it = std::find(
-            ml_it->nodeindices.begin(),
-            ml_it->nodeindices.end(),
-            node_index);
-        if (instance_it == ml_it->nodeindices.end()) {
-            throw std::runtime_error("mechanism variable read found no instance for: " +
-                                     ref.mech + "." + ref.var);
-        }
-        const auto instance_index = static_cast<std::size_t>(
-            std::distance(ml_it->nodeindices.begin(), instance_it));
-        const auto padded_count = static_cast<std::size_t>(ml_it->ml._nodecount_padded);
-        const auto data_index = static_cast<std::size_t>(field_offset) * padded_count + instance_index;
-        return ml_it->ml.data[data_index];
-    }
-    if (ref.kind == VariableRef::Kind::Mechanism) {
-        const auto insert_index = require_insert_index(ref.insert_id);
-        const auto& insert = core_mechanism_builder_.inserts[insert_index];
-        if (insert.placement == MechanismPlacementKind::SectionSet) {
-            throw std::runtime_error("object variable read requires a point process or artificial cell");
-        }
-        const auto& metadata = mechanism_catalog_.require(insert.metadata_id);
-        const auto field_it = metadata.field_index_by_name.find(ref.var);
-        if (field_it == metadata.field_index_by_name.end()) {
-            throw std::runtime_error("mechanism variable is not a CoreNEURON data field: " +
-                                     metadata.name + "." + ref.var);
-        }
-        const auto& field = metadata.fields[static_cast<std::size_t>(field_it->second)];
-        if (ref.array_index >= field.array_size) {
-            throw std::runtime_error("mechanism variable array index is out of range for: " +
-                                     metadata.name + "." + ref.var);
-        }
-        const int field_offset =
-            metadata.field_data_offsets[static_cast<std::size_t>(field_it->second)] +
-            std::max(ref.array_index, 0);
-        if (field_offset < 0) {
-            throw std::runtime_error("mechanism variable is not stored in CoreNEURON data: " +
-                                     metadata.name + "." + ref.var);
-        }
-        const auto& thread = core_neuron_data_->threads.front();
-        const auto ml_it = std::find_if(
-            thread.memb_lists.begin(),
-            thread.memb_lists.end(),
-            [&](const auto& ml) { return ml.type == insert.runtime_type; });
-        if (ml_it == thread.memb_lists.end()) {
-            throw std::runtime_error("object variable read found no Memb_list for: " + metadata.name);
-        }
-        const auto instance_index = insert.instance_begin;
-        const auto data_index = static_cast<std::size_t>(field_offset) *
-                                    static_cast<std::size_t>(ml_it->ml._nodecount_padded) +
-                                instance_index;
-        return ml_it->ml.data[data_index];
-    }
-    throw std::runtime_error("read_variable currently supports voltage, density variables, and object variables");
-}
+    auto& thread = core_neuron_data_->threads.front();
 
-double* MicroFrontendModel::variable_pointer(const VariableRef& ref) {
-    require_morphology();
     auto resolve_voltage_node = [&]() {
-        if (core_neuron_data_->threads.empty()) {
-            throw std::runtime_error("micro variable record requires built CoreNEURON thread data");
-        }
         const int original_node = resolve_original_node(morph_layout_, ref.gid, ref.section_index, ref.x);
         const int node_index = runtime_node_for_original(original_node);
-        if (node_index < 0 ||
-            static_cast<std::size_t>(node_index) >= core_neuron_data_->threads.front().actual_v().size()) {
-            throw std::runtime_error("variable record resolved an invalid node index");
+        const auto values = thread.actual_v();
+        if (node_index < 0 || static_cast<std::size_t>(node_index) >= values.size()) {
+            throw std::runtime_error(std::string("variable ") + action +
+                                     " resolved an invalid node index");
         }
         return node_index;
     };
+
     auto resolve_field_offset = [](const mind_micro_biophysical::MechanismMetadata& metadata,
                                    const std::string& var,
                                    int array_index) {
@@ -1421,26 +1305,28 @@ double* MicroFrontendModel::variable_pointer(const VariableRef& ref) {
     if (ref.kind == VariableRef::Kind::LocationVoltage ||
         (ref.kind == VariableRef::Kind::Location && ref.mech == "global" && ref.var == "v")) {
         const int node_index = resolve_voltage_node();
-        auto values = core_neuron_data_->threads.front().actual_v();
+        auto values = thread.actual_v();
         return values.data() + static_cast<std::size_t>(node_index);
     }
     if (ref.kind == VariableRef::Kind::Location) {
         if (ref.mech.empty() || ref.var.empty()) {
-            throw std::runtime_error("mechanism variable record requires non-empty mechanism and variable names");
+            throw std::runtime_error(std::string("mechanism variable ") + action +
+                                     " requires non-empty mechanism and variable names");
         }
         const int node_index = resolve_voltage_node();
         const auto type_it = core_neuron_data_->mechanism_type.find(ref.mech);
         if (type_it == core_neuron_data_->mechanism_type.end()) {
-            throw std::runtime_error("mechanism variable record requested an unbuilt mechanism: " + ref.mech);
+            throw std::runtime_error(std::string("mechanism variable ") + action +
+                                     " requested an unbuilt mechanism: " + ref.mech);
         }
         const int type = type_it->second;
-        auto& thread = core_neuron_data_->threads.front();
         const auto ml_it = std::find_if(
             thread.memb_lists.begin(),
             thread.memb_lists.end(),
             [type](const auto& ml) { return ml.type == type; });
         if (ml_it == thread.memb_lists.end() || ml_it->ml.data == nullptr) {
-            throw std::runtime_error("mechanism variable record found no Memb_list for: " + ref.mech);
+            throw std::runtime_error(std::string("mechanism variable ") + action +
+                                     " found no Memb_list for: " + ref.mech);
         }
         const auto& metadata = mechanism_catalog_.require(ref.mech);
         const int field_offset = resolve_field_offset(metadata, ref.var, ref.array_index);
@@ -1449,7 +1335,8 @@ double* MicroFrontendModel::variable_pointer(const VariableRef& ref) {
             ml_it->nodeindices.end(),
             node_index);
         if (instance_it == ml_it->nodeindices.end()) {
-            throw std::runtime_error("mechanism variable record found no instance for: " +
+            throw std::runtime_error(std::string("mechanism variable ") + action +
+                                     " found no instance for: " +
                                      ref.mech + "." + ref.var);
         }
         const auto instance_index = static_cast<std::size_t>(
@@ -1462,17 +1349,18 @@ double* MicroFrontendModel::variable_pointer(const VariableRef& ref) {
         const auto insert_index = require_insert_index(ref.insert_id);
         const auto& insert = core_mechanism_builder_.inserts[insert_index];
         if (insert.placement == MechanismPlacementKind::SectionSet) {
-            throw std::runtime_error("object variable record requires a point process or artificial cell");
+            throw std::runtime_error(std::string("object variable ") + action +
+                                     " requires a point process or artificial cell");
         }
         const auto& metadata = mechanism_catalog_.require(insert.metadata_id);
         const int field_offset = resolve_field_offset(metadata, ref.var, ref.array_index);
-        auto& thread = core_neuron_data_->threads.front();
         const auto ml_it = std::find_if(
             thread.memb_lists.begin(),
             thread.memb_lists.end(),
             [&](const auto& ml) { return ml.type == insert.runtime_type; });
         if (ml_it == thread.memb_lists.end() || ml_it->ml.data == nullptr) {
-            throw std::runtime_error("object variable record found no Memb_list for: " + metadata.name);
+            throw std::runtime_error(std::string("object variable ") + action +
+                                     " found no Memb_list for: " + metadata.name);
         }
         const auto instance_index = insert.instance_begin;
         const auto data_index = static_cast<std::size_t>(field_offset) *
@@ -1480,167 +1368,16 @@ double* MicroFrontendModel::variable_pointer(const VariableRef& ref) {
                                 instance_index;
         return ml_it->ml.data + data_index;
     }
-    throw std::runtime_error("record currently supports voltage, density variables, and object variables");
+    throw std::runtime_error(std::string(action) +
+                             " currently supports voltage, density variables, and object variables");
 }
 
-int MicroFrontendModel::build_microcircuit() {
-    require_morphology();
-    rebuild_core_mechanisms();
-    rebuild_core_network();
-    microcircuit_built_ = true;
-    core_initialized_ = false;
-    runtime_backend_.reset();
-    return 0;
+double MicroFrontendModel::read_variable(const VariableRef& ref) const {
+    return *resolve_variable_pointer(ref, "read");
 }
 
-int MicroFrontendModel::finitialize(double v_init) {
-    require_morphology();
-    if (!microcircuit_built_) {
-        throw std::runtime_error("finitialize requires build_microcircuit first");
-    }
-    mind_micro_biophysical::validate_section_property_value(
-        mind_micro_biophysical::ObjectOpKind::VInit,
-        v_init);
-    t_ = 0.0;
-    if (!core_neuron_data_->threads.empty()) {
-        auto& nt = core_neuron_data_->threads.front();
-        auto values = nt.actual_v();
-        std::fill(values.begin(), values.end(), v_init);
-        nt._t = 0.0;
-        core_neuron_data_->bind();
-    }
-    runtime_backend_ = std::make_unique<mind_sim::micro::sim::MicroRuntime>(*core_neuron_data_);
-    runtime_backend_->finitialize(v_init);
-    core_initialized_ = true;
-    return 0;
-}
-
-int MicroFrontendModel::run(double tstop) {
-    if (!std::isfinite(tstop) || tstop < t_) {
-        throw std::runtime_error("run target time must be finite and >= current time");
-    }
-    return continue_run(tstop - t_);
-}
-
-int MicroFrontendModel::continue_run(double runtime) {
-    if (!std::isfinite(runtime) || runtime < 0.0) {
-        throw std::runtime_error("continue_run duration must be finite and non-negative");
-    }
-    if (!core_initialized_) {
-        throw std::runtime_error("continue_run requires finitialize first");
-    }
-    if (!runtime_backend_) {
-        runtime_backend_ = std::make_unique<mind_sim::micro::sim::MicroRuntime>(*core_neuron_data_);
-    }
-    (void) runtime_backend_->advance_window(t_, t_ + runtime);
-    t_ += runtime;
-    return 0;
-}
-
-int MicroFrontendModel::continue_run_with_recording(double runtime,
-                                                    const std::vector<VariableRef>& refs,
-                                                    const std::vector<double*>& sample_buffers,
-                                                    int sample_count) {
-    if (!std::isfinite(runtime) || runtime < 0.0) {
-        throw std::runtime_error("recorded continue_run duration must be finite and non-negative");
-    }
-    if (sample_count < 0) {
-        throw std::runtime_error("recorded continue_run sample count must be non-negative");
-    }
-    if (refs.size() != sample_buffers.size()) {
-        throw std::runtime_error("recorded continue_run refs and buffers size mismatch");
-    }
-    if (!core_initialized_) {
-        throw std::runtime_error("recorded continue_run requires finitialize first");
-    }
-    if (core_neuron_data_->threads.empty()) {
-        throw std::runtime_error("recorded continue_run requires built CoreNEURON thread data");
-    }
-    if (refs.empty() || sample_count == 0) {
-        return continue_run(runtime);
-    }
-
-    std::vector<void*> vpr(refs.size(), nullptr);
-    std::vector<double*> gather;
-    std::vector<double*> varrays;
-    gather.reserve(refs.size());
-    varrays.reserve(sample_buffers.size());
-    for (std::size_t i = 0; i < refs.size(); ++i) {
-        if (sample_buffers[i] == nullptr) {
-            throw std::runtime_error("recorded continue_run received null sample buffer");
-        }
-        gather.push_back(variable_pointer(refs[i]));
-        varrays.push_back(sample_buffers[i]);
-    }
-
-    auto& nt = core_neuron_data_->threads.front();
-    if (nt.trajec_requests != nullptr) {
-        throw std::runtime_error("CoreNEURON trajectory recording is already active");
-    }
-    coreneuron::TrajectoryRequests trajectory{};
-    trajectory.vpr = vpr.data();
-    trajectory.scatter = nullptr;
-    trajectory.varrays = varrays.data();
-    trajectory.gather = gather.data();
-    trajectory.n_pr = static_cast<int>(refs.size());
-    trajectory.n_trajec = static_cast<int>(refs.size());
-    trajectory.bsize = sample_count;
-    trajectory.vsize = 0;
-
-    const bool use_gpu =
-        core_neuron_data_->device_config.kind == mind_sim::micro::sim::MicroDeviceKind::Gpu;
-#if !defined(MIND_SIM_ENABLE_GPU) || !defined(CORENEURON_ENABLE_GPU)
-    if (use_gpu) {
-        throw std::runtime_error(
-            "MIND_Sim was built without CoreNEURON GPU support; rebuild with -DMIND_SIM_ENABLE_GPU=ON");
-    }
-#endif
-
-    nt.trajec_requests = &trajectory;
-    try {
-#if defined(MIND_SIM_ENABLE_GPU) && defined(CORENEURON_ENABLE_GPU)
-        if (use_gpu && core_neuron_data_->gpu_device_runtime_active) {
-            core_neuron_data_->bind();
-            coreneuron::nrn_nthread = static_cast<int>(core_neuron_data_->threads.size());
-            coreneuron::nrn_threads = core_neuron_data_->threads.data();
-            coreneuron::setup_trajectory_requests_on_device(coreneuron::nrn_threads,
-                                                            coreneuron::nrn_nthread);
-        }
-#endif
-        continue_run(runtime);
-#if defined(MIND_SIM_ENABLE_GPU) && defined(CORENEURON_ENABLE_GPU)
-        if (use_gpu && core_neuron_data_->gpu_device_runtime_active) {
-            core_neuron_data_->bind();
-            coreneuron::nrn_nthread = static_cast<int>(core_neuron_data_->threads.size());
-            coreneuron::nrn_threads = core_neuron_data_->threads.data();
-            coreneuron::update_trajectory_requests_on_host(coreneuron::nrn_threads,
-                                                           coreneuron::nrn_nthread);
-            coreneuron::delete_trajectory_requests_on_device(coreneuron::nrn_threads,
-                                                             coreneuron::nrn_nthread);
-        }
-#endif
-    } catch (...) {
-#if defined(MIND_SIM_ENABLE_GPU) && defined(CORENEURON_ENABLE_GPU)
-        if (use_gpu && core_neuron_data_->gpu_device_runtime_active) {
-            try {
-                core_neuron_data_->bind();
-                coreneuron::nrn_nthread = static_cast<int>(core_neuron_data_->threads.size());
-                coreneuron::nrn_threads = core_neuron_data_->threads.data();
-                coreneuron::delete_trajectory_requests_on_device(coreneuron::nrn_threads,
-                                                                 coreneuron::nrn_nthread);
-            } catch (...) {
-            }
-        }
-#endif
-        nt.trajec_requests = nullptr;
-        throw;
-    }
-    nt.trajec_requests = nullptr;
-    return trajectory.vsize;
-}
-
-int MicroFrontendModel::fadvance() {
-    return continue_run(dt_);
+double* MicroFrontendModel::variable_pointer(const VariableRef& ref) {
+    return resolve_variable_pointer(ref, "record");
 }
 
 const mind_micro_model::CellTemplateMorphLayout& MicroFrontendModel::morph_layout() const {

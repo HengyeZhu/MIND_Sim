@@ -55,6 +55,7 @@ env/
 
 # Generated NMODL / nrnivmodl byproducts
 examples/cosim_arbor_hhplus/mod_gpu/
+examples/hl23multi/hl23_minimal/hoc_templates/
 mod_func.cpp
 makemod2c_inc
 special

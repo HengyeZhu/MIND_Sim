@@ -249,7 +249,6 @@ void build_pt3d_geometry(Morph& morph) {
         auto& sec = morph.sections[current_section_id];
 
         if (sec.pt3d_count != 0) {
-            const auto end = sec.pt3d_offset + sec.pt3d_count;
             if (sec.L_um <= 0.0 && sec.pt3d_count >= 2) {
                 const double last = morph.pt3d.arc[sec.pt3d_offset + sec.pt3d_count - 1];
                 sec.L_um = (last <= 1e-9) ? 1e-9 : last;

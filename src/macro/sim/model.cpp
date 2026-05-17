@@ -43,28 +43,29 @@ const mind_sim::mind_mod::AbiRuleDescriptor& descriptor_of(
     return *descriptor;
 }
 
+int descriptor_name_index(int count, const char* const* names, const char* target) {
+    for (int index = 0; index < count; ++index) {
+        if (std::string(names[index]) == target) {
+            return index;
+        }
+    }
+    throw std::runtime_error(std::string("descriptor is missing STATE referenced by local(): ") +
+                             target);
+}
+
 }  // namespace
 
-RegionRule::RegionRule(std::string name,
-                       std::string library_path,
-                       int input_count,
-                       int exposure_count,
-                       int state_count,
-                       int param_count)
-    : name_(std::move(name)),
-      library_(mind_sim::utils::load_dynamic_library(std::move(library_path))),
-      step_(reinterpret_cast<decltype(step_)>(library_->symbol("mind_region_rule_step"))),
-      input_count_(input_count),
-      exposure_count_(exposure_count),
-      state_count_(state_count),
-      param_count_(param_count) {
-    if (name_.empty()) {
-        throw std::runtime_error("RegionRule name must be non-empty");
-    }
-    validate_count(input_count_, "RegionRule input_count");
-    validate_count(exposure_count_, "RegionRule exposure_count");
-    validate_count(state_count_, "RegionRule state_count");
-    validate_count(param_count_, "RegionRule param_count");
+RegionRule::RegionRule(std::string library_path)
+    : library_(mind_sim::utils::load_dynamic_library(std::move(library_path))),
+      step_(reinterpret_cast<mind_sim::mind_mod::RegionApplyFn>(
+          library_->symbol("mind_region_rule_apply"))) {
+    const auto& descriptor =
+        descriptor_of(*library_, mind_sim::mind_mod::AbiRuleKind::Region, "RegionRule");
+    name_ = descriptor.name;
+    input_count_ = descriptor.read_count;
+    exposure_count_ = descriptor.write_count;
+    state_count_ = descriptor.state_count;
+    param_count_ = descriptor.param_count;
     if (exposure_count_ == 0) {
         throw std::runtime_error("RegionRule exposure_count must be positive");
     }
@@ -108,22 +109,121 @@ void RegionRule::step_group(const std::vector<int>& roi_indices,
                             std::vector<double>& exposure_soa,
                             std::vector<double>& state_soa,
                             const std::vector<double>& params_soa,
+                            const std::vector<int>& read_input_offsets,
+                            const std::vector<int>& write_exposure_offsets,
                             double t,
                             double dt) const {
-    const int owner_count = static_cast<int>(roi_indices.size());
-    step_(owner_count,
-          roi_indices.data(),
-          roi_count,
-          input_count_,
-          exposure_count_,
-          input_soa.data(),
-          exposure_soa.data(),
-          state_count_,
-          state_soa.data(),
-          param_count_,
-          params_soa.data(),
-          t,
-          dt);
+    mind_sim::mind_mod::AbiRegionContext context{
+        .owner_count = static_cast<int>(roi_indices.size()),
+        .roi_indices = roi_indices.data(),
+        .roi_count = roi_count,
+        .input_count = input_count_,
+        .input_soa = input_soa.data(),
+        .exposure_count = exposure_count_,
+        .exposure_soa = exposure_soa.data(),
+        .state_count = state_count_,
+        .state_soa = state_soa.data(),
+        .param_count = param_count_,
+        .params_soa = params_soa.data(),
+        .read_input_offsets = read_input_offsets.data(),
+        .write_exposure_offsets = write_exposure_offsets.data(),
+        .t = t,
+        .dt = dt,
+    };
+    step_(&context);
+}
+
+NeuralFieldRule::NeuralFieldRule(std::string library_path)
+    : library_(mind_sim::utils::load_dynamic_library(std::move(library_path))),
+      step_(reinterpret_cast<mind_sim::mind_mod::NeuralFieldApplyFn>(
+          library_->symbol("mind_neural_field_rule_apply"))) {
+    const auto& descriptor =
+        descriptor_of(*library_, mind_sim::mind_mod::AbiRuleKind::NeuralField, "NeuralFieldRule");
+    name_ = descriptor.name;
+    input_count_ = descriptor.read_count;
+    state_count_ = descriptor.state_count;
+    param_count_ = descriptor.param_count;
+    if (state_count_ == 0) {
+        throw std::runtime_error("NeuralFieldRule state_count must be positive");
+    }
+    local_state_indices_.reserve(static_cast<std::size_t>(descriptor.local_state_count));
+    for (int index = 0; index < descriptor.local_state_count; ++index) {
+        local_state_indices_.push_back(descriptor_name_index(descriptor.state_count,
+                                                             descriptor.state_names,
+                                                             descriptor.local_state_names[index]));
+    }
+}
+
+const std::string& NeuralFieldRule::name() const noexcept {
+    return name_;
+}
+
+int NeuralFieldRule::input_count() const noexcept {
+    return input_count_;
+}
+
+int NeuralFieldRule::state_count() const noexcept {
+    return state_count_;
+}
+
+int NeuralFieldRule::param_count() const noexcept {
+    return param_count_;
+}
+
+const std::string& NeuralFieldRule::library_path() const noexcept {
+    return library_->path();
+}
+
+void NeuralFieldRule::validate_state(const std::vector<double>& state, int node_count) const {
+    if (node_count <= 0) {
+        throw std::runtime_error("NeuralFieldRule node_count must be positive");
+    }
+    validate_vector_size(state, state_count_ * node_count, "NeuralFieldRule state");
+}
+
+void NeuralFieldRule::validate_params(const std::vector<double>& params) const {
+    validate_vector_size(params, param_count_, "NeuralFieldRule params");
+}
+
+void NeuralFieldRule::step(int node_count,
+                           const std::vector<int>& node_to_roi,
+                           int roi_count,
+                           const std::vector<double>& input_soa,
+                           std::vector<double>& previous_state_soa,
+                           std::vector<double>& state_soa,
+                           const std::vector<double>& params,
+                           const std::vector<int>& local_indptr,
+                           const std::vector<int>& local_indices,
+                           const std::vector<double>& local_weights,
+                           const std::vector<int>& read_input_offsets,
+                           double t,
+                           double dt) const {
+    const auto node_stride = static_cast<std::size_t>(node_count);
+    for (int state: local_state_indices_) {
+        const auto offset = static_cast<std::size_t>(state) * node_stride;
+        std::copy_n(state_soa.begin() + static_cast<std::ptrdiff_t>(offset),
+                    node_stride,
+                    previous_state_soa.begin() + static_cast<std::ptrdiff_t>(offset));
+    }
+    mind_sim::mind_mod::AbiNeuralFieldContext context{
+        .node_count = node_count,
+        .node_to_roi = node_to_roi.data(),
+        .roi_count = roi_count,
+        .input_count = input_count_,
+        .input_soa = input_soa.data(),
+        .state_count = state_count_,
+        .previous_state_soa = previous_state_soa.data(),
+        .state_soa = state_soa.data(),
+        .param_count = param_count_,
+        .params = params.data(),
+        .local_indptr = local_indptr.data(),
+        .local_indices = local_indices.data(),
+        .local_weights = local_weights.data(),
+        .read_input_offsets = read_input_offsets.data(),
+        .t = t,
+        .dt = dt,
+    };
+    step_(&context);
 }
 
 CouplingRule::CouplingRule(std::string name,

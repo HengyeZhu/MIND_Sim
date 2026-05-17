@@ -30,9 +30,13 @@ mind_sim::macro::sim::MacroSimulationResult MacroRuntime::run(double t_stop, dou
     const int exposure_count = network_.exposure_count();
     const int step_count = static_cast<int>(std::ceil(t_stop / dt_macro - 1e-12));
     auto region_owners = network_.region_owners();
-    if (static_cast<int>(region_owners.size()) != roi_count) {
-        throw std::runtime_error("macro-only run requires every ROI to have a RegionRule owner");
-    }
+    auto field_owners = network_.neural_field_owners();
+    const auto roi_owners =
+        collect_roi_owners(region_owners, field_owners, network_.micro_circuits(), false);
+    validate_single_roi_owner(roi_count,
+                              roi_owners,
+                              "macro-only run requires every ROI to have exactly one macro owner");
+    const auto macro_rois = continuous_macro_rois(roi_owners);
 
     const auto coupling_runtime = build_coupling_runtime(network_, dt_macro);
     std::vector<double> history(
@@ -40,6 +44,9 @@ mind_sim::macro::sim::MacroSimulationResult MacroRuntime::run(double t_stop, dou
         0.0);
     auto current_exposure_soa =
         exposure_buffers_to_soa(network_.initial_exposures(), roi_count, exposure_count);
+    for (const auto& owner: field_owners) {
+        aggregate_field_exposures(owner, current_exposure_soa);
+    }
     initialize_history(history,
                        coupling_runtime.history_capacity,
                        roi_count,
@@ -47,12 +54,8 @@ mind_sim::macro::sim::MacroSimulationResult MacroRuntime::run(double t_stop, dou
                        current_exposure_soa);
 
     auto region_groups = build_region_groups(region_owners);
-    std::vector<int> region_roi_indices;
-    for (const auto& owner: region_owners) {
-        region_roi_indices.push_back(owner.roi_index);
-    }
     const auto coupling_evaluation = coupling_evaluation_for_targets(coupling_runtime,
-                                                                     region_roi_indices,
+                                                                     macro_rois,
                                                                      roi_count,
                                                                      input_count,
                                                                      network_.dc_inputs());
@@ -90,8 +93,18 @@ mind_sim::macro::sim::MacroSimulationResult MacroRuntime::run(double t_stop, dou
                                    current_exposure_soa,
                                    group.state_soa,
                                    group.params_soa,
+                                   group.read_input_offsets,
+                                   group.write_exposure_offsets,
                                    start_time,
                                    stop_time - start_time);
+        }
+        for (auto& owner: field_owners) {
+            step_neural_field(owner,
+                              roi_count,
+                              current_input_soa,
+                              current_exposure_soa,
+                              start_time,
+                              stop_time - start_time);
         }
 
         write_history_slot(history,

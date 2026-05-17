@@ -2,12 +2,14 @@
 
 namespace mind_sim::mind_mod {
 
-constexpr int kMindModAbiVersion = 2;
+constexpr int kMindModAbiVersion = 3;
 
 enum class AbiRuleKind : int {
     Coupling = 0,
     MicroInput = 1,
     MicroOutput = 2,
+    Region = 3,
+    NeuralField = 4,
 };
 
 struct AbiRuleDescriptor {
@@ -28,6 +30,8 @@ struct AbiRuleDescriptor {
     const double* state_defaults;
     int random_count;
     const char* const* random_names;
+    int local_state_count;
+    const char* const* local_state_names;
 };
 
 struct AbiEventWriter {
@@ -101,9 +105,48 @@ struct AbiMicroOutputContext {
     const int* write_exposure_offsets;
 };
 
+struct AbiRegionContext {
+    int owner_count;
+    const int* roi_indices;
+    int roi_count;
+    int input_count;
+    const double* input_soa;
+    int exposure_count;
+    double* exposure_soa;
+    int state_count;
+    double* state_soa;
+    int param_count;
+    const double* params_soa;
+    const int* read_input_offsets;
+    const int* write_exposure_offsets;
+    double t;
+    double dt;
+};
+
+struct AbiNeuralFieldContext {
+    int node_count;
+    const int* node_to_roi;
+    int roi_count;
+    int input_count;
+    const double* input_soa;
+    int state_count;
+    const double* previous_state_soa;
+    double* state_soa;
+    int param_count;
+    const double* params;
+    const int* local_indptr;
+    const int* local_indices;
+    const double* local_weights;
+    const int* read_input_offsets;
+    double t;
+    double dt;
+};
+
 using DescriptorFn = const AbiRuleDescriptor* (*)();
 using CouplingApplyFn = void (*)(const AbiCouplingContext*);
 using MicroInputApplyFn = void (*)(const AbiMicroInputContext*);
 using MicroOutputApplyFn = void (*)(const AbiMicroOutputContext*);
+using RegionApplyFn = void (*)(const AbiRegionContext*);
+using NeuralFieldApplyFn = void (*)(const AbiNeuralFieldContext*);
 
 }  // namespace mind_sim::mind_mod

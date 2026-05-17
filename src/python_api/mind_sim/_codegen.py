@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import re
 import shlex
 import subprocess
 import sysconfig
@@ -11,10 +12,11 @@ from pathlib import Path
 
 from . import _native
 
-_CODEGEN_ABI = "bare_mind_mod_double_v2_random"
+_CODEGEN_ABI = "mind_mod_double_v3_region_field"
 _COMPILE_FLAGS = ("-std=c++20", "-O3", "-fPIC", "-shared")
 _COMPILER_VERSION_CACHE: dict[str, str] = {}
 _MOD_RULE_CACHE: dict[tuple[str, int, int], "ModRule"] = {}
+_OWNER_ARTIFACT_CACHE: dict[tuple[object, ...], tuple[str, str]] = {}
 
 
 def _cache_dir() -> Path:
@@ -65,6 +67,33 @@ def _batch_window_from_min_delay(network: "Network", dt_macro: float) -> float:
     return float(steps) * dt_macro
 
 
+def _name_list(kind: str, values: Sequence[str] | str | None) -> list[str]:
+    if values is None:
+        return []
+    names = [values] if isinstance(values, str) else list(values)
+    for name in names:
+        if not isinstance(name, str):
+            raise TypeError(f"{kind} names must be strings")
+    return names
+
+
+def _schema_names(kind: str, values: Mapping[str, object] | Sequence[str] | str | None) -> list[str]:
+    return _name_list(kind, list(values) if isinstance(values, Mapping) else values)
+
+
+def _require_identifier(name: str, kind: str) -> str:
+    if not isinstance(name, str) or not name.isidentifier():
+        raise ValueError(f"{kind} must be a valid Python/C++ identifier")
+    return name
+
+
+def _identifier_list(kind: str, values: Sequence[str]) -> list[str]:
+    return [_require_identifier(name, kind) for name in values]
+
+
+def _cpp_string(value: str) -> str:
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+
 def _compile_artifact(kind: str, source: str) -> tuple[str, str]:
     compiler = _compiler()
     compiler_version = _compiler_version(compiler)
@@ -107,24 +136,6 @@ def _mapping_values(name: str, values: Mapping[str, float] | None) -> dict[str, 
         if not isinstance(key, str):
             raise TypeError(f"{name} names must be strings")
     return out
-
-
-def _merged_values(
-    kind: str,
-    names: Sequence[str],
-    defaults: Mapping[str, float],
-    overrides: Mapping[str, float] | None,
-) -> list[float]:
-    merged = dict(defaults)
-    overrides = dict(overrides or {})
-    unknown = sorted(set(overrides) - set(names))
-    if unknown:
-        raise KeyError(f"{kind} has unknown values: {', '.join(unknown)}")
-    merged.update(overrides)
-    missing = [name for name in names if name not in merged]
-    if missing:
-        raise KeyError(f"{kind} is missing values: {', '.join(missing)}")
-    return [float(merged[name]) for name in names]
 
 
 def _strict_override_values(
@@ -284,28 +295,472 @@ def _require_names(context: str, names: Sequence[str], available: set[str]) -> N
         raise KeyError(f"{context} missing names: {', '.join(missing)}")
 
 
-def _offsets(schema_names: Sequence[str], names: Sequence[str], width: int) -> list[int]:
-    index_by_name = {name: index for index, name in enumerate(schema_names)}
-    return [index_by_name[name] * int(width) for name in names]
+def _offset_map(schema_names: Sequence[str], width: int) -> dict[str, int]:
+    stride = int(width)
+    return {name: index * stride for index, name in enumerate(schema_names)}
 
 
-class RegionRule:
+def _offsets(offset_by_name: Mapping[str, int], names: Sequence[str]) -> list[int]:
+    return [offset_by_name[name] for name in names]
+
+
+def _local_connectivity(values, node_count: int):
+    node_count = int(node_count)
+    if node_count <= 0:
+        raise ValueError("neural field requires a positive node_count")
+    if values is None:
+        return _native.LocalConnectivity.from_arrays(node_count, [0] * (node_count + 1), [], [])
+    if isinstance(values, _native.LocalConnectivity):
+        if int(values.node_count) != node_count:
+            raise ValueError("LocalConnectivity node_count must match node_map")
+        return values
+    if hasattr(values, "tocsr") or all(hasattr(values, name) for name in ("indptr", "indices", "data")):
+        local = _native.LocalConnectivity.from_csr(values)
+        if int(local.node_count) != node_count:
+            raise ValueError("LocalConnectivity node_count must match node_map")
+        return local
+    raise TypeError("neural field local must be a mind_sim.LocalConnectivity")
+
+
+def _node_values(value, node_count: int, name: str) -> list[float]:
+    if isinstance(value, (str, bytes)):
+        raise TypeError(f"{name} values must be numeric")
+    try:
+        seq = list(value)
+    except TypeError:
+        return [float(value)] * node_count
+    if len(seq) != node_count:
+        raise ValueError(f"{name} node value count must match node_count")
+    return [float(item) for item in seq]
+
+
+def _field_state_values(
+    names: Sequence[str],
+    defaults: Mapping[str, float],
+    overrides: Mapping[str, object] | None,
+    node_count: int,
+) -> list[float]:
+    merged = dict(defaults)
+    overrides = dict(overrides or {})
+    unknown = sorted(set(overrides) - set(names))
+    if unknown:
+        raise KeyError(f"neural field state has unknown values: {', '.join(unknown)}")
+    merged.update(overrides)
+    missing = [name for name in names if name not in merged]
+    if missing:
+        raise KeyError(f"neural field state is missing values: {', '.join(missing)}")
+    out: list[float] = []
+    for name in names:
+        out.extend(_node_values(merged[name], node_count, f"state {name}"))
+    return out
+
+
+_DERIVATIVE_RE = re.compile(r"^d([A-Za-z_][A-Za-z0-9_]*)/dt\s*=\s*(.+)$")
+_ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?!=)(.+)$")
+_LOCAL_RE = re.compile(r"\blocal\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)")
+
+
+def _owner_exposures(values: Sequence[str] | str | None) -> list[str]:
+    names = _identifier_list("exposure name", _name_list("exposure", values))
+    if not names:
+        raise TypeError("owner exposures must be a non-empty string or sequence of strings")
+    return names
+
+
+def _owner_state_values(values: Mapping[str, object] | None) -> dict[str, object]:
+    return {
+        _require_identifier(str(name), "state name"): value
+        for name, value in dict(values or {}).items()
+    }
+
+
+def _owner_param_values(values: Mapping[str, float] | None) -> dict[str, float]:
+    params = _mapping_values("params", values)
+    return {_require_identifier(name, "param name"): float(value) for name, value in params.items()}
+
+
+def _reject_overlap(left_name: str, left: Sequence[str], right_name: str, right: Sequence[str]) -> None:
+    overlap = sorted(set(left) & set(right))
+    if overlap:
+        raise ValueError(f"{left_name} and {right_name} names must be distinct: {', '.join(overlap)}")
+
+
+def _replace_local_calls(line: str) -> tuple[str, list[str]]:
+    local_states: list[str] = []
+
+    def replace(match: re.Match[str]) -> str:
+        state = _require_identifier(match.group(1), "local state name")
+        if state not in local_states:
+            local_states.append(state)
+        return f"local_{state}"
+
+    return _LOCAL_RE.sub(replace, line), local_states
+
+
+def _owner_statement_code(
+    equations: str,
+    *,
+    known_names: set[str],
+    allow_local: bool,
+) -> tuple[str, list[str]]:
+    if not isinstance(equations, str):
+        raise TypeError("owner equations must be a string")
+    lines: list[str] = []
+    locals_: set[str] = set()
+    local_states: list[str] = []
+    for raw in str(equations).splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if allow_local:
+            line, found_local_states = _replace_local_calls(line)
+            for state in found_local_states:
+                if state not in local_states:
+                    local_states.append(state)
+        if line.endswith("{") or line.endswith("}") or line.startswith("//"):
+            lines.append(line)
+            continue
+        line = line[:-1].strip() if line.endswith(";") else line
+        derivative = _DERIVATIVE_RE.match(line)
+        if derivative:
+            state = _require_identifier(derivative.group(1), "state name")
+            if state not in known_names:
+                raise KeyError(f"derivative references undeclared state: {state}")
+            lines.append(f"{state} += dt * ({derivative.group(2)});")
+            continue
+        assignment = _ASSIGN_RE.match(line)
+        if assignment:
+            lhs = _require_identifier(assignment.group(1), "assignment name")
+            rhs = assignment.group(2)
+            if lhs not in known_names and lhs not in locals_:
+                locals_.add(lhs)
+                lines.append(f"double {lhs} = {rhs};")
+            else:
+                lines.append(f"{lhs} = {rhs};")
+            continue
+        lines.append(line + ";")
+    return "\n".join(lines), local_states
+
+
+def _owner_prelude() -> str:
+    return r"""
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+
+using std::abs;
+using std::ceil;
+using std::clamp;
+using std::exp;
+using std::fabs;
+using std::floor;
+using std::fmax;
+using std::fmin;
+using std::isfinite;
+using std::log;
+using std::max;
+using std::min;
+using std::pow;
+using std::round;
+using std::size_t;
+
+struct mind_rule_descriptor {
+    int abi_version;
+    int kind;
+    const char* name;
+    int read_count;
+    const char* const* read_names;
+    int write_count;
+    const char* const* write_names;
+    int emit_count;
+    const char* const* emit_names;
+    int param_count;
+    const char* const* param_names;
+    const double* param_defaults;
+    int state_count;
+    const char* const* state_names;
+    const double* state_defaults;
+    int random_count;
+    const char* const* random_names;
+    int local_state_count;
+    const char* const* local_state_names;
+};
+
+struct mind_region_context {
+    int owner_count;
+    const int* roi_indices;
+    int roi_count;
+    int input_count;
+    const double* input_soa;
+    int exposure_count;
+    double* exposure_soa;
+    int state_count;
+    double* state_soa;
+    int param_count;
+    const double* params_soa;
+    const int* read_input_offsets;
+    const int* write_exposure_offsets;
+    double t;
+    double dt;
+};
+
+struct mind_neural_field_context {
+    int node_count;
+    const int* node_to_roi;
+    int roi_count;
+    int input_count;
+    const double* input_soa;
+    int state_count;
+    const double* previous_state_soa;
+    double* state_soa;
+    int param_count;
+    const double* params;
+    const int* local_indptr;
+    const int* local_indices;
+    const double* local_weights;
+    const int* read_input_offsets;
+    double t;
+    double dt;
+};
+"""
+
+
+def _cpp_name_array(symbol: str, names: Sequence[str]) -> str:
+    if not names:
+        return ""
+    values = ", ".join(_cpp_string(name) for name in names)
+    return f"static const char* {symbol}[] = {{{values}}};\n"
+
+
+def _cpp_default_array(symbol: str, count: int) -> str:
+    if count == 0:
+        return ""
+    return f"static const double {symbol}[] = {{{', '.join(['0.0'] * count)}}};\n"
+
+
+def _array_pointer(symbol: str, names: Sequence[str]) -> str:
+    return symbol if names else "nullptr"
+
+
+def _default_pointer(symbol: str, count: int) -> str:
+    return symbol if count else "nullptr"
+
+
+def _owner_descriptor_source(
+    *,
+    kind_id: int,
+    name: str,
+    inputs: Sequence[str],
+    exposures: Sequence[str],
+    states: Sequence[str],
+    params: Sequence[str],
+    local_states: Sequence[str],
+) -> str:
+    return (
+        _cpp_name_array("mind_read_names", inputs)
+        + _cpp_name_array("mind_write_names", exposures)
+        + _cpp_name_array("mind_param_names", params)
+        + _cpp_name_array("mind_state_names", states)
+        + _cpp_name_array("mind_local_state_names", local_states)
+        + _cpp_default_array("mind_param_defaults", len(params))
+        + _cpp_default_array("mind_state_defaults", len(states))
+        + "static const mind_rule_descriptor mind_descriptor = {\n"
+        + f"    3, {kind_id}, {_cpp_string(name)},\n"
+        + f"    {len(inputs)}, {_array_pointer('mind_read_names', inputs)},\n"
+        + f"    {len(exposures)}, {_array_pointer('mind_write_names', exposures)},\n"
+        + "    0, nullptr,\n"
+        + f"    {len(params)}, {_array_pointer('mind_param_names', params)}, "
+        + f"{_default_pointer('mind_param_defaults', len(params))},\n"
+        + f"    {len(states)}, {_array_pointer('mind_state_names', states)}, "
+        + f"{_default_pointer('mind_state_defaults', len(states))},\n"
+        + "    0, nullptr,\n"
+        + f"    {len(local_states)}, {_array_pointer('mind_local_state_names', local_states)},\n"
+        + "};\n"
+        + 'extern "C" const mind_rule_descriptor* mind_rule_descriptor() { return &mind_descriptor; }\n'
+    )
+
+
+def _owner_region_source(
+    *,
+    name: str,
+    equations: str,
+    inputs: Sequence[str],
+    exposures: Sequence[str],
+    states: Sequence[str],
+    params: Sequence[str],
+) -> str:
+    known = set(inputs) | set(states) | set(params) | {"t", "dt", "roi"}
+    code, _ = _owner_statement_code(equations, known_names=known, allow_local=False)
+    lines = [_owner_prelude()]
+    lines.append(
+        _owner_descriptor_source(
+            kind_id=3,
+            name=name,
+            inputs=inputs,
+            exposures=exposures,
+            states=states,
+            params=params,
+            local_states=[],
+        )
+    )
+    lines.append(
+        r"""
+extern "C" void mind_region_rule_apply(const mind_region_context* ctx) {
+    const int owner_count = ctx->owner_count;
+    const int* roi_indices = ctx->roi_indices;
+    const double* input_soa = ctx->input_soa;
+    double* exposure_soa = ctx->exposure_soa;
+    double* state_soa = ctx->state_soa;
+    const double* params_soa = ctx->params_soa;
+    const int* read_offsets = ctx->read_input_offsets;
+    const int* write_offsets = ctx->write_exposure_offsets;
+    const double t = ctx->t;
+    const double dt = ctx->dt;
+    (void)t;
+    for (int unit = 0; unit < owner_count; ++unit) {
+        const int roi = roi_indices[unit];
+"""
+    )
+    for index, field in enumerate(inputs):
+        lines.append(f"        const double {field} = input_soa[read_offsets[{index}] + roi];\n")
+    for index, field in enumerate(states):
+        lines.append(f"        double& {field} = state_soa[({index} * owner_count) + unit];\n")
+    for index, field in enumerate(params):
+        lines.append(f"        const double {field} = params_soa[({index} * owner_count) + unit];\n")
+    for line in code.splitlines():
+        lines.append(f"        {line}\n")
+    for index, exposure in enumerate(exposures):
+        lines.append(f"        exposure_soa[write_offsets[{index}] + roi] = {exposure};\n")
+    lines.append("    }\n}\n")
+    return "".join(lines)
+
+
+def _owner_neural_field_source(
+    *,
+    name: str,
+    equations: str,
+    inputs: Sequence[str],
+    exposures: Sequence[str],
+    states: Sequence[str],
+    params: Sequence[str],
+) -> tuple[str, list[str]]:
+    known = set(inputs) | set(states) | set(params) | {"t", "dt", "node", "roi"}
+    code, local_states = _owner_statement_code(equations, known_names=known, allow_local=True)
+    for exposure in exposures:
+        if exposure not in states:
+            raise KeyError(f"neural field exposure must be a state name: {exposure}")
+    lines = [_owner_prelude()]
+    lines.append(
+        _owner_descriptor_source(
+            kind_id=4,
+            name=name,
+            inputs=inputs,
+            exposures=exposures,
+            states=states,
+            params=params,
+            local_states=local_states,
+        )
+    )
+    lines.append(
+        r"""
+extern "C" void mind_neural_field_rule_apply(const mind_neural_field_context* ctx) {
+    const int node_count = ctx->node_count;
+    const int* node_to_roi = ctx->node_to_roi;
+    const double* input_soa = ctx->input_soa;
+    const double* previous_state_soa = ctx->previous_state_soa;
+    double* state_soa = ctx->state_soa;
+    const double* params = ctx->params;
+    const int* local_indptr = ctx->local_indptr;
+    const int* local_indices = ctx->local_indices;
+    const double* local_weights = ctx->local_weights;
+    const int* read_offsets = ctx->read_input_offsets;
+    const double t = ctx->t;
+    const double dt = ctx->dt;
+    (void)t;
+    for (int node = 0; node < node_count; ++node) {
+        const int roi = node_to_roi[node];
+"""
+    )
+    for index, field in enumerate(inputs):
+        lines.append(f"        const double {field} = input_soa[read_offsets[{index}] + roi];\n")
+    for index, field in enumerate(states):
+        lines.append(f"        double& {field} = state_soa[({index} * node_count) + node];\n")
+    state_index = {state: index for index, state in enumerate(states)}
+    for state in local_states:
+        lines.append(f"        double local_{state} = 0.0;\n")
+        lines.append("        for (int edge = local_indptr[node]; edge < local_indptr[node + 1]; ++edge) {\n")
+        lines.append(
+            f"            local_{state} += local_weights[edge] * "
+            f"previous_state_soa[({state_index[state]} * node_count) + local_indices[edge]];\n"
+        )
+        lines.append("        }\n")
+    for index, field in enumerate(params):
+        lines.append(f"        const double {field} = params[{index}];\n")
+    for line in code.splitlines():
+        lines.append(f"        {line}\n")
+    lines.append("    }\n}\n")
+    return "".join(lines), local_states
+
+
+class OwnerRule:
     def __init__(
         self,
         *,
+        kind: str,
         name: str,
-        state: Mapping[str, float] | None = None,
-        params: Mapping[str, float] | None = None,
-        step: str,
+        equations: str,
+        inputs: Mapping[str, object] | Sequence[str] | str | None,
+        exposures: Sequence[str] | str,
+        state: Mapping[str, object] | None,
+        params: Mapping[str, float] | None,
     ):
-        self.name = _native._codegen_kernel_name(name, "region rule")
-        self.state = _mapping_values("state", state)
-        self.params = _mapping_values("params", params)
-        self.step = str(step)
-        fields = _native._inspect_region_rule_fields(self.state_names, self.param_names, self.step)
-        self.read = list(fields["inputs"])
-        self.write = list(fields["exposures"])
-        self._compiled: dict[tuple[tuple[str, ...], tuple[str, ...]], object] = {}
+        self.kind = kind
+        self.mod_name = _require_identifier(str(name), "owner name")
+        self.name = _native._codegen_kernel_name(self.mod_name, f"{self.kind} owner")
+        self.read = _identifier_list("input name", _schema_names("input", inputs))
+        self.write = _owner_exposures(exposures)
+        self.state = _owner_state_values(state)
+        self.params = _owner_param_values(params)
+        _reject_overlap("input", self.read, "exposure", self.write)
+        _reject_overlap("input", self.read, "state", self.state_names)
+        _reject_overlap("input", self.read, "param", self.param_names)
+        _reject_overlap("state", self.state_names, "param", self.param_names)
+        self.local_states: list[str] = []
+        if kind == "region":
+            source = _owner_region_source(
+                name=self.name,
+                equations=equations,
+                inputs=self.read,
+                exposures=self.write,
+                states=self.state_names,
+                params=self.param_names,
+            )
+        elif kind == "neural_field":
+            source, self.local_states = _owner_neural_field_source(
+                name=self.name,
+                equations=equations,
+                inputs=self.read,
+                exposures=self.write,
+                states=self.state_names,
+                params=self.param_names,
+            )
+        else:
+            raise ValueError(f"unknown owner kind: {kind}")
+        cache_key = (
+            kind,
+            self.name,
+            tuple(self.read),
+            tuple(self.write),
+            tuple(self.state_names),
+            tuple(self.param_names),
+            equations,
+        )
+        artifact = _OWNER_ARTIFACT_CACHE.get(cache_key)
+        if artifact is None:
+            artifact = _compile_artifact("owner_rule", source)
+            _OWNER_ARTIFACT_CACHE[cache_key] = artifact
+        self.library_path, self.cpp_path = artifact
+        self._native_rule: object | None = None
 
     @property
     def state_names(self) -> list[str]:
@@ -315,32 +770,35 @@ class RegionRule:
     def param_names(self) -> list[str]:
         return list(self.params)
 
-    def _native_for(self, inputs: Sequence[str], exposures: Sequence[str]):
-        key = (tuple(inputs), tuple(exposures))
-        rule = self._compiled.get(key)
-        if rule is None:
-            source = _native._codegen_region_rule_source(
-                list(inputs), list(exposures), self.state_names, self.param_names, self.step
-            )
-            path = _compile("region_rule", source)
-            rule = _native._load_region_rule(
-                self.name, path, len(inputs), len(exposures), len(self.state), len(self.params)
-            )
-            self._compiled[key] = rule
-        return rule
+    def _native_region(self):
+        if self.kind != "region":
+            raise TypeError(f"expected region owner, got {self.kind!r}")
+        if self._native_rule is None:
+            self._native_rule = _native._load_region_rule(self.library_path)
+        return self._native_rule
 
-    def state_values(self, values: Mapping[str, float] | None = None) -> list[float]:
-        return _merged_values("RegionRule state", self.state_names, self.state, values)
+    def _native_neural_field(self):
+        if self.kind != "neural_field":
+            raise TypeError(f"expected neural field owner, got {self.kind!r}")
+        if self._native_rule is None:
+            self._native_rule = _native._load_neural_field_rule(self.library_path)
+        return self._native_rule
 
-    def param_values(self, values: Mapping[str, float] | None = None) -> list[float]:
-        return _merged_values("RegionRule params", self.param_names, self.params, values)
+    def state_values(self) -> list[float]:
+        return [float(self.state[name]) for name in self.state_names]
+
+    def param_values(self) -> list[float]:
+        return [float(self.params[name]) for name in self.param_names]
+
+    def field_state_values(self, node_count: int) -> list[float]:
+        return _field_state_values(self.state_names, {}, self.state, int(node_count))
 
 
 class ModRule:
-    def __init__(self, path: str | Path):
-        self.path = Path(path)
-        source = self.path.read_text(encoding="utf-8")
-        cpp_source = _native._translate_mind_mod_to_cpp(source, str(self.path))
+    def __init__(self, *, source: str, origin: str, path: Path | None = None):
+        self.path = path
+        self.origin = str(origin)
+        cpp_source = _native._translate_mind_mod_to_cpp(source, self.origin)
         self.library_path, self.cpp_path = _compile_artifact("mind_mod_rule", cpp_source)
         spec = _native._inspect_mind_mod_library(self.library_path)
         self.kind = str(spec["kind"])
@@ -352,6 +810,7 @@ class ModRule:
         self.random = list(spec["random"])
         self.params = dict(zip(list(spec["param_names"]), list(spec["param_defaults"])))
         self.state = dict(zip(list(spec["state_names"]), list(spec["state_defaults"])))
+        self.local_states = list(spec.get("local_state_names", []))
         self._native_rule: object | None = None
 
     @property
@@ -372,12 +831,24 @@ class ModRule:
 
     def _require_kind(self, expected: str) -> None:
         if self.kind != expected:
-            raise TypeError(f"{self.path} is a {self.kind!r} mod rule, expected {expected!r}")
+            raise TypeError(f"{self.origin} is a {self.kind!r} MindMod rule, expected {expected!r}")
 
     def _native_coupling(self):
         self._require_kind("coupling")
         if self._native_rule is None:
             self._native_rule = _native._load_compiled_coupling_rule(self.library_path)
+        return self._native_rule
+
+    def _native_region(self):
+        self._require_kind("region")
+        if self._native_rule is None:
+            self._native_rule = _native._load_region_rule(self.library_path)
+        return self._native_rule
+
+    def _native_neural_field(self):
+        self._require_kind("neural_field")
+        if self._native_rule is None:
+            self._native_rule = _native._load_neural_field_rule(self.library_path)
         return self._native_rule
 
     def _native_micro_input(self):
@@ -401,8 +872,12 @@ class ModRule:
     def random_values(self, values: Mapping[str, object] | None = None) -> tuple[list[object], list[list[float]]]:
         return _strict_random_values(f"{self.mod_name} random", self.random_names, values)
 
+    def field_state_values(self, values: Mapping[str, object] | None, node_count: int) -> list[float]:
+        self._require_kind("neural_field")
+        return _field_state_values(self.state_names, self.state, values, int(node_count))
+
     def __repr__(self) -> str:
-        return f"<mind_sim.ModRule kind={self.kind!r} name={self.mod_name!r} path={str(self.path)!r}>"
+        return f"<mind_sim.ModRule kind={self.kind!r} name={self.mod_name!r} origin={self.origin!r}>"
 
 
 def _load_mod_rule(path: str | Path) -> ModRule:
@@ -411,7 +886,11 @@ def _load_mod_rule(path: str | Path) -> ModRule:
     key = (str(resolved), int(stat.st_mtime_ns), int(stat.st_size))
     cached = _MOD_RULE_CACHE.get(key)
     if cached is None:
-        cached = ModRule(resolved)
+        cached = ModRule(
+            source=resolved.read_text(encoding="utf-8"),
+            origin=str(resolved),
+            path=resolved,
+        )
         _MOD_RULE_CACHE[key] = cached
     return cached
 
@@ -424,35 +903,42 @@ class ROI:
         self.name = self.label
 
     def initial_output(self, values: Mapping[str, float]) -> "ROI":
-        self._network._set_initial_output(self.index, values)
+        target = self._network._initial_outputs.setdefault(self.index, {})
+        for name, value in _mapping_values("initial output", values).items():
+            target[name] = float(value)
         return self
 
     def dc_input(self, values: Mapping[str, float]) -> "ROI":
-        self._network._set_dc_input(self.index, values)
+        target = self._network._dc_inputs.setdefault(self.index, {})
+        for name, value in _mapping_values("dc input", values).items():
+            target[name] = float(value)
         return self
 
     def record(self) -> "ROI":
-        self._network.record(rois=[self])
+        self._network._recorded_rois = [self.index]
         return self
 
     def connect(
         self,
         source,
-        rule: str,
+        rule,
         *,
         params: Mapping[str, float] | None = None,
         state: Mapping[str, float] | None = None,
         random: Mapping[str, object] | None = None,
     ) -> "ROI":
-        mod = self._network._mod_rule(rule)
+        mod = self._network._resolve_mod_rule(rule)
+        if not isinstance(source, ROI):
+            raise TypeError("ROI.connect source must be a ROI handle")
         source_roi = self._network.roi(source)
         if mod.kind == "coupling":
             if random is not None:
                 raise TypeError("coupling mod rules do not accept random providers")
-            self._network._add_coupling(source_roi.index, self.index, mod, mod.param_values(params))
+            self._network._couplings.append(
+                (source_roi.index, self.index, mod, mod.param_values(params))
+            )
         elif mod.kind == "micro_input":
-            self._network._set_micro_input_rule(
-                self.index,
+            self._network._micro_input_rules[self.index] = (
                 source_roi.index,
                 mod,
                 mod.state_values(state),
@@ -462,8 +948,7 @@ class ROI:
         elif mod.kind == "micro_output":
             if random is not None:
                 raise TypeError("micro output mod rules do not accept random providers")
-            self._network._set_micro_output_rule(
-                self.index,
+            self._network._micro_output_rules[self.index] = (
                 source_roi.index,
                 mod,
                 mod.state_values(state),
@@ -475,18 +960,27 @@ class ROI:
 
     def use(
         self,
-        rule: RegionRule,
+        equations: str,
         *,
-        state: Mapping[str, float] | None = None,
+        inputs: Mapping[str, object] | Sequence[str] | str | None = None,
+        exposures: Sequence[str] | str,
+        state: Mapping[str, object] | None = None,
         params: Mapping[str, float] | None = None,
+        name: str | None = None,
     ) -> "ROI":
-        if not isinstance(rule, RegionRule):
-            raise TypeError("ROI.use expects a RegionRule")
-        self._network._use_region_rule(
-            self.index,
-            rule,
-            rule.state_values(state),
-            rule.param_values(params),
+        owner = OwnerRule(
+            kind="region",
+            name=name or "region_owner",
+            equations=equations,
+            inputs=inputs,
+            exposures=exposures,
+            state=state,
+            params=params,
+        )
+        self._network._region_owners[self.index] = (
+            owner,
+            owner.state_values(),
+            owner.param_values(),
         )
         return self
 
@@ -495,10 +989,10 @@ class ROI:
 
 
 class MicroCircuit:
-    def __init__(self, network: "Network", index: int, name: str):
-        self._network = network
-        self.index = int(index)
+    def __init__(self, micro, name: str = "micro"):
+        self.micro = micro
         self.name = str(name)
+        self.bindings: list[dict[str, object]] = []
 
     def bind_roi(
         self,
@@ -507,21 +1001,82 @@ class MicroCircuit:
         gid_ranges,
         ports: Mapping[str, object] | None = None,
     ) -> "MicroCircuit":
-        roi_obj = roi if isinstance(roi, ROI) else self._network.roi(roi)
         begins, ends = _gid_ranges(gid_ranges)
         port_values = dict(ports or {})
         for name in port_values:
             if not isinstance(name, str):
                 raise TypeError("micro ROI port names must be strings")
-        self._network._bind_micro_roi(self.index, roi_obj.index, begins, ends, port_values)
+        self.bindings.append({
+            "roi": roi,
+            "begins": begins,
+            "ends": ends,
+            "ports": port_values,
+        })
         return self
 
     def __repr__(self) -> str:
-        return f"<mind_sim.MicroCircuit index={self.index} name={self.name!r}>"
+        return f"<mind_sim.MicroCircuit name={self.name!r} bindings={len(self.bindings)}>"
+
+
+class NeuralField:
+    def __init__(
+        self,
+        name: str,
+        equations: str | None = None,
+        *,
+        inputs: Mapping[str, object] | Sequence[str] | str | None = None,
+        exposures: Sequence[str] | str | None = None,
+        local=None,
+        state: Mapping[str, object] | None = None,
+        params: Mapping[str, float] | None = None,
+    ):
+        self.name = str(name)
+        self.equations: str | None = None
+        self.inputs: Mapping[str, object] | Sequence[str] | str | None = None
+        self.exposures: Sequence[str] | str | None = None
+        self.state: Mapping[str, object] | None = None
+        self.params: Mapping[str, float] | None = None
+        self.local_data = None
+        if equations is not None:
+            self.use(equations, inputs=inputs, exposures=exposures, state=state, params=params)
+        if local is not None:
+            self.local(local)
+
+    def use(
+        self,
+        equations: str,
+        *,
+        inputs: Mapping[str, object] | Sequence[str] | str | None = None,
+        exposures: Sequence[str] | str,
+        state: Mapping[str, object] | None = None,
+        params: Mapping[str, float] | None = None,
+    ) -> "NeuralField":
+        self.equations = equations
+        self.inputs = inputs
+        self.exposures = exposures
+        self.state = state
+        self.params = params
+        return self
+
+    def local(self, local) -> "NeuralField":
+        self.local_data = local
+        return self
+
+    def __repr__(self) -> str:
+        return f"<mind_sim.NeuralField name={self.name!r}>"
 
 
 class Network:
-    def __init__(self, *, connectivity=None, labels=None, weights=None, delays=None):
+    def __init__(
+        self,
+        *,
+        connectivity=None,
+        labels=None,
+        weights=None,
+        delays=None,
+        inputs: Sequence[str] | str | None = None,
+        exposures: Sequence[str] | str | None = None,
+    ):
         if connectivity is not None:
             self._connectivity = connectivity
         else:
@@ -530,11 +1085,14 @@ class Network:
             self._connectivity = _native.Connectivity(list(labels), weights, delays)
         native_rois = list(self._connectivity.rois())
         self._labels = [roi.label for roi in native_rois]
+        self._declared_inputs = _name_list("input", inputs)
+        self._declared_exposures = _name_list("exposure", exposures)
         self._recorded_rois = list(range(self._connectivity.roi_count()))
         self._micro_input_ports: dict[int, dict[str, object]] = {}
         self._initial_outputs: dict[int, dict[str, float]] = {}
         self._dc_inputs: dict[int, dict[str, float]] = {}
-        self._region_owners: dict[int, tuple[RegionRule, list[float], list[float]]] = {}
+        self._region_owners: dict[int, tuple[OwnerRule, list[float], list[float]]] = {}
+        self._field_owners: list[dict[str, object]] = []
         self._couplings: list[tuple[int, int, ModRule, list[float]]] = []
         self._micro_circuits: list[object] = []
         self._micro_bindings: dict[int, tuple[int, list[int], list[int]]] = {}
@@ -545,8 +1103,6 @@ class Network:
         self._micro_output_rules: dict[int, tuple[int, ModRule, list[float], list[float]]] = {}
         self._rois = [ROI(self, roi.index, roi.label) for roi in native_rois]
         self._roi_by_label = {roi.label: roi for roi in self._rois}
-        self._mod_rules: dict[str, ModRule] = {}
-        self._loaded_mod_metadata_paths: list[str] = []
 
     def roi(self, roi) -> ROI:
         if isinstance(roi, ROI):
@@ -583,97 +1139,74 @@ class Network:
         self._recorded_rois = recorded
         return self
 
-    def load_mod_metadata(self, path: str | Path) -> "Network":
-        root = Path(path)
-        if root.is_dir():
-            mod_paths = sorted(root.glob("*.mod"))
-            origin = str(root)
-        else:
-            mod_paths = [root]
-            origin = str(root.parent)
-        if not mod_paths:
-            raise FileNotFoundError(f"no .mod files found in {origin}")
-        for mod_path in mod_paths:
-            rule = _load_mod_rule(mod_path)
-            existing = self._mod_rules.get(rule.mod_name)
-            if existing is not None and existing.path.resolve() != rule.path.resolve():
-                raise RuntimeError(
-                    f"MindMod rule {rule.mod_name!r} is declared by both "
-                    f"{existing.path} and {rule.path}"
-                )
-            self._mod_rules[rule.mod_name] = rule
-        self._loaded_mod_metadata_paths.append(str(Path(path).resolve()))
+    def _resolve_mod_rule(self, rule) -> ModRule:
+        if not isinstance(rule, (str, Path)):
+            raise TypeError("MindMod rule must be a .mod path")
+        path = Path(rule)
+        if path.exists() or path.suffix == ".mod":
+            return _load_mod_rule(path)
+        raise KeyError(f"unknown MindMod rule path: {rule}")
+
+    def use_micro(self, micro) -> "Network":
+        circuit = micro if isinstance(micro, MicroCircuit) else MicroCircuit(micro)
+        if self._micro_circuits:
+            if circuit.micro is self._micro_circuits[0]:
+                return self
+            raise RuntimeError(
+                "Network supports one CoreNEURON micro circuit; bind multiple ROI "
+                "ranges to the same MicroCircuit owner instead of calling use_micro again"
+            )
+        index = 0
+        self._micro_circuits.append(circuit.micro)
+        for binding in circuit.bindings:
+            roi_obj = self.roi(binding["roi"])
+            self._micro_bindings[roi_obj.index] = (
+                index,
+                list(binding["begins"]),
+                list(binding["ends"]),
+            )
+            self._micro_input_ports[roi_obj.index] = dict(binding["ports"])
         return self
 
-    def get_loaded_mod_metadata_paths(self) -> list[str]:
-        return list(self._loaded_mod_metadata_paths)
-
-    def use_micro(self, micro) -> MicroCircuit:
-        index = len(self._micro_circuits)
-        self._micro_circuits.append(micro)
-        return MicroCircuit(self, index, f"micro_{index}")
-
-    def _mod_rule(self, rule: str) -> ModRule:
-        if not isinstance(rule, str):
-            raise TypeError("ROI.connect expects a MindMod rule name string")
-        try:
-            return self._mod_rules[rule]
-        except KeyError as exc:
-            raise KeyError(
-                f"unknown MindMod rule {rule!r}; load its .mod directory with network.load_mod_metadata(...)"
-            ) from exc
-
-    def _set_initial_output(self, roi: int, values: Mapping[str, float]) -> None:
-        target = self._initial_outputs.setdefault(int(roi), {})
-        for name, value in _mapping_values("initial output", values).items():
-            target[name] = float(value)
-
-    def _set_dc_input(self, roi: int, values: Mapping[str, float]) -> None:
-        target = self._dc_inputs.setdefault(int(roi), {})
-        for name, value in _mapping_values("dc input", values).items():
-            target[name] = float(value)
-
-    def _use_region_rule(self, roi: int, rule: RegionRule, state: list[float], params: list[float]) -> None:
-        self._region_owners[int(roi)] = (rule, state, params)
-
-    def _add_coupling(self, source: int, target: int, mod: ModRule, params: list[float]) -> None:
-        self._couplings.append((int(source), int(target), mod, params))
-
-    def _bind_micro_roi(
+    def use_neural_field(
         self,
-        circuit_index: int,
-        roi: int,
-        begins: list[int],
-        ends: list[int],
-        ports: Mapping[str, object],
-    ) -> None:
-        self._micro_bindings[int(roi)] = (int(circuit_index), list(begins), list(ends))
-        self._micro_input_ports[int(roi)] = dict(ports)
-
-    def _set_micro_input_rule(
-        self,
-        roi: int,
-        source: int,
-        mod: ModRule,
-        state: list[float],
-        params: list[float],
-        random_streams: tuple[list[object], list[list[float]]],
-    ) -> None:
-        self._micro_input_rules[int(roi)] = (int(source), mod, state, params, random_streams)
-
-    def _set_micro_output_rule(
-        self,
-        roi: int,
-        source: int,
-        mod: ModRule,
-        state: list[float],
-        params: list[float],
-    ) -> None:
-        self._micro_output_rules[int(roi)] = (int(source), mod, state, params)
+        field: NeuralField,
+        *,
+        node_map,
+    ) -> "Network":
+        if not isinstance(field, NeuralField):
+            raise TypeError("Network.use_neural_field expects a mind_sim.NeuralField")
+        if field.equations is None or field.exposures is None:
+            raise ValueError("NeuralField must declare equations and exposures with field.use(...)")
+        owner_rule = OwnerRule(
+            kind="neural_field",
+            name=field.name,
+            equations=field.equations,
+            inputs=field.inputs,
+            exposures=field.exposures,
+            state=field.state,
+            params=field.params,
+        )
+        if not isinstance(node_map, _native.NodeToRoiMap):
+            raise TypeError("neural field node_map must be a mind_sim.NodeToRoiMap")
+        mapping = node_map
+        node_count = int(mapping.node_count)
+        local = _local_connectivity(field.local_data, node_count)
+        owner = {
+            "name": field.name,
+            "rule": owner_rule,
+            "node_map": mapping,
+            "local": local,
+            "state": owner_rule.field_state_values(node_count),
+            "params": owner_rule.param_values(),
+            "reducers": [(exposure, exposure) for exposure in owner_rule.write],
+        }
+        self._field_owners.append(owner)
+        return self
 
     def _schema(self) -> tuple[list[str], list[str], dict[int, set[str]], dict[int, set[str]]]:
-        inputs: list[str] = []
-        exposures: list[str] = []
+        inputs: list[str] = list(self._declared_inputs)
+        exposures: list[str] = list(self._declared_exposures)
         accepted_by_roi: dict[int, set[str]] = {roi.index: set() for roi in self._rois}
         exposed_by_roi: dict[int, set[str]] = {roi.index: set() for roi in self._rois}
 
@@ -682,7 +1215,25 @@ class Network:
                 _add_name(inputs, name)
                 accepted_by_roi[roi].add(name)
             for name in rule.write:
+                _add_name(exposures, name)
                 exposed_by_roi[roi].add(name)
+
+        for owner in self._field_owners:
+            rule = owner["rule"]
+            owned_rois = tuple(dict.fromkeys(owner["node_map"].node_to_roi))
+            for roi in owned_rois:
+                for name in rule.read:
+                    _add_name(inputs, name)
+                    accepted_by_roi[roi].add(name)
+            reducers = list(owner["reducers"])
+            if not reducers:
+                raise RuntimeError(
+                    f"neural field {owner['name']!r} must declare at least one exposure"
+                )
+            for _, exposure in reducers:
+                _add_name(exposures, exposure)
+                for roi in owned_rois:
+                    exposed_by_roi[roi].add(exposure)
 
         for roi, (_, mod, _, _, _) in self._micro_input_rules.items():
             for name in mod.read:
@@ -699,8 +1250,10 @@ class Network:
                 _add_name(exposures, name)
             for name in mod.write:
                 _add_name(inputs, name)
-            _require_names(f"{self.roi(source).label} -> {self.roi(target).label} READ", mod.read, exposed_by_roi[source])
-            _require_names(f"{self.roi(source).label} -> {self.roi(target).label} WRITE", mod.write, accepted_by_roi[target])
+            source_label = self._labels[source]
+            target_label = self._labels[target]
+            _require_names(f"{source_label} -> {target_label} READ", mod.read, exposed_by_roi[source])
+            _require_names(f"{source_label} -> {target_label} WRITE", mod.write, accepted_by_roi[target])
 
         for roi, values in self._initial_outputs.items():
             _require_names(f"{self.roi(roi).label} initial_output", values, exposed_by_roi[roi])
@@ -717,6 +1270,8 @@ class Network:
     def _build_native(self):
         inputs, exposures, _, _ = self._schema()
         native = _native._Network(self._connectivity, inputs, exposures, self._recorded_rois)
+        input_offsets = _offset_map(inputs, self.roi_count())
+        exposure_offsets = _offset_map(exposures, self.roi_count())
 
         for roi, values in self._initial_outputs.items():
             native_roi = native.roi(roi)
@@ -731,9 +1286,29 @@ class Network:
         for roi, (rule, state, params) in self._region_owners.items():
             native.use_region_rule(
                 native.roi(roi),
-                rule._native_for(inputs, exposures),
+                rule._native_region(),
                 state,
                 params,
+                _offsets(input_offsets, rule.read),
+                _offsets(exposure_offsets, rule.write),
+            )
+
+        for owner in self._field_owners:
+            rule = owner["rule"]
+            reducers = list(owner["reducers"])
+            local = owner["local"]
+            state_index_by_name = {name: index for index, name in enumerate(rule.state_names)}
+            exposure_index_by_name = {name: index for index, name in enumerate(exposures)}
+            native.use_neural_field(
+                str(owner["name"]),
+                rule._native_neural_field(),
+                owner["node_map"],
+                local,
+                list(owner["state"]),
+                list(owner["params"]),
+                _offsets(input_offsets, rule.read),
+                [state_index_by_name[state] for state, _ in reducers],
+                [exposure_index_by_name[exposure] for _, exposure in reducers],
             )
 
         for index, micro in enumerate(self._micro_circuits):
@@ -762,7 +1337,7 @@ class Network:
                 random_rules,
                 random_states,
                 input_port_bases,
-                _offsets(inputs, mod.read, self.roi_count()),
+                _offsets(input_offsets, mod.read),
             )
 
         for roi, (_, mod, state, params) in self._micro_output_rules.items():
@@ -771,7 +1346,7 @@ class Network:
                 mod._native_micro_output(),
                 state,
                 params,
-                _offsets(exposures, mod.write, self.roi_count()),
+                _offsets(exposure_offsets, mod.write),
             )
 
         for source, target, mod, params in self._couplings:
@@ -780,8 +1355,8 @@ class Network:
                 native.roi(target),
                 mod._native_coupling(),
                 params,
-                _offsets(exposures, mod.read, self.roi_count()),
-                _offsets(inputs, mod.write, self.roi_count()),
+                _offsets(exposure_offsets, mod.read),
+                _offsets(input_offsets, mod.write),
             )
         return native
 
@@ -834,3 +1409,5 @@ class MacroSimulator:
 
 
 Connectivity = _native.Connectivity
+LocalConnectivity = _native.LocalConnectivity
+NodeToRoiMap = _native.NodeToRoiMap

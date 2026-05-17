@@ -84,15 +84,14 @@ BREAKPOINT {
 """,
             encoding="utf-8",
         )
-        network.load_mod_metadata(tmpdir)
-
-        network.use_micro(micro).bind_roi(
-            network.roi(0),
+        micro_owner = ms.MicroCircuit(micro).bind_roi(
+            0,
             gid_ranges=population,
             ports={"source": source},
         )
-        network.roi(0).connect(network.roi(0), "external_spike_reuse")
-        network.roi(0).connect(network.roi(0), "zero_output")
+        network.use_micro(micro_owner)
+        network.roi(0).connect(network.roi(0), input_path)
+        network.roi(0).connect(network.roi(0), output_path)
 
     ms.Simulator(network, dt_micro=0.025, dt_macro=0.1, batch_window=0.1).run(5.0)
 

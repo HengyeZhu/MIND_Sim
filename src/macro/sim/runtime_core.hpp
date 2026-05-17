@@ -50,7 +50,27 @@ struct RegionGroup {
     std::vector<int> roi_indices{};
     std::vector<double> state_soa{};
     std::vector<double> params_soa{};
+    std::vector<int> read_input_offsets{};
+    std::vector<int> write_exposure_offsets{};
 };
+
+struct RoiOwnerPartition {
+    std::vector<int> neural_mass_rois{};
+    std::vector<int> neural_field_rois{};
+    std::vector<int> detailed_microcircuit_rois{};
+};
+
+[[nodiscard]] RoiOwnerPartition collect_roi_owners(
+    const std::vector<mind_sim::macro::frontend::RegionOwner>& region_owners,
+    const std::vector<mind_sim::macro::frontend::NeuralFieldOwner>& field_owners,
+    const std::vector<mind_sim::macro::frontend::MicroCircuitOwner>& micro_circuits,
+    bool require_micro_output_rule);
+
+void validate_single_roi_owner(int roi_count,
+                               const RoiOwnerPartition& owners,
+                               const char* message);
+
+[[nodiscard]] std::vector<int> continuous_macro_rois(const RoiOwnerPartition& owners);
 
 [[nodiscard]] CouplingRuntime build_coupling_runtime(
     const mind_sim::macro::frontend::Network& network,
@@ -93,5 +113,15 @@ void append_exposure_record(mind_sim::macro::sim::ExposureRecord& record,
 
 [[nodiscard]] std::vector<RegionGroup> build_region_groups(
     const std::vector<mind_sim::macro::frontend::RegionOwner>& owners);
+
+void aggregate_field_exposures(const mind_sim::macro::frontend::NeuralFieldOwner& owner,
+                               std::vector<double>& exposure_soa);
+
+void step_neural_field(mind_sim::macro::frontend::NeuralFieldOwner& owner,
+                       int roi_count,
+                       const std::vector<double>& input_soa,
+                       std::vector<double>& exposure_soa,
+                       double t,
+                       double dt);
 
 }  // namespace mind_sim::macro::sim

@@ -9,6 +9,8 @@ enum class RuleKind {
     Coupling,
     MicroInput,
     MicroOutput,
+    Region,
+    NeuralField,
 };
 
 struct NamedDefault {
@@ -29,6 +31,7 @@ struct RuleSpec {
     std::string input{};
     std::string net_receive{};
     std::string breakpoint{};
+    std::string step{};
 };
 
 [[nodiscard]] RuleSpec parse_rule_source(const std::string& source, const std::string& origin);
