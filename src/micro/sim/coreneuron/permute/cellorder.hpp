@@ -18,8 +18,6 @@ namespace coreneuron {
 namespace neuron {
 #endif
 
-extern int interleave_permute_type;
-
 /**
  * \brief Function that performs the permutation of the cells such that the
  *        execution threads access coalesced memory.

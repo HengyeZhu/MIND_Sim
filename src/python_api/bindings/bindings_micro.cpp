@@ -374,6 +374,8 @@ void bind_micro(nb::module_& m) {
         .def("set_device", &Sim::set_device)
         .def("set_dt", &Sim::set_dt)
         .def("get_dt", &Sim::get_dt)
+        .def("set_num_threads", &Sim::set_num_threads)
+        .def("get_num_threads", &Sim::get_num_threads)
         .def("load_mech_metadata", &Sim::load_mech_metadata)
         .def("ion_register", &Sim::ion_register, nb::arg("ion"), nb::arg("charge"))
         .def("ion_charge", &Sim::ion_charge, nb::arg("ion_mechanism"))

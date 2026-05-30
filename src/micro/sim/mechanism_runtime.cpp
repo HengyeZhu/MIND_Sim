@@ -2,9 +2,11 @@
 
 #include "coreneuron/coreneuron.hpp"
 #include "coreneuron/mechanism/eion.hpp"
+#include "coreneuron/mechanism/mech/cfile/cabvars.h"
 #include "coreneuron/mechanism/membfunc.hpp"
 #include "coreneuron/mechanism/neuron_registration.hpp"
 #include "coreneuron/mechanism/register_mech.hpp"
+#include "micro/sim/nrn_registration_mirror.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -24,8 +26,7 @@
 
 namespace coreneuron {
 void initnrn();
-void capacitance_reg();
-void mind_default_modl_reg();
+void modl_reg();
 void ion_reg(const char* name, double valence);
 int ion_register(const char* name, double charge);
 double nrn_ion_charge(int type);
@@ -287,7 +288,6 @@ void append_file_signature(std::ostringstream& out, const std::filesystem::path&
 [[nodiscard]] std::string mechanism_source_signature(const std::filesystem::path& path) {
     std::ostringstream out;
     out << path.string() << '\n';
-    out << MIND_CORE_MECH_ABI_VERSION << '\n';
     out << MIND_SIM_CXX_COMPILER << '\n';
     out << MIND_SIM_MODCC_BACKEND << '\n';
     out << MIND_SIM_MODCC_CXX_FLAGS << '\n';
@@ -716,11 +716,13 @@ void register_core_base_once() {
 
     initialize_fixed_core_slots();
     coreneuron::initnrn();
-    coreneuron::capacitance_reg();
     coreneuron::ion_reg("na", 1.0);
     coreneuron::ion_reg("k", 1.0);
     coreneuron::ion_reg("ca", 2.0);
-    coreneuron::mind_default_modl_reg();
+    for (int i = 0; coreneuron::mechanism[i] != nullptr; ++i) {
+        (*coreneuron::mechanism[i])();
+    }
+    coreneuron::modl_reg();
     g_core_base_registered = true;
     ensure_dparam_binding_cache_current();
 }
@@ -900,7 +902,9 @@ double core_global_scalar(const std::string& name) {
     return *it->second;
 }
 
-void core_note_registered_mechanism(int type, const char** mechanism_info) {
+namespace nrn_registration_mirror {
+
+void mechanism_registered(int type, const char** mechanism_info) {
     if (type < 0 || mechanism_info == nullptr || mechanism_info[1] == nullptr) {
         return;
     }
@@ -916,7 +920,7 @@ void core_note_registered_mechanism(int type, const char** mechanism_info) {
     g_recent_registered_type = type;
 }
 
-void core_note_writes_concentration(int type) {
+void writes_concentration(int type) {
     if (type < 0) {
         return;
     }
@@ -935,7 +939,7 @@ void core_note_writes_concentration(int type) {
     rebuild_memb_order_ranks();
 }
 
-void core_note_point_mechanism(int type) {
+void point_mechanism(int type) {
     if (type < 0) {
         return;
     }
@@ -943,7 +947,7 @@ void core_note_point_mechanism(int type) {
     g_registered_mechanisms[static_cast<std::size_t>(type)].is_point = true;
 }
 
-void core_note_artificial_cell(int type) {
+void artificial_cell(int type) {
     if (type < 0) {
         return;
     }
@@ -953,7 +957,7 @@ void core_note_artificial_cell(int type) {
     info.is_artificial = true;
 }
 
-void core_note_net_receive(int type, int weight_count) {
+void net_receive(int type, int weight_count) {
     if (type < 0) {
         return;
     }
@@ -966,7 +970,7 @@ void core_note_net_receive(int type, int weight_count) {
     info.net_receive_weight_count = weight_count == 0 ? 1 : weight_count;
 }
 
-void core_note_prop_size(int type, int psize, int dpsize) {
+void prop_size(int type, int psize, int dpsize) {
     if (type < 0) {
         return;
     }
@@ -982,7 +986,7 @@ void core_note_prop_size(int type, int psize, int dpsize) {
     }
 }
 
-void core_note_dparam_semantic(int type, int index, const char* semantic) {
+void dparam_semantic(int type, int index, const char* semantic) {
     if (type < 0 || index < 0 || semantic == nullptr) {
         return;
     }
@@ -1022,17 +1026,14 @@ void core_note_dparam_semantic(int type, int index, const char* semantic) {
     mark_dparam_binding_cache_dirty();
 }
 
-void core_note_global_scalar(const char* name, double* value) {
+void global_scalar(const char* name, double* value) {
     if (name == nullptr || value == nullptr) {
         return;
     }
     g_global_scalars_by_name[name] = value;
 }
 
-void core_note_global_scalar_field(int type,
-                                   const char* field_name,
-                                   const char* hoc_name,
-                                   double* value) {
+void global_scalar_field(int type, const char* field_name, const char* hoc_name, double* value) {
     if (type < 0 || field_name == nullptr || hoc_name == nullptr || value == nullptr) {
         return;
     }
@@ -1055,6 +1056,8 @@ void core_note_global_scalar_field(int type,
     g_global_scalars_by_name[hoc_name] = value;
     g_global_scalars[info.name][std::move(field)] = value;
 }
+
+}  // namespace nrn_registration_mirror
 
 void core_set_global_parameter(const std::string& mechanism,
                                const std::string& field,

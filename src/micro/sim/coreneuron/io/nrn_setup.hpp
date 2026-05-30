@@ -145,7 +145,7 @@ inline void* phase_wrapper_w(NrnThread* nt, UserParams& userParams, bool in_memo
 /// Specific phase reading executed by threads.
 template <phase P>
 inline static void phase_wrapper(UserParams& userParams, int direct = 0) {
-    phase_wrapper_w<P>(nrn_threads, userParams, direct != 0);
+    nrn_multithread_job(phase_wrapper_w<P>, userParams, direct != 0);
 }
 }  // namespace coreneuron
 }  // namespace coreneuron

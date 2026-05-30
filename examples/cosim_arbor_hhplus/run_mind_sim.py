@@ -25,7 +25,7 @@ DEFAULT_CELLS = 100
 DEFAULT_DURATION_MS = 2000.0
 DT_MS = 0.01
 MACRO_DT_MS = 0.01
-DEFAULT_BATCH_WINDOW_MS = 0.25
+DEFAULT_EXCHANGE_WINDOW_MS = 0.25
 MICRO_ROI = 72
 SEED = 1234
 
@@ -67,12 +67,17 @@ def suppress_native_output():
 parser = argparse.ArgumentParser(description="MIND_Sim Arbor-HHPlus cosim benchmark.")
 parser.add_argument("--cells", type=int, default=DEFAULT_CELLS)
 parser.add_argument("--duration-ms", type=float, default=DEFAULT_DURATION_MS)
-parser.add_argument("--batch-window-ms", type=float, default=DEFAULT_BATCH_WINDOW_MS)
+parser.add_argument("--exchange-window-ms", type=float, default=DEFAULT_EXCHANGE_WINDOW_MS)
 parser.add_argument("--output", type=Path, default=None)
 parser.add_argument(
     "--device",
     choices=("cpu", "gpu"),
     default=os.environ.get("MIND_SIM_COSIM_DEVICE", "cpu").strip() or "cpu",
+)
+parser.add_argument(
+    "--num-threads",
+    type=int,
+    default=int(os.environ.get("MIND_SIM_COSIM_NUM_THREADS", "1") or "1"),
 )
 args = parser.parse_args()
 if args.cells <= 0:
@@ -82,7 +87,7 @@ if args.duration_ms <= 0.0:
 
 cells = args.cells
 duration_ms = float(args.duration_ms)
-batch_window_ms = float(args.batch_window_ms)
+exchange_window_ms = float(args.exchange_window_ms)
 duration_label = f"{duration_ms / 1000.0:g}s".replace(".", "p")
 output_file = args.output or RESULT_DIR / f"mind_sim_{cells}cells_{duration_label}_{args.device}.h5"
 output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -97,12 +102,12 @@ with zipfile.ZipFile(CONNECTIVITY_FILE) as archive:
 np.fill_diagonal(weights, 0.0)
 delays = np.maximum(tract_lengths, MIN_TRACT_LENGTH_MS) / CONDUCTION_SPEED
 min_positive_delay = float(np.min(delays[delays > 0.0]))
-if round(batch_window_ms / MACRO_DT_MS) < 1 or not np.isclose(
-    batch_window_ms / MACRO_DT_MS, round(batch_window_ms / MACRO_DT_MS), rtol=0.0, atol=1e-9
+if round(exchange_window_ms / MACRO_DT_MS) < 1 or not np.isclose(
+    exchange_window_ms / MACRO_DT_MS, round(exchange_window_ms / MACRO_DT_MS), rtol=0.0, atol=1e-9
 ):
-    raise RuntimeError(f"batch_window_ms must be an integer multiple of {MACRO_DT_MS}")
-if batch_window_ms > min_positive_delay:
-    raise RuntimeError("batch_window_ms must not exceed the minimum positive connectivity delay")
+    raise RuntimeError(f"exchange_window_ms must be an integer multiple of {MACRO_DT_MS}")
+if exchange_window_ms > min_positive_delay:
+    raise RuntimeError("exchange_window_ms must not exceed the minimum positive connectivity delay")
 
 roi_count = len(labels)
 exposure_names = ["S", "H"]
@@ -111,6 +116,7 @@ with suppress_native_output():
     # Build the micro circuit first. Its ion channel mechanism comes from mod/hhplus.mod.
     micro = ms.Sim()
     micro.set_device(args.device)
+    micro.set_num_threads(args.num_threads)
     micro.set_dt(DT_MS)
     micro.set_spike_output_enabled(True)
     micro.ion_register("cl", -1.0)
@@ -269,7 +275,7 @@ with suppress_native_output():
         network,
         dt_micro=DT_MS,
         dt_macro=MACRO_DT_MS,
-        batch_window=batch_window_ms,
+        exchange_window=exchange_window_ms,
     ).run(duration_ms)
 run_s = time.perf_counter() - run_start
 
@@ -278,9 +284,10 @@ metadata = [
     float(duration_ms),
     float(DT_MS),
     float(MACRO_DT_MS),
-    float(batch_window_ms),
+    float(exchange_window_ms),
     float(roi_count),
     float(MICRO_ROI),
+    float(args.num_threads),
 ]
 timing = [pre_run_s, run_s, pre_run_s + run_s]
 result.save_h5(
@@ -295,6 +302,7 @@ result.save_h5(
 spikes = result.micro_spikes_by_roi[MICRO_ROI]
 print(f"output={output_file}")
 print(f"device={args.device}")
+print(f"num_threads={args.num_threads}")
 print(f"pre_run_s={pre_run_s:.6f}")
 print(f"run_s={run_s:.6f}")
 print(f"total_s={pre_run_s + run_s:.6f}")

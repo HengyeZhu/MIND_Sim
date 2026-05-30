@@ -24,7 +24,7 @@ DEFAULT_CELLS = 100
 DURATION_MS = 2000.0
 DT_MS = 0.01
 MACRO_DT_MS = 0.01
-BATCH_WINDOW_MS = 0.25
+EXCHANGE_WINDOW_MS = 0.25
 MICRO_ROI = 72
 SEED = 1234
 V_INIT = -78.0
@@ -300,12 +300,12 @@ args = parser.parse_args()
 duration_ms = args.duration_ms
 
 require_integer_multiple(MACRO_DT_MS, DT_MS, "MACRO_DT_MS")
-batch_step_count = require_integer_multiple(BATCH_WINDOW_MS, MACRO_DT_MS, "BATCH_WINDOW_MS")
+exchange_step_count = require_integer_multiple(EXCHANGE_WINDOW_MS, MACRO_DT_MS, "EXCHANGE_WINDOW_MS")
 
 labels, weights, delays = load_connectivity()
 positive_delays = delays[delays > 0.0]
-if BATCH_WINDOW_MS > float(np.min(positive_delays)):
-    raise RuntimeError("BATCH_WINDOW_MS must not exceed the minimum positive connectivity delay")
+if EXCHANGE_WINDOW_MS > float(np.min(positive_delays)):
+    raise RuntimeError("EXCHANGE_WINDOW_MS must not exceed the minimum positive connectivity delay")
 
 roi_count = len(labels)
 macro_rois = np.asarray([roi for roi in range(roi_count) if roi != MICRO_ROI], dtype=np.int32)
@@ -319,7 +319,7 @@ if args.check_config:
     print(f"duration_ms={duration_ms}")
     print(f"dt_ms={DT_MS}")
     print(f"macro_dt_ms={MACRO_DT_MS}")
-    print(f"batch_window_ms={BATCH_WINDOW_MS}")
+    print(f"exchange_window_ms={EXCHANGE_WINDOW_MS}")
     print(f"micro_backend={'coreneuron_cpu' if CORENEURON_CPU else 'neuron'}")
     print(f"roi_count={roi_count}")
     print(f"micro_roi={MICRO_ROI}")
@@ -390,7 +390,7 @@ with suppress_native_output(args.quiet):
 
             coreneuron.nrncore_arg = nrncore_arg_with_skip
     sim.preRun()
-    sim.pc.set_maxstep(BATCH_WINDOW_MS)
+    sim.pc.set_maxstep(EXCHANGE_WINDOW_MS)
     spike_times_vector = h.Vector()
     spike_gids_vector = h.Vector()
     sim.pc.spike_record(-1, spike_times_vector, spike_gids_vector)
@@ -441,33 +441,33 @@ all_spike_gids = []
 
 run_start = time.perf_counter()
 with suppress_native_output(args.quiet):
-    for batch_start in range(0, step_count, batch_step_count):
-        batch_stop = min(step_count, batch_start + batch_step_count)
-        batch_start_time = batch_start * MACRO_DT_MS
-        batch_stop_time = batch_stop * MACRO_DT_MS
+    for exchange_start in range(0, step_count, exchange_step_count):
+        exchange_stop = min(step_count, exchange_start + exchange_step_count)
+        exchange_start_time = exchange_start * MACRO_DT_MS
+        exchange_stop_time = exchange_stop * MACRO_DT_MS
 
-        sim.pc.psolve(batch_stop_time)
+        sim.pc.psolve(exchange_stop_time)
         spike_count = int(spike_times_vector.size())
-        batch_spikes = 0
+        exchange_spikes = 0
         spike_index = last_spike_index
         while spike_index < spike_count:
             spike_time = float(spike_times_vector.x[spike_index])
-            if spike_time >= batch_stop_time:
+            if spike_time >= exchange_stop_time:
                 break
-            if batch_start_time <= spike_time < batch_stop_time:
+            if exchange_start_time <= spike_time < exchange_stop_time:
                 spike_gid = int(spike_gids_vector.x[spike_index])
-                batch_spikes += 1
+                exchange_spikes += 1
                 all_spike_times.append(spike_time)
                 all_spike_gids.append(spike_gid)
             spike_index += 1
         last_spike_index = spike_index
 
-        for step in range(batch_start, batch_stop):
+        for step in range(exchange_start, exchange_stop):
             step_regions(macro_rois, region_states_s, current_input, current_exposure)
 
-            if step + 1 == batch_stop:
-                micro_ca += batch_spikes / float(args.cells)
-                micro_ca *= math.exp(-BATCH_WINDOW_MS / EXPOSURE_TAU_MS)
+            if step + 1 == exchange_stop:
+                micro_ca += exchange_spikes / float(args.cells)
+                micro_ca *= math.exp(-EXCHANGE_WINDOW_MS / EXPOSURE_TAU_MS)
                 activity = np.float32(micro_ca * EXPOSURE_GAIN)
                 current_exposure[MICRO_ROI, S_INDEX] = activity
                 current_exposure[MICRO_ROI, H_INDEX] = activity
@@ -485,15 +485,15 @@ with suppress_native_output(args.quiet):
                 history_capacity,
             )
 
-        if batch_stop < step_count:
-            micro_input = apply_micro_coupling(macro_rois, MICRO_ROI, history, batch_stop, history_capacity)
+        if exchange_stop < step_count:
+            micro_input = apply_micro_coupling(macro_rois, MICRO_ROI, history, exchange_stop, history_capacity)
             event_rate = float(micro_input[H_INDEX]) * INPUT_SPIKE_SCALE
             event_rate = min(max(event_rate, 0.0), MAX_INPUT_RATE_HZ)
-            probability = min(max(event_rate * BATCH_WINDOW_MS / 1000.0, 0.0), 1.0)
+            probability = min(max(event_rate * EXCHANGE_WINDOW_MS / 1000.0, 0.0), 1.0)
             for cell in range(args.cells):
                 input_seed, u, offset_fraction = lcg_uniform_pair(input_seed)
                 if u < probability:
-                    event_time = batch_start_time + offset_fraction * BATCH_WINDOW_MS + MACRO_EVENT_DELAY_MS
+                    event_time = exchange_start_time + offset_fraction * EXCHANGE_WINDOW_MS + MACRO_EVENT_DELAY_MS
                     input_netcons[cell].event(event_time)
 run_s = time.perf_counter() - run_start
 
@@ -508,7 +508,7 @@ metadata = [
     float(duration_ms),
     float(DT_MS),
     float(MACRO_DT_MS),
-    float(BATCH_WINDOW_MS),
+    float(EXCHANGE_WINDOW_MS),
     float(roi_count),
     float(MICRO_ROI),
 ]

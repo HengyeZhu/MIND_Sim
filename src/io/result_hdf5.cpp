@@ -178,7 +178,10 @@ SortedSpikes sort_spikes(const mind_sim::micro::sim::MicroSpikeTable& spikes) {
     std::vector<std::size_t> order(spikes.time.size());
     std::iota(order.begin(), order.end(), 0);
     std::stable_sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
-        return spikes.time[lhs] < spikes.time[rhs];
+        if (spikes.time[lhs] != spikes.time[rhs]) {
+            return spikes.time[lhs] < spikes.time[rhs];
+        }
+        return spikes.gid[lhs] < spikes.gid[rhs];
     });
 
     SortedSpikes sorted;

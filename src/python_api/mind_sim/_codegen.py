@@ -57,10 +57,10 @@ def _require_integer_multiple(value: float, unit: float, what: str, unit_name: s
     return float(steps) * unit
 
 
-def _batch_window_from_min_delay(network: "Network", dt_macro: float) -> float:
+def _exchange_window_from_min_delay(network: "Network", dt_macro: float) -> float:
     min_delay = float(network.min_positive_delay())
     if min_delay <= 0.0:
-        raise ValueError("automatic batch_window requires at least one positive connectivity delay")
+        raise ValueError("automatic exchange_window requires at least one positive connectivity delay")
     steps = math.floor((min_delay / dt_macro) + 1e-9)
     if steps < 1:
         raise ValueError("minimum positive connectivity delay is smaller than dt_macro")
@@ -1368,28 +1368,28 @@ class Simulator:
         *,
         dt_micro: float,
         dt_macro: float,
-        batch_window: float | None = None,
+        exchange_window: float | None = None,
         record_micro_spikes: bool = True,
     ):
         if not isinstance(network, Network):
             raise TypeError("Simulator expects a mind_sim.Network")
         dt_micro = float(dt_micro)
         dt_macro = _require_integer_multiple(float(dt_macro), dt_micro, "dt_macro", "dt_micro")
-        batch_window = (
-            _batch_window_from_min_delay(network, dt_macro)
-            if batch_window is None
-            else _require_integer_multiple(float(batch_window), dt_macro, "batch_window", "dt_macro")
+        exchange_window = (
+            _exchange_window_from_min_delay(network, dt_macro)
+            if exchange_window is None
+            else _require_integer_multiple(float(exchange_window), dt_macro, "exchange_window", "dt_macro")
         )
         min_delay = float(network.min_positive_delay())
         if min_delay <= 0.0:
-            raise ValueError("batch_window requires at least one positive connectivity delay")
-        if batch_window > min_delay + 1e-9:
-            raise ValueError("batch_window must not exceed the minimum positive connectivity delay")
+            raise ValueError("exchange_window requires at least one positive connectivity delay")
+        if exchange_window > min_delay + 1e-9:
+            raise ValueError("exchange_window must not exceed the minimum positive connectivity delay")
         self._native = _native.Simulator(
             network._build_native(),
             dt_micro,
             dt_macro,
-            batch_window,
+            exchange_window,
             bool(record_micro_spikes),
         )
 

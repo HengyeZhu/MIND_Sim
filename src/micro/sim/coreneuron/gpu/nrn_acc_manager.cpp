@@ -1301,7 +1301,7 @@ void nrn_newtonspace_copyto_device(NewtonSpace* ns) {
 #ifdef CORENEURON_ENABLE_GPU
     // FIXME this check needs to be tweaked if we ever want to run with a mix
     //       of CPU and GPU threads.
-    if (nrn_threads->compute_gpu == 0) {
+    if (nrn_threads[0].compute_gpu == 0) {
         return;
     }
 
@@ -1343,7 +1343,7 @@ void nrn_newtonspace_delete_from_device(NewtonSpace* ns) {
 #ifdef CORENEURON_ENABLE_GPU
     // FIXME this check needs to be tweaked if we ever want to run with a mix
     //       of CPU and GPU threads.
-    if (nrn_threads->compute_gpu == 0) {
+    if (nrn_threads[0].compute_gpu == 0) {
         return;
     }
     int n = ns->n * ns->n_instance;
@@ -1362,7 +1362,7 @@ void nrn_sparseobj_copyto_device(SparseObj* so) {
 #if defined(CORENEURON_ENABLE_GPU) && !defined(CORENEURON_UNIFIED_MEMORY)
     // FIXME this check needs to be tweaked if we ever want to run with a mix
     //       of CPU and GPU threads.
-    if (nrn_threads->compute_gpu == 0) {
+    if (nrn_threads[0].compute_gpu == 0) {
         return;
     }
 
@@ -1445,7 +1445,7 @@ void nrn_sparseobj_delete_from_device(SparseObj* so) {
 #if defined(CORENEURON_ENABLE_GPU) && !defined(CORENEURON_UNIFIED_MEMORY)
     // FIXME this check needs to be tweaked if we ever want to run with a mix
     //       of CPU and GPU threads.
-    if (nrn_threads->compute_gpu == 0) {
+    if (nrn_threads[0].compute_gpu == 0) {
         return;
     }
     unsigned n1 = so->neqn + 1;

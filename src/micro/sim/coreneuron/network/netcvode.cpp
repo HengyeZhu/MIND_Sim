@@ -174,7 +174,7 @@ NetCvode::~NetCvode() {
 }
 
 void nrn_p_construct() {
-    net_cvode_instance->p_construct(1);
+    net_cvode_instance->p_construct(nrn_nthread);
 }
 
 void NetCvode::p_construct(int n) {
@@ -227,37 +227,44 @@ void NetCvode::clear_events() {
     // DiscreteEvents may already have gone out of existence so the tqe_
     // may contain many invalid item data pointers
     enqueueing_ = 0;
-    NetCvodeThreadData& d = p[0];
-    delete d.tqe_;
-    d.tqe_ = new TQueue<QTYPE>();
-    d.unreffed_event_cnt_ = 0;
-    d.inter_thread_events_.clear();
-    d.tqe_->nshift_ = -1;
-    d.tqe_->shift_bin(nrn_threads->_t - 0.5 * nrn_threads->_dt);
+    for (int i = 0; i < nrn_nthread; ++i) {
+        NetCvodeThreadData& d = p[i];
+        delete d.tqe_;
+        d.tqe_ = new TQueue<QTYPE>();
+        d.unreffed_event_cnt_ = 0;
+        d.inter_thread_events_.clear();
+        d.tqe_->nshift_ = -1;
+        d.tqe_->shift_bin(nrn_threads->_t - 0.5 * nrn_threads->_dt);
+    }
 }
 
 void NetCvode::init_events() {
-    p[0].tqe_->nshift_ = -1;
-    p[0].tqe_->shift_bin(nrn_threads->_t - 0.5 * nrn_threads->_dt);
-
-    NrnThread* nt = nrn_threads;
-    for (int ipre = 0; ipre < nt->n_presyn; ++ipre) {
-        PreSyn* ps = nt->presyns + ipre;
-        ps->flag_ = false;
+    for (int i = 0; i < nrn_nthread; ++i) {
+        p[i].tqe_->nshift_ = -1;
+        p[i].tqe_->shift_bin(nrn_threads->_t - 0.5 * nrn_threads->_dt);
     }
 
-    for (int inetc = 0; inetc < nt->n_netcon; ++inetc) {
-        NetCon* d = nt->netcons + inetc;
-        if (d->target_) {
-            int type = d->target_->_type;
-            if (corenrn.get_pnt_receive_init()[type]) {
-                (*corenrn.get_pnt_receive_init()[type])(d->target_, d->u.weight_index_, 0);
-            } else {
-                int cnt = corenrn.get_pnt_receive_size()[type];
-                double* wt = nt->weights + d->u.weight_index_;
-                // not the first
-                for (int j = 1; j < cnt; ++j) {
-                    wt[j] = 0.;
+    for (int tid = 0; tid < nrn_nthread; ++tid) {
+        NrnThread* nt = nrn_threads + tid;
+
+        for (int ipre = 0; ipre < nt->n_presyn; ++ipre) {
+            PreSyn* ps = nt->presyns + ipre;
+            ps->flag_ = false;
+        }
+
+        for (int inetc = 0; inetc < nt->n_netcon; ++inetc) {
+            NetCon* d = nt->netcons + inetc;
+            if (d->target_) {
+                int type = d->target_->_type;
+                if (corenrn.get_pnt_receive_init()[type]) {
+                    (*corenrn.get_pnt_receive_init()[type])(d->target_, d->u.weight_index_, 0);
+                } else {
+                    int cnt = corenrn.get_pnt_receive_size()[type];
+                    double* wt = nt->weights + d->u.weight_index_;
+                    // not the first
+                    for (int j = 1; j < cnt; ++j) {
+                        wt[j] = 0.;
+                    }
                 }
             }
         }
@@ -486,6 +493,10 @@ void ncs2nrn_integrate(double tstop) {
         nrn_fixed_step_group_minimal(total_sim_steps);
     } else {
         nrn_fixed_single_steps_minimal(total_sim_steps, tstop);
+    }
+
+    for (int i = 0; i < nrn_nthread; ++i) {
+        nrn_assert(nrn_threads[i]._t == nrn_threads->_t);
     }
 }
 

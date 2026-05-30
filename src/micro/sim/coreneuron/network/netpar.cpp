@@ -371,7 +371,7 @@ void nrn_spike_exchange(NrnThread* nt) {
             ps->send(spikein[i].spiketime, net_cvode_instance, nt);
         }
     }
-    interthread_enqueue(nrn_threads);
+    nrn_multithread_job(interthread_enqueue);
     wt1_ = nrn_wtime() - wt;
 }
 
@@ -493,7 +493,7 @@ void nrn_spike_exchange_compressed(NrnThread* nt) {
     // need to be delivered early enough that the interthread buffers
     // need transfer to the thread event queues before the next dqueue_bin
     // while loop in deliver_net_events. So enqueue now...
-    interthread_enqueue(nrn_threads);
+    nrn_multithread_job(interthread_enqueue);
     t_exchange_ = nrn_threads->_t;
     wt1_ = nrn_wtime() - wt;
 }
@@ -618,7 +618,7 @@ void BBS_netpar_solve(double tstop) {
         }
 
         nrn_timeout(timeout_);
-        interthread_enqueue(nrn_threads);
+        nrn_multithread_job(interthread_enqueue);
         ncs2nrn_integrate(tstop * (1. + 1e-11));
         nrn_spike_exchange(nrn_threads);
         nrn_timeout(0);

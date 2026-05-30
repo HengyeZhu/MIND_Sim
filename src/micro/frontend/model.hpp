@@ -143,6 +143,8 @@ class MicroFrontendModel {
 
     void set_dt(double dt);
     [[nodiscard]] double dt() const noexcept { return dt_; }
+    void set_num_threads(int num_threads);
+    [[nodiscard]] int num_threads() const noexcept { return requested_thread_count_; }
 
     void set_celsius(double celsius);
     [[nodiscard]] double celsius() const noexcept { return section_properties_.celsius; }
@@ -279,6 +281,9 @@ class MicroFrontendModel {
     [[nodiscard]] std::string resolve_ion_mechanism(const std::string& ion_mechanism) const;
     [[nodiscard]] int resolve_cached_original_node(int gid, int section_index, double loc);
     [[nodiscard]] int runtime_node_for_original(int original_node) const;
+    [[nodiscard]] int thread_for_gid(int gid) const;
+    [[nodiscard]] int thread_for_original_node(int original_node) const;
+    [[nodiscard]] int thread_for_instance(const CoreMechanismInstance& instance) const;
     void reset_core_node_storage();
     int intern_mechanism_type(const std::string& name);
     void apply_section_axial_resistance();
@@ -287,6 +292,7 @@ class MicroFrontendModel {
     void rebuild_core_network();
 
     double dt_{0.025};
+    int requested_thread_count_{1};
     double t_{0.0};
     bool spike_output_enabled_{false};
     bool has_morphology_{false};
@@ -310,6 +316,13 @@ class MicroFrontendModel {
     mind_sim::micro::sim::MicroDeviceConfig device_config_{};
     std::unique_ptr<mind_sim::micro::sim::MicroRuntime> runtime_backend_{};
     std::vector<int> morph_parent_index_{};
+    std::vector<int> original_node_gid_{};
+    std::vector<int> original_node_thread_{};
+    std::vector<int> gid_thread_{};
+    std::vector<std::vector<int>> thread_gids_{};
+    std::vector<std::vector<int>> original_nodes_by_thread_{};
+    std::vector<int> insert_runtime_thread_{};
+    std::vector<std::size_t> insert_runtime_row_{};
     std::vector<double> morph_area_{};
     std::vector<int> runtime_node_by_original_{};
     std::vector<double> axial_a_ra1_{};

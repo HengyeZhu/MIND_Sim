@@ -6,7 +6,6 @@
 # =============================================================================.
 */
 
-#include <cstddef>
 #include <cstring>
 
 #include "coreneuron/nrnconf.h"
@@ -18,11 +17,13 @@
 #include "coreneuron/mechanism/membfunc.hpp"
 #include "coreneuron/coreneuron.hpp"
 #include "coreneuron/utils/nrnoc_aux.hpp"
-#include "micro/sim/mechanism_runtime.hpp"
+#include "micro/sim/nrn_registration_mirror.hpp"
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC visibility push(default)
 #endif
+
+namespace nrn_registration_mirror = mind_sim::micro::sim::nrn_registration_mirror;
 
 namespace coreneuron {
 int secondorder = 0;
@@ -76,7 +77,7 @@ void add_nrn_artcell(int type, int qi) {
 
     corenrn.get_is_artificial()[type] = 1;
     corenrn.get_artcell_qindex()[type] = qi;
-    mind_sim::micro::sim::core_note_artificial_cell(type);
+    nrn_registration_mirror::artificial_cell(type);
 }
 
 void set_pnt_receive(int type,
@@ -90,26 +91,25 @@ void set_pnt_receive(int type,
     corenrn.get_pnt_receive_init()[type] = pnt_receive_init;
     corenrn.get_pnt_receive_size()[type] = size;
     if (pnt_receive != nullptr) {
-        mind_sim::micro::sim::core_note_net_receive(type, size);
+        nrn_registration_mirror::net_receive(type, size);
     }
 }
 
 void alloc_mech(int memb_func_size_) {
-    auto size = static_cast<std::size_t>(memb_func_size_);
-    corenrn.get_memb_funcs().resize(size);
-    corenrn.get_pnt_map().resize(size);
-    corenrn.get_pnt_receive().resize(size);
-    corenrn.get_pnt_receive_init().resize(size);
-    corenrn.get_pnt_receive_size().resize(size);
-    corenrn.get_watch_check().resize(size);
-    corenrn.get_is_artificial().resize(size, false);
-    corenrn.get_artcell_qindex().resize(size);
-    corenrn.get_array_dims().resize(size);
-    corenrn.get_prop_param_size().resize(size);
-    corenrn.get_prop_dparam_size().resize(size);
-    corenrn.get_mech_data_layout().resize(size, 1);
-    corenrn.get_bbcore_read().resize(size);
-    corenrn.get_bbcore_write().resize(size);
+    corenrn.get_memb_funcs().resize(memb_func_size_);
+    corenrn.get_pnt_map().resize(memb_func_size_);
+    corenrn.get_pnt_receive().resize(memb_func_size_);
+    corenrn.get_pnt_receive_init().resize(memb_func_size_);
+    corenrn.get_pnt_receive_size().resize(memb_func_size_);
+    corenrn.get_watch_check().resize(memb_func_size_);
+    corenrn.get_is_artificial().resize(memb_func_size_, false);
+    corenrn.get_artcell_qindex().resize(memb_func_size_);
+    corenrn.get_array_dims().resize(memb_func_size_);
+    corenrn.get_prop_param_size().resize(memb_func_size_);
+    corenrn.get_prop_dparam_size().resize(memb_func_size_);
+    corenrn.get_mech_data_layout().resize(memb_func_size_, 1);
+    corenrn.get_bbcore_read().resize(memb_func_size_);
+    corenrn.get_bbcore_write().resize(memb_func_size_);
 }
 
 void initnrn() {
@@ -170,7 +170,7 @@ int register_mech(const char** m,
     memb_func[type].dparam_semantics = nullptr;
 #endif
     register_all_variables_offsets(type, &m[2]);
-    mind_sim::micro::sim::core_note_registered_mechanism(type, m);
+    nrn_registration_mirror::mechanism_registered(type, m);
     return type;
 }
 
@@ -185,7 +185,7 @@ void nrn_writes_conc(int type, int /* unused */) {
     if (nrn_is_ion(type)) {
         ++lastion;
     }
-    mind_sim::micro::sim::core_note_writes_concentration(type);
+    nrn_registration_mirror::writes_concentration(type);
 }
 
 void _nrn_layout_reg(int type, int layout) {
@@ -218,7 +218,7 @@ void hoc_register_prop_size(int type, int psize, int dpsize) {
     if (dpsize) {
         corenrn.get_memb_func(type).dparam_semantics = (int*) ecalloc(dpsize, sizeof(int));
     }
-    mind_sim::micro::sim::core_note_prop_size(type, psize, dpsize);
+    nrn_registration_mirror::prop_size(type, psize, dpsize);
 }
 void hoc_register_dparam_semantics(int type, int ix, const char* name) {
     /* needed for SoA to possibly reorder name_ion and some "pointer" pointers. */
@@ -268,7 +268,7 @@ void hoc_register_dparam_semantics(int type, int ix, const char* name) {
            name,
            memb_func[type].dparam_semantics[ix]);
 #endif
-    mind_sim::micro::sim::core_note_dparam_semantic(type, ix, name);
+    nrn_registration_mirror::dparam_semantic(type, ix, name);
 }
 
 /* only ion type ion_write_depend_ are non-nullptr */
@@ -351,7 +351,7 @@ int point_reg_helper(const Symbol* s2) {
 
     corenrn.get_pnt_map()[type] = next_pointtype++;
     corenrn.get_memb_func(type).is_point = 1;
-    mind_sim::micro::sim::core_note_point_mechanism(type);
+    nrn_registration_mirror::point_mechanism(type);
 
     return corenrn.get_pnt_map()[type];
 }

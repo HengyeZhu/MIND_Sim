@@ -90,7 +90,7 @@ VERBATIM {
 	int* gidvec = info->gidvec;
 	int i;
 	fake_out = fake_output ? 1 : 0;
-	for (i=0; info->index < size; ++i) {
+	for (i=0; (info->index) < size; ++i) {
 		/* only if the gid is NOT on this machine */
 		nrn_fake_fire(gidvec[info->index], tvec[info->index], fake_out);
 		++info->index;
@@ -129,4 +129,3 @@ Info** pattern_stim_info_ref(_threadargsproto_) {
 
 } // namespace coreneuron
 ENDVERBATIM
-

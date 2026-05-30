@@ -100,6 +100,7 @@ parser = argparse.ArgumentParser(description="MIND_Sim micro-only HHPlus network
 parser.add_argument("--cells", type=int, default=DEFAULT_CELLS)
 parser.add_argument("--duration-ms", type=float, default=DEFAULT_DURATION_MS)
 parser.add_argument("--device", choices=("cpu", "gpu"), default="gpu")
+parser.add_argument("--num-threads", type=int, default=int(os.environ.get("MIND_SIM_MICRO_NUM_THREADS", "1") or "1"))
 parser.add_argument("--record-gids", default="0,1,2,3,4,5,6,7,8,9")
 parser.add_argument("--output", type=Path, default=None)
 parser.add_argument("--quiet", action="store_true")
@@ -122,6 +123,7 @@ pre_start = time.perf_counter()
 with suppress_native_output(args.quiet):
     sim = ms.Sim()
     sim.set_device(args.device)
+    sim.set_num_threads(args.num_threads)
     sim.set_dt(DT_MS)
     sim.set_spike_output_enabled(True)
     sim.ion_register("cl", -1.0)
@@ -182,6 +184,7 @@ np.savez_compressed(
     output,
     backend=np.asarray("mind_sim", dtype="S"),
     device=np.asarray(args.device, dtype="S"),
+    num_threads=np.asarray(args.num_threads, dtype=np.int32),
     cells=np.asarray(cells, dtype=np.int32),
     duration_ms=np.asarray(duration_ms, dtype=np.float64),
     dt_ms=np.asarray(DT_MS, dtype=np.float64),
@@ -196,6 +199,7 @@ np.savez_compressed(
 print(f"output={output}")
 print("backend=mind_sim")
 print(f"device={args.device}")
+print(f"num_threads={args.num_threads}")
 print(f"cells={cells}")
 print(f"duration_ms={duration_ms:g}")
 print(f"pre_run_s={pre_run_s:.6f}")

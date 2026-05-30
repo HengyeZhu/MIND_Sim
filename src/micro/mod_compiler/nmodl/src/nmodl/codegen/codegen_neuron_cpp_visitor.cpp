@@ -1275,9 +1275,7 @@ void CodegenNeuronCppVisitor::print_mechanism_global_var_structure(bool print_in
             printer->fmt_line("{} {}{};",
                               float_type,
                               name,
-                              print_initializers
-                                  ? fmt::format("{{{}}}", nmodl::stringutils::to_string(value))
-                                  : std::string{});
+                              print_initializers ? fmt::format("{{{:g}}}", value) : std::string{});
         }
     }
 
@@ -1358,7 +1356,7 @@ void CodegenNeuronCppVisitor::print_global_param_default_values() {
     std::vector<std::string> defaults;
     for (const auto& p: info.range_parameter_vars) {
         double value = p->get_value() == nullptr ? 0.0 : *p->get_value();
-        defaults.push_back(fmt::format("{} /* {} */", nmodl::stringutils::to_string(value), p->get_name()));
+        defaults.push_back(fmt::format("{:g} /* {} */", value, p->get_name()));
     }
 
     printer->add_multi_line(fmt::format("{}", fmt::join(defaults, ",\n")));

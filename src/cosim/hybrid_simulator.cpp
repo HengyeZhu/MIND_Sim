@@ -53,10 +53,10 @@ bool view_matches_entire_binding(const mind_sim::micro::sim::MicroSpikeTableView
 }
 
 bool can_prepare_inputs_ahead(const mind_sim::macro::sim::CouplingRuntime& runtime,
-                              int batch_step_count) {
+                              int exchange_step_count) {
     for (const auto& graph: runtime.graphs) {
         for (int delay_steps: graph.edge_delay_steps) {
-            if (delay_steps < batch_step_count) {
+            if (delay_steps < exchange_step_count) {
                 return false;
             }
         }
@@ -79,13 +79,13 @@ void append_events(mind_sim::micro::sim::MicroEventTable& target,
     source.clear();
 }
 
-void prepare_micro_events_for_batch(
+void prepare_micro_events_for_exchange(
     const mind_sim::macro::sim::CouplingEvaluation& micro_coupling_evaluation,
     int roi_count,
     int input_count,
     int exposure_count,
-    int batch_start,
-    int batch_stop,
+    int exchange_start,
+    int exchange_stop,
     double dt_macro,
     const std::vector<double>& history,
     std::vector<double>& micro_input_soa,
@@ -101,11 +101,11 @@ void prepare_micro_events_for_batch(
                     roi_count,
                     input_count,
                     exposure_count,
-                    batch_start,
+                    exchange_start,
                     history,
                     micro_input_soa);
-    const double batch_start_time = batch_start * dt_macro;
-    const double batch_stop_time = batch_stop * dt_macro;
+    const double exchange_start_time = exchange_start * dt_macro;
+    const double exchange_stop_time = exchange_stop * dt_macro;
     for (int circuit_index = 0; circuit_index < static_cast<int>(micro_circuits.size()); ++circuit_index) {
         auto& circuit = micro_circuits[static_cast<std::size_t>(circuit_index)];
         auto& events = prepared_events[static_cast<std::size_t>(circuit_index)];
@@ -120,8 +120,8 @@ void prepare_micro_events_for_batch(
                                       binding.input_state,
                                       binding.input_params,
                                       binding.input_random_streams,
-                                      batch_start_time,
-                                      batch_stop_time,
+                                      exchange_start_time,
+                                      exchange_stop_time,
                                       binding.input_port_bases,
                                       events,
                                       binding.input_read_offsets);
@@ -189,31 +189,31 @@ using mind_sim::macro::sim::write_history_slot;
 Simulator::Simulator(mind_sim::macro::frontend::Network network,
                      double dt_micro,
                      double dt_macro,
-                     double batch_window,
+                     double exchange_window,
                      bool record_micro_spikes)
     : network_(std::move(network)),
       dt_micro_(dt_micro),
       dt_macro_(dt_macro),
-      batch_window_(batch_window),
+      exchange_window_(exchange_window),
       record_micro_spikes_(record_micro_spikes) {
-    if (dt_micro_ <= 0.0 || dt_macro_ <= 0.0 || batch_window_ <= 0.0) {
-        throw std::runtime_error("dt_micro, dt_macro, and batch_window must be positive");
+    if (dt_micro_ <= 0.0 || dt_macro_ <= 0.0 || exchange_window_ <= 0.0) {
+        throw std::runtime_error("dt_micro, dt_macro, and exchange_window must be positive");
     }
     if (!is_integer_multiple(dt_macro_, dt_micro_)) {
         throw std::runtime_error("dt_macro must be an integer multiple of dt_micro");
     }
-    if (!is_integer_multiple(batch_window_, dt_macro_)) {
-        throw std::runtime_error("batch_window must be an integer multiple of dt_macro");
+    if (!is_integer_multiple(exchange_window_, dt_macro_)) {
+        throw std::runtime_error("exchange_window must be an integer multiple of dt_macro");
     }
     const double min_delay = network_.connectivity().min_positive_delay();
     if (min_delay <= 0.0) {
-        throw std::runtime_error("batch_window requires at least one positive connectivity delay");
+        throw std::runtime_error("exchange_window requires at least one positive connectivity delay");
     }
-    if (batch_window_ - min_delay > 1e-9) {
+    if (exchange_window_ - min_delay > 1e-9) {
         throw std::runtime_error(
-            "batch_window must not exceed the minimum positive connectivity delay");
+            "exchange_window must not exceed the minimum positive connectivity delay");
     }
-    batch_step_count_ = integer_step_count(batch_window_, dt_macro_);
+    exchange_step_count_ = integer_step_count(exchange_window_, dt_macro_);
 }
 
 mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
@@ -291,7 +291,7 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
     result.exposures.exposure_count = exposure_count;
     result.exposures.roi_indices = network_.recorded_rois();
     const int exposure_sample_count =
-        step_count == 0 ? 1 : ((step_count + batch_step_count_ - 1) / batch_step_count_) + 1;
+        step_count == 0 ? 1 : ((step_count + exchange_step_count_ - 1) / exchange_step_count_) + 1;
     result.exposures.values.reserve(
         static_cast<std::size_t>(exposure_sample_count) *
         result.exposures.roi_indices.size() *
@@ -325,58 +325,192 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
     std::vector<mind_sim::micro::sim::MicroWindowToken> micro_tokens(micro_circuits.size());
     std::vector<mind_sim::micro::sim::MicroEventTable> current_micro_events(micro_circuits.size());
     std::vector<mind_sim::micro::sim::MicroEventTable> next_micro_events(micro_circuits.size());
-    const bool use_input_lookahead =
-        !micro_circuits.empty() && can_prepare_inputs_ahead(coupling_runtime, batch_step_count_);
+    const bool use_micro_pipeline =
+        !micro_circuits.empty() && can_prepare_inputs_ahead(coupling_runtime, exchange_step_count_);
 
-    if (use_input_lookahead && step_count > 0) {
-        const int first_batch_stop = std::min(step_count, batch_step_count_);
-        prepare_micro_events_for_batch(micro_coupling_evaluation,
+    const auto submit_micro_window = [&](double window_start_time,
+                                         double window_stop_time,
+                                         std::vector<mind_sim::micro::sim::MicroEventTable>& events) {
+        for (std::size_t circuit = 0; circuit < micro_runtimes.size(); ++circuit) {
+            append_events(micro_runtimes[circuit]->scheduled_events(), events[circuit]);
+        }
+        for (std::size_t circuit = 0; circuit < micro_runtimes.size(); ++circuit) {
+            micro_tokens[circuit] =
+                micro_runtimes[circuit]->submit_window(window_start_time, window_stop_time);
+        }
+    };
+
+    const auto finish_micro_window = [&](double window_start_time, double window_stop_time) {
+        for (int circuit_index = 0; circuit_index < static_cast<int>(micro_circuits.size()); ++circuit_index) {
+            auto& circuit = micro_circuits[static_cast<std::size_t>(circuit_index)];
+            const auto spikes =
+                micro_runtimes[static_cast<std::size_t>(circuit_index)]->finish_window(
+                    micro_tokens[static_cast<std::size_t>(circuit_index)]);
+            bind_spike_views(
+                spikes,
+                circuit,
+                micro_binding_spikes[static_cast<std::size_t>(circuit_index)],
+                micro_binding_views[static_cast<std::size_t>(circuit_index)],
+                micro_single_binding[static_cast<std::size_t>(circuit_index)] != 0,
+                window_start_time,
+                window_stop_time);
+            for (int binding_index = 0; binding_index < static_cast<int>(circuit.bindings.size()); ++binding_index) {
+                auto& binding = circuit.bindings[static_cast<std::size_t>(binding_index)];
+                const auto spike_view =
+                    micro_binding_views[static_cast<std::size_t>(circuit_index)][static_cast<std::size_t>(binding_index)];
+                binding.output_rule->apply(spike_view,
+                                           micro_exposure_soa,
+                                           roi_count,
+                                           binding.roi_index,
+                                           binding.output_state,
+                                           binding.output_params,
+                                           window_start_time,
+                                           window_stop_time,
+                                           binding.output_write_offsets);
+            }
+            if (record_micro_spikes_) {
+                const auto& binding_views =
+                    micro_binding_views[static_cast<std::size_t>(circuit_index)];
+                for (std::size_t binding_index = 0; binding_index < binding_views.size(); ++binding_index) {
+                    const int roi = circuit.bindings[binding_index].roi_index;
+                    result.micro_spikes_by_roi[static_cast<std::size_t>(roi)].append_view(
+                        binding_views[binding_index]);
+                }
+            }
+        }
+
+        for (const auto offset: micro_exposure_offsets) {
+            current_exposure_soa[offset] = micro_exposure_soa[offset];
+        }
+    };
+
+    const auto run_micro_window_synchronously = [&](double window_start_time,
+                                                   double window_stop_time,
+                                                   std::vector<mind_sim::micro::sim::MicroEventTable>& events) {
+        for (std::size_t circuit = 0; circuit < micro_runtimes.size(); ++circuit) {
+            append_events(micro_runtimes[circuit]->scheduled_events(), events[circuit]);
+        }
+        for (int circuit_index = 0; circuit_index < static_cast<int>(micro_circuits.size()); ++circuit_index) {
+            auto& circuit = micro_circuits[static_cast<std::size_t>(circuit_index)];
+            const auto spikes =
+                micro_runtimes[static_cast<std::size_t>(circuit_index)]->advance_window(
+                    window_start_time,
+                    window_stop_time);
+            bind_spike_views(
+                spikes,
+                circuit,
+                micro_binding_spikes[static_cast<std::size_t>(circuit_index)],
+                micro_binding_views[static_cast<std::size_t>(circuit_index)],
+                micro_single_binding[static_cast<std::size_t>(circuit_index)] != 0,
+                window_start_time,
+                window_stop_time);
+            for (int binding_index = 0; binding_index < static_cast<int>(circuit.bindings.size()); ++binding_index) {
+                auto& binding = circuit.bindings[static_cast<std::size_t>(binding_index)];
+                const auto spike_view =
+                    micro_binding_views[static_cast<std::size_t>(circuit_index)][static_cast<std::size_t>(binding_index)];
+                binding.output_rule->apply(spike_view,
+                                           micro_exposure_soa,
+                                           roi_count,
+                                           binding.roi_index,
+                                           binding.output_state,
+                                           binding.output_params,
+                                           window_start_time,
+                                           window_stop_time,
+                                           binding.output_write_offsets);
+            }
+            if (record_micro_spikes_) {
+                const auto& binding_views =
+                    micro_binding_views[static_cast<std::size_t>(circuit_index)];
+                for (std::size_t binding_index = 0; binding_index < binding_views.size(); ++binding_index) {
+                    const int roi = circuit.bindings[binding_index].roi_index;
+                    result.micro_spikes_by_roi[static_cast<std::size_t>(roi)].append_view(
+                        binding_views[binding_index]);
+                }
+            }
+        }
+
+        for (const auto offset: micro_exposure_offsets) {
+            current_exposure_soa[offset] = micro_exposure_soa[offset];
+        }
+    };
+
+    if (use_micro_pipeline && step_count > 0) {
+        const int first_exchange_stop = std::min(step_count, exchange_step_count_);
+        prepare_micro_events_for_exchange(micro_coupling_evaluation,
                                        roi_count,
                                        input_count,
                                        exposure_count,
                                        0,
-                                       first_batch_stop,
+                                       first_exchange_stop,
                                        dt_macro_,
                                        history,
                                        micro_input_soa,
                                        micro_circuits,
                                        current_micro_events);
+        submit_micro_window(0.0, first_exchange_stop * dt_macro_, current_micro_events);
     }
 
-    for (int batch_start = 0; batch_start < step_count; batch_start += batch_step_count_) {
-        const int batch_stop = std::min(step_count, batch_start + batch_step_count_);
-        const double batch_start_time = batch_start * dt_macro_;
-        const double batch_stop_time = batch_stop * dt_macro_;
+    for (int exchange_start = 0; exchange_start < step_count; exchange_start += exchange_step_count_) {
+        const int exchange_stop = std::min(step_count, exchange_start + exchange_step_count_);
+        const double exchange_start_time = exchange_start * dt_macro_;
+        const double exchange_stop_time = exchange_stop * dt_macro_;
 
-        if (!use_input_lookahead) {
-            prepare_micro_events_for_batch(micro_coupling_evaluation,
+        if (!use_micro_pipeline) {
+            prepare_micro_events_for_exchange(micro_coupling_evaluation,
                                            roi_count,
                                            input_count,
                                            exposure_count,
-                                           batch_start,
-                                           batch_stop,
+                                           exchange_start,
+                                           exchange_stop,
                                            dt_macro_,
                                            history,
                                            micro_input_soa,
                                            micro_circuits,
                                            current_micro_events);
-        }
-        for (std::size_t circuit = 0; circuit < micro_runtimes.size(); ++circuit) {
-            append_events(micro_runtimes[circuit]->scheduled_events(),
-                          current_micro_events[circuit]);
-        }
-
-        for (int circuit_index = 0; circuit_index < static_cast<int>(micro_circuits.size()); ++circuit_index) {
-            micro_tokens[static_cast<std::size_t>(circuit_index)] =
-                micro_runtimes[static_cast<std::size_t>(circuit_index)]->submit_window(
-                    batch_start_time,
-                    batch_stop_time);
+            run_micro_window_synchronously(exchange_start_time,
+                                           exchange_stop_time,
+                                           current_micro_events);
+        } else {
+            finish_micro_window(exchange_start_time, exchange_stop_time);
         }
 
-        for (int step = batch_start; step < batch_stop; ++step) {
+        if (use_micro_pipeline && exchange_stop < step_count) {
+            const int next_exchange_stop = std::min(step_count, exchange_stop + exchange_step_count_);
+            apply_couplings(region_coupling_evaluation,
+                            roi_count,
+                            input_count,
+                            exposure_count,
+                            exchange_stop,
+                            history,
+                            next_input_soa);
+            prepare_micro_events_for_exchange(micro_coupling_evaluation,
+                                           roi_count,
+                                           input_count,
+                                           exposure_count,
+                                           exchange_stop,
+                                           next_exchange_stop,
+                                           dt_macro_,
+                                           history,
+                                           micro_input_soa,
+                                           micro_circuits,
+                                           next_micro_events);
+            submit_micro_window(exchange_stop_time,
+                                next_exchange_stop * dt_macro_,
+                                next_micro_events);
+        }
+
+        for (int step = exchange_start; step < exchange_stop; ++step) {
             const double start_time = step * dt_macro_;
             const double stop_time = (step + 1) * dt_macro_;
 
+            for (auto& owner: field_owners) {
+                step_neural_field(owner,
+                                  roi_count,
+                                  current_input_soa,
+                                  current_exposure_soa,
+                                  start_time,
+                                  stop_time - start_time);
+            }
             for (auto& group: region_groups) {
                 group.rule->step_group(group.roi_indices,
                                        roi_count,
@@ -389,16 +523,8 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
                                        start_time,
                                        stop_time - start_time);
             }
-            for (auto& owner: field_owners) {
-                step_neural_field(owner,
-                                  roi_count,
-                                  current_input_soa,
-                                  current_exposure_soa,
-                                  start_time,
-                                  stop_time - start_time);
-            }
 
-            if (step + 1 == batch_stop) {
+            if (step + 1 == exchange_stop) {
                 continue;
             }
 
@@ -418,90 +544,25 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
                             current_input_soa);
         }
 
-        if (use_input_lookahead && batch_stop < step_count) {
-            const int next_batch_stop = std::min(step_count, batch_stop + batch_step_count_);
-            apply_couplings(region_coupling_evaluation,
-                            roi_count,
-                            input_count,
-                            exposure_count,
-                            batch_stop,
-                            history,
-                            next_input_soa);
-            prepare_micro_events_for_batch(micro_coupling_evaluation,
-                                           roi_count,
-                                           input_count,
-                                           exposure_count,
-                                           batch_stop,
-                                           next_batch_stop,
-                                           dt_macro_,
-                                           history,
-                                           micro_input_soa,
-                                           micro_circuits,
-                                           next_micro_events);
-        }
-
-        for (int circuit_index = 0; circuit_index < static_cast<int>(micro_circuits.size()); ++circuit_index) {
-            auto& circuit = micro_circuits[static_cast<std::size_t>(circuit_index)];
-            auto& token = micro_tokens[static_cast<std::size_t>(circuit_index)];
-            const auto spikes =
-                micro_runtimes[static_cast<std::size_t>(circuit_index)]->finish_window(token);
-            bind_spike_views(
-                spikes,
-                circuit,
-                micro_binding_spikes[static_cast<std::size_t>(circuit_index)],
-                micro_binding_views[static_cast<std::size_t>(circuit_index)],
-                micro_single_binding[static_cast<std::size_t>(circuit_index)] != 0,
-                batch_start_time,
-                batch_stop_time);
-            for (int binding_index = 0; binding_index < static_cast<int>(circuit.bindings.size()); ++binding_index) {
-                auto& binding = circuit.bindings[static_cast<std::size_t>(binding_index)];
-                const auto spike_view =
-                    micro_binding_views[static_cast<std::size_t>(circuit_index)][static_cast<std::size_t>(binding_index)];
-                binding.output_rule->apply(spike_view,
-                                           micro_exposure_soa,
-                                           roi_count,
-                                           binding.roi_index,
-                                           binding.output_state,
-                                           binding.output_params,
-                                           batch_start_time,
-                                           batch_stop_time,
-                                           binding.output_write_offsets);
-            }
-            if (record_micro_spikes_) {
-                const auto& binding_views =
-                    micro_binding_views[static_cast<std::size_t>(circuit_index)];
-                for (std::size_t binding_index = 0; binding_index < binding_views.size(); ++binding_index) {
-                    const int roi = circuit.bindings[binding_index].roi_index;
-                    result.micro_spikes_by_roi[static_cast<std::size_t>(roi)].append_view(
-                        binding_views[binding_index]);
-                }
-            }
-        }
-
-        for (const auto offset: micro_exposure_offsets) {
-            current_exposure_soa[offset] = micro_exposure_soa[offset];
-        }
-
         write_history_slot(history,
-                           batch_stop % coupling_runtime.history_capacity,
+                           exchange_stop % coupling_runtime.history_capacity,
                            roi_count,
                            exposure_count,
                            current_exposure_soa);
         append_exposure_record(result.exposures, current_exposure_soa);
 
-        if (use_input_lookahead && batch_stop < step_count) {
+        if (use_micro_pipeline && exchange_stop < step_count) {
             current_input_soa.swap(next_input_soa);
-            current_micro_events.swap(next_micro_events);
             for (auto& events: next_micro_events) {
                 events.clear();
             }
         }
-        if (!use_input_lookahead) {
+        if (!use_micro_pipeline) {
             apply_couplings(region_coupling_evaluation,
                             roi_count,
                             input_count,
                             exposure_count,
-                            batch_stop,
+                            exchange_stop,
                             history,
                             current_input_soa);
         }

@@ -154,9 +154,22 @@ struct NrnThread: public MemoryManaged {
     std::vector<int> _pnt_offset; /* for SelfEvent queue transfer */
 };
 
-extern void nrn_threads_create();
+extern void nrn_threads_create(int n);
 extern int nrn_nthread;
 extern NrnThread* nrn_threads;
+template <typename F, typename... Args>
+void nrn_multithread_job(F&& job, Args&&... args) {
+    int i;
+    // clang-format off
+
+    #pragma omp parallel for private(i) shared(nrn_threads, job, nrn_nthread, \
+                                           nrnmpi_myid) schedule(static, 1)
+    // FIXME: multiple forwarding of the same arguments...
+    for (i = 0; i < nrn_nthread; ++i) {
+        job(nrn_threads + i, std::forward<Args>(args)...);
+    }
+    // clang-format on
+}
 
 extern void nrn_thread_table_check(void);
 
@@ -179,8 +192,6 @@ extern void nrn_fixed_step_minimal(void);
 extern void nrn_finitialize(int setv, double v);
 extern void direct_mode_initialize();
 extern void nrn_mk_table_check(void);
-extern void nrn_configure_embedded_cpu_runtime(void);
-extern void nrn_configure_embedded_gpu_runtime(int num_gpus, int cell_permute);
 extern void nonvint(NrnThread* _nt);
 extern void update(NrnThread*);
 

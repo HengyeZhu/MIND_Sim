@@ -9,7 +9,7 @@ benchmark口径:
 - `duration_ms = 2000.0`
 - `dt_ms = 0.01`
 - `macro_dt_ms = 0.01`
-- `batch_window_ms = 0.25`
+- `exchange_window_ms = 0.25`
 - `connectivity = ~/arbor-tvb-cosim/connectivity_mouse.zip`
 - `micro_roi = 72`
 - `pathological_fraction = 1.0`

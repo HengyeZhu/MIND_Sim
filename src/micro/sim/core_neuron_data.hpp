@@ -36,6 +36,16 @@ struct MechanismRuntimeInfo {
     bool is_event_target{false};
 };
 
+struct CoreInputEventTarget {
+    int thread_index{0};
+    int input_presyn_index{0};
+};
+
+struct CoreNetConRef {
+    int thread_index{0};
+    int netcon_index{0};
+};
+
 struct CoreNetReceiveBufferStorage {
     coreneuron::NetReceiveBuffer_t buffer{};
 
@@ -179,10 +189,12 @@ struct CoreNeuronThread: coreneuron::NrnThread {
     std::vector<coreneuron::Point_process> pntproc_storage{};
     std::vector<int> pntproc_event_target_ids{};
     std::vector<coreneuron::PreSyn> presyn_storage{};
+    std::vector<int> presyn_source_gids{};
     std::vector<coreneuron::PreSynHelper> presyn_helpers{};
     std::vector<coreneuron::InputPreSyn> input_presyns{};
+    std::vector<int> input_presyn_source_gids{};
     std::vector<coreneuron::NetCon> netcon_storage{};
-    std::vector<int> netcon_presyn_order{};
+    std::vector<int> netcon_source_gids{};
     std::vector<int> netcon_weight_counts{};
     std::vector<double> weight_storage{};
     std::vector<int> net_send_buffer{};
@@ -258,7 +270,7 @@ struct CoreNeuronThread: coreneuron::NrnThread {
         return {data_storage.data() + 5 * node_data_stride, node_data_stride};
     }
 
-    void bind(int mechanism_capacity) {
+    void bind_into(coreneuron::NrnThread& target, int mechanism_capacity) {
         double* const thread_data_base = data_storage.empty() ? nullptr : data_storage.data();
         for (auto& ml: memb_lists) {
             ml.bind(thread_data_base);
@@ -283,38 +295,85 @@ struct CoreNeuronThread: coreneuron::NrnThread {
             pnt2presyn_ix_ptrs[i] = begin == end ? nullptr : pnt2presyn_ix_storage.data() + begin;
         }
 
-        tml = tml_storage.empty() ? nullptr : tml_storage.data();
-        _ml_list = ml_ptrs.empty() ? nullptr : ml_ptrs.data();
-        pntprocs = pntproc_storage.empty() ? nullptr : pntproc_storage.data();
-        presyns = presyn_storage.empty() ? nullptr : presyn_storage.data();
-        presyns_helper = presyn_helpers.empty() ? nullptr : presyn_helpers.data();
-        pnt2presyn_ix = pnt2presyn_ix_ptrs.empty() ? nullptr : pnt2presyn_ix_ptrs.data();
-        netcons = netcon_storage.empty() ? nullptr : netcon_storage.data();
-        weights = weight_storage.empty() ? nullptr : weight_storage.data();
-        _net_send_buffer = net_send_buffer.empty() ? nullptr : net_send_buffer.data();
-        _net_send_buffer_size = static_cast<int>(net_send_buffer.size());
+        target._t = _t;
+        target._dt = _dt;
+        target.cj = cj;
+        target.ncell = ncell;
+        target.end = end;
+        target.id = id;
+        target._stop_stepping = _stop_stepping;
+        target.n_vecplay = n_vecplay;
+        target._nidata = _nidata;
+        target._idata = _idata;
+        target._vecplay = _vecplay;
+        target._actual_diam = nullptr;
+        target._sp13mat = _sp13mat;
+        target._ecell_memb_list = _ecell_memb_list;
+        target._ctime = _ctime;
+        for (int i = 0; i < BEFORE_AFTER_SIZE; ++i) {
+            target.tbl[i] = tbl[i];
+        }
+        target.shadow_rhs_cnt = shadow_rhs_cnt;
+        target.compute_gpu = compute_gpu;
+        target.stream_id = stream_id;
+        target._net_send_buffer_cnt = _net_send_buffer_cnt;
+        target._watch_types = _watch_types;
+        target.mapping = mapping;
+        target.trajec_requests = trajec_requests;
+        target._fornetcon_perm_indices_size = _fornetcon_perm_indices_size;
+        target._fornetcon_perm_indices = _fornetcon_perm_indices;
+        target._fornetcon_weight_perm_size = _fornetcon_weight_perm_size;
+        target._fornetcon_weight_perm = _fornetcon_weight_perm;
+        target._pnt_offset = _pnt_offset;
 
-        _v_parent_index = v_parent_index.empty() ? nullptr : v_parent_index.data();
-        _permute = node_permutation.empty() ? nullptr : node_permutation.data();
-        _actual_rhs = node_data_stride == 0 ? nullptr : thread_data_base;
-        _actual_d = node_data_stride == 0 ? nullptr : thread_data_base + node_data_stride;
-        _actual_a = node_data_stride == 0 ? nullptr : thread_data_base + 2 * node_data_stride;
-        _actual_b = node_data_stride == 0 ? nullptr : thread_data_base + 3 * node_data_stride;
-        _actual_v = node_data_stride == 0 ? nullptr : thread_data_base + 4 * node_data_stride;
-        _actual_area = node_data_stride == 0 ? nullptr : thread_data_base + 5 * node_data_stride;
-        _actual_diam = nullptr;
-        _shadow_rhs = shadow_rhs.empty() ? nullptr : shadow_rhs.data();
-        _shadow_d = shadow_d.empty() ? nullptr : shadow_d.data();
-        _data = data_storage.empty() ? nullptr : data_storage.data();
-        _ndata = data_storage.size();
-        _vdata = vdata_storage.empty() ? nullptr : vdata_storage.data();
-        _nvdata = vdata_storage.size();
+        target.tml = tml_storage.empty() ? nullptr : tml_storage.data();
+        target._ml_list = ml_ptrs.empty() ? nullptr : ml_ptrs.data();
+        target.pntprocs = pntproc_storage.empty() ? nullptr : pntproc_storage.data();
+        target.presyns = presyn_storage.empty() ? nullptr : presyn_storage.data();
+        target.presyns_helper = presyn_helpers.empty() ? nullptr : presyn_helpers.data();
+        target.pnt2presyn_ix = pnt2presyn_ix_ptrs.empty() ? nullptr : pnt2presyn_ix_ptrs.data();
+        target.netcons = netcon_storage.empty() ? nullptr : netcon_storage.data();
+        target.weights = weight_storage.empty() ? nullptr : weight_storage.data();
+        target._net_send_buffer = net_send_buffer.empty() ? nullptr : net_send_buffer.data();
+        target._net_send_buffer_size = static_cast<int>(net_send_buffer.size());
 
-        n_pntproc = static_cast<int>(pntproc_storage.size());
-        n_weight = static_cast<int>(weight_storage.size());
-        n_netcon = static_cast<int>(netcon_storage.size());
-        n_input_presyn = static_cast<int>(input_presyns.size());
-        n_presyn = static_cast<int>(presyn_storage.size());
+        target._v_parent_index = v_parent_index.empty() ? nullptr : v_parent_index.data();
+        target._permute = node_permutation.empty() ? nullptr : node_permutation.data();
+        target._actual_rhs = node_data_stride == 0 ? nullptr : thread_data_base;
+        target._actual_d = node_data_stride == 0 ? nullptr : thread_data_base + node_data_stride;
+        target._actual_a = node_data_stride == 0 ? nullptr : thread_data_base + 2 * node_data_stride;
+        target._actual_b = node_data_stride == 0 ? nullptr : thread_data_base + 3 * node_data_stride;
+        target._actual_v = node_data_stride == 0 ? nullptr : thread_data_base + 4 * node_data_stride;
+        target._actual_area = node_data_stride == 0 ? nullptr : thread_data_base + 5 * node_data_stride;
+        target._shadow_rhs = shadow_rhs.empty() ? nullptr : shadow_rhs.data();
+        target._shadow_d = shadow_d.empty() ? nullptr : shadow_d.data();
+        target._data = data_storage.empty() ? nullptr : data_storage.data();
+        target._ndata = data_storage.size();
+        target._vdata = vdata_storage.empty() ? nullptr : vdata_storage.data();
+        target._nvdata = vdata_storage.size();
+
+        target.n_pntproc = static_cast<int>(pntproc_storage.size());
+        target.n_weight = static_cast<int>(weight_storage.size());
+        target.n_netcon = static_cast<int>(netcon_storage.size());
+        target.n_input_presyn = static_cast<int>(input_presyns.size());
+        target.n_presyn = static_cast<int>(presyn_storage.size());
+        target.n_real_output = n_real_output;
+    }
+
+    void bind(int mechanism_capacity) {
+        bind_into(*this, mechanism_capacity);
+    }
+
+    void sync_state_from(const coreneuron::NrnThread& source) {
+        _t = source._t;
+        _dt = source._dt;
+        cj = source.cj;
+        _stop_stepping = source._stop_stepping;
+        shadow_rhs_cnt = source.shadow_rhs_cnt;
+        compute_gpu = source.compute_gpu;
+        stream_id = source.stream_id;
+        _net_send_buffer_cnt = source._net_send_buffer_cnt;
+        trajec_requests = source.trajec_requests;
     }
 };
 
@@ -322,11 +381,15 @@ struct CoreNeuronData {
     std::unordered_map<std::string, int> mechanism_type{};
     std::vector<MechanismRuntimeInfo> mechanisms{};
     std::vector<CoreNeuronThread> threads{};
+    std::vector<coreneuron::NrnThread> runtime_threads{};
+    std::vector<CoreInputEventTarget> input_event_targets{};
+    std::vector<CoreNetConRef> netcon_presyn_order{};
     MicroDeviceConfig device_config{};
     double dt{0.025};
     double celsius{6.3};
     bool gpu_device_runtime_active{false};
     int gpu_runtime_ref_count{0};
+    double effective_mindelay{10.0};
 
     CoreNeuronData() = default;
     CoreNeuronData(const CoreNeuronData&) = delete;
@@ -349,8 +412,26 @@ struct CoreNeuronData {
 
     void bind() {
         const int capacity = mechanism_capacity();
-        for (auto& thread: threads) {
+        runtime_threads.resize(threads.size());
+        for (std::size_t i = 0; i < threads.size(); ++i) {
+            auto& thread = threads[i];
             thread.bind(capacity);
+            thread.bind_into(runtime_threads[i], capacity);
+        }
+    }
+
+    [[nodiscard]] coreneuron::NrnThread* nrn_threads() noexcept {
+        return runtime_threads.empty() ? nullptr : runtime_threads.data();
+    }
+
+    [[nodiscard]] const coreneuron::NrnThread* nrn_threads() const noexcept {
+        return runtime_threads.empty() ? nullptr : runtime_threads.data();
+    }
+
+    void sync_threads_from_runtime() {
+        const auto count = std::min(threads.size(), runtime_threads.size());
+        for (std::size_t i = 0; i < count; ++i) {
+            threads[i].sync_state_from(runtime_threads[i]);
         }
     }
 };

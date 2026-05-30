@@ -44,35 +44,10 @@ double* get_var_location_from_var_name(int mech_id,
                                        const std::string_view variable_name,
                                        Memb_list* ml,
                                        int node_index) {
-    auto* location = try_get_var_location_from_var_name(mech_id, mech_name, variable_name, ml, node_index);
-    if (location == nullptr) {
-        std::cerr << "No value associated to variable name: '" << variable_name
-                  << "' or fallback '" << std::string(variable_name) + "_" + std::string(mech_name)
-                  << "'";
-        nrn_abort(1);
-    }
-    return location;
-}
-
-double* try_get_var_location_from_var_name(int mech_id,
-                                           const std::string_view mech_name,
-                                           const std::string_view variable_name,
-                                           Memb_list* ml,
-                                           int node_index) {
-    const int variable_offset = try_get_var_offset_from_var_name(mech_id, mech_name, variable_name);
-    if (variable_offset < 0) {
-        return nullptr;
-    }
-    const int ix = get_data_index(node_index, variable_offset, mech_id, ml);
-    return &(ml->data[ix]);
-}
-
-int try_get_var_offset_from_var_name(int mech_id,
-                                     const std::string_view mech_name,
-                                     const std::string_view variable_name) {
     const auto mech_it = mechNamesMapping.find(mech_id);
     if (mech_it == mechNamesMapping.end()) {
-        return -1;
+        std::cerr << "No variable name mapping exists for mechanism id: " << mech_id << std::endl;
+        nrn_abort(1);
     }
 
     const auto& mech = mech_it->second;
@@ -83,11 +58,14 @@ int try_get_var_offset_from_var_name(int mech_id,
         offset_it = mech.find(fallback_name);
 
         if (offset_it == mech.end()) {
-            return -1;
+            std::cerr << "No value associated to variable name: '" << variable_name
+                      << "' or fallback '" << fallback_name << "'";
+            nrn_abort(1);
         }
     }
 
-    return static_cast<int>(offset_it->second);
+    const int ix = get_data_index(node_index, static_cast<int>(offset_it->second), mech_id, ml);
+    return &(ml->data[ix]);
 }
 
 void register_all_variables_offsets(int mech_id, SerializedNames variable_names) {

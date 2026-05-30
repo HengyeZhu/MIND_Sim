@@ -1,6 +1,7 @@
 #include "coreneuron/apps/corenrn_parameters.hpp"
 #include "coreneuron/nrniv/nrniv_decl.h"
 #include "coreneuron/sim/multicore.hpp"
+#include "micro/sim/coreneuron_host_support.hpp"
 
 namespace coreneuron {
 

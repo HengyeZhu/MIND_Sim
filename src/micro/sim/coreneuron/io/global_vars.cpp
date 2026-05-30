@@ -18,7 +18,7 @@
 #include "coreneuron/utils/nrn_assert.h"
 #include "coreneuron/io/nrn2core_direct.h"
 #include "coreneuron/utils/nrnoc_aux.hpp"
-#include "micro/sim/mechanism_runtime.hpp"
+#include "micro/sim/nrn_registration_mirror.hpp"
 
 void* (*nrn2core_get_global_dbl_item_)(void*, const char*& name, int& size, double*& val);
 int (*nrn2core_get_global_int_item_)(const char* name);
@@ -28,6 +28,7 @@ using PSD = std::pair<std::size_t, double*>;
 using N2V = std::map<std::string, PSD>;
 
 static N2V* n2v;
+namespace nrn_registration_mirror = mind_sim::micro::sim::nrn_registration_mirror;
 
 void hoc_register_var(DoubScal* ds, DoubVec* dv, VoidFunc*) {
     if (!n2v) {
@@ -35,15 +36,18 @@ void hoc_register_var(DoubScal* ds, DoubVec* dv, VoidFunc*) {
     }
     for (size_t i = 0; ds[i].name; ++i) {
         (*n2v)[ds[i].name] = PSD(0, ds[i].pdoub);
-        mind_sim::micro::sim::core_note_global_scalar(ds[i].name, ds[i].pdoub);
+        nrn_registration_mirror::global_scalar(ds[i].name, ds[i].pdoub);
     }
     for (size_t i = 0; dv[i].name; ++i) {
         (*n2v)[dv[i].name] = PSD(dv[i].index1, dv[i].pdoub);
     }
 }
 
-void mind_register_global_scalar(int type, const char* field_name, const char* hoc_name, double* value) {
-    mind_sim::micro::sim::core_note_global_scalar_field(type, field_name, hoc_name, value);
+void mind_register_global_scalar(int type,
+                                 const char* field_name,
+                                 const char* hoc_name,
+                                 double* value) {
+    nrn_registration_mirror::global_scalar_field(type, field_name, hoc_name, value);
 }
 
 void set_globals(const char* path, bool cli_global_seed, int cli_global_seed_value) {

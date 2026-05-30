@@ -6,21 +6,66 @@
 # =============================================================================.
 */
 
+#include <functional>
+
 #include "coreneuron/coreneuron.hpp"
 #include "coreneuron/nrnconf.h"
+#include "coreneuron/apps/corenrn_parameters.hpp"
 #include "coreneuron/sim/multicore.hpp"
+#include "coreneuron/mpi/nrnmpi.h"
 #include "coreneuron/sim/fast_imem.hpp"
 #include "coreneuron/gpu/nrn_acc_manager.hpp"
 #include "coreneuron/io/reports/nrnreport.hpp"
 #include "coreneuron/network/netcvode.hpp"
+#include "coreneuron/network/netpar.hpp"
 #include "coreneuron/network/partrans.hpp"
 #include "coreneuron/utils/nrnoc_aux.hpp"
+#include "coreneuron/utils/progressbar/progressbar.hpp"
 #include "coreneuron/utils/profile/profiler_interface.h"
 #include "coreneuron/io/nrn2core_direct.h"
 
 namespace coreneuron {
 static void* nrn_fixed_step_thread(NrnThread*);
 static void nrn_fixed_step_group_thread(NrnThread*, int, int, int&);
+
+
+namespace {
+
+class ProgressBar final {
+    progressbar* pbar;
+    int current_step = 0;
+    bool show;
+    constexpr static int progressbar_update_steps = 5;
+
+  public:
+    ProgressBar(int nsteps)
+        : show(nrnmpi_myid == 0 && !corenrn_param.is_quiet()) {
+        if (show) {
+            printf("\n");
+            pbar = progressbar_new("psolve", nsteps);
+        }
+    }
+
+    void update(int step, double time) {
+        current_step = step;
+        if (show && (current_step % progressbar_update_steps) == 0) {
+            progressbar_update(pbar, current_step, time);
+        }
+    }
+
+    void step(double time) {
+        update(current_step + 1, time);
+    }
+
+    ~ProgressBar() {
+        if (show) {
+            progressbar_finish(pbar);
+        }
+    }
+};
+
+}  // unnamed namespace
+
 
 void dt2thread(double adt) { /* copied from nrnoc/fadvance.c */
     if (adt != nrn_threads[0]._dt) {
@@ -51,22 +96,27 @@ void nrn_fixed_step_minimal() { /* not so minimal anymore with gap junctions */
         dt2thread(dt);
     }
     nrn_thread_table_check();
-    nrn_fixed_step_thread(nrn_threads);
+    nrn_multithread_job(nrn_fixed_step_thread);
     if (nrn_have_gaps) {
         {
             Instrumentor::phase p_gap("gap-v-transfer");
             nrnmpi_v_transfer();
         }
-        nrn_fixed_step_lastpart(nrn_threads);
+        nrn_multithread_job(nrn_fixed_step_lastpart);
     }
+#if NRNMPI
+    if (nrn_threads[0]._stop_stepping) {
+        nrn_spike_exchange(nrn_threads);
+    }
+#endif
 
 #ifdef ENABLE_SONATA_REPORTS
     {
         Instrumentor::phase p("flush_reports");
-        nrn_flush_reports(nrn_threads->_t);
+        nrn_flush_reports(nrn_threads[0]._t);
     }
 #endif
-    t = nrn_threads->_t;
+    t = nrn_threads[0]._t;
 }
 
 /* better cache efficiency since a thread can do an entire minimum delay
@@ -76,13 +126,21 @@ integration interval before joining
 
 
 void nrn_fixed_single_steps_minimal(int total_sim_steps, double tstop) {
-    (void) total_sim_steps;
+    ProgressBar progress_bar(total_sim_steps);
+#if NRNMPI
+    double updated_tstop = tstop - dt;
+    nrn_assert(nrn_threads->_t <= tstop);
+    // It may very well be the case that we do not advance at all
+    while (nrn_threads->_t <= updated_tstop) {
+#else
     double updated_tstop = tstop - .5 * dt;
     while (nrn_threads->_t < updated_tstop) {
+#endif
         nrn_fixed_step_minimal();
         if (stoprun) {
             break;
         }
+        progress_bar.step(nrn_threads[0]._t);
     }
 }
 
@@ -90,20 +148,33 @@ void nrn_fixed_single_steps_minimal(int total_sim_steps, double tstop) {
 void nrn_fixed_step_group_minimal(int total_sim_steps) {
     dt2thread(dt);
     nrn_thread_table_check();
+    int step_group_n = total_sim_steps;
     int step_group_begin = 0;
     int step_group_end = 0;
-    auto* nt = nrn_threads;
-    while (step_group_end < total_sim_steps) {
-        nrn_fixed_step_group_thread(nt,
-                                    total_sim_steps,
-                                    step_group_begin,
-                                    step_group_end);
+
+    ProgressBar progress_bar(step_group_n);
+    while (step_group_end < step_group_n) {
+        nrn_multithread_job(nrn_fixed_step_group_thread,
+                            step_group_n,
+                            step_group_begin,
+                            step_group_end);
+#if NRNMPI
+        nrn_spike_exchange(nrn_threads);
+#endif
+
+#ifdef ENABLE_SONATA_REPORTS
+        {
+            Instrumentor::phase p("flush_reports");
+            nrn_flush_reports(nrn_threads[0]._t);
+        }
+#endif
         if (stoprun) {
             break;
         }
         step_group_begin = step_group_end;
+        progress_bar.update(step_group_end, nrn_threads[0]._t);
     }
-    t = nt->_t;
+    t = nrn_threads[0]._t;
 }
 
 static void nrn_fixed_step_group_thread(NrnThread* nth,
@@ -202,9 +273,11 @@ void nrncore2nrn_send_init() {
     // if storing full trajectories in CoreNEURON, need to initialize
     // vsize for all the trajectory requests.
     (*nrn2core_trajectory_values_)(-1, 0, nullptr, 0.0);
-    NrnThread& nt = *nrn_threads;
-    if (nt.trajec_requests) {
-        nt.trajec_requests->vsize = 0;
+    for (int tid = 0; tid < nrn_nthread; ++tid) {
+        NrnThread& nt = nrn_threads[tid];
+        if (nt.trajec_requests) {
+            nt.trajec_requests->vsize = 0;
+        }
     }
 }
 

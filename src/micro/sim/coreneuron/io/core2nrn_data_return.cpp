@@ -307,7 +307,7 @@ void core2nrn_data_return() {
         return;
     }
 
-    (*core2nrn_clear_queues_)(nrn_threads->_t);
+    (*core2nrn_clear_queues_)(nrn_threads[0]._t);  // all threads at same time
 
     for (int tid = 0; tid < nrn_nthread; ++tid) {
         size_t n = 0;

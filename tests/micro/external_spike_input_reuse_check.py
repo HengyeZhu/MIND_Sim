@@ -93,7 +93,7 @@ BREAKPOINT {
         network.roi(0).connect(network.roi(0), input_path)
         network.roi(0).connect(network.roi(0), output_path)
 
-    ms.Simulator(network, dt_micro=0.025, dt_macro=0.1, batch_window=0.1).run(5.0)
+    ms.Simulator(network, dt_micro=0.025, dt_macro=0.1, exchange_window=0.1).run(5.0)
 
     final_v = [ref.value() for ref in voltages]
     require(all(math.isfinite(value) for value in final_v), "external spike fanout produced non-finite voltage")

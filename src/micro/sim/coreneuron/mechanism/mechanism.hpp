@@ -103,7 +103,8 @@ struct NetSendBuffer_t: MemoryManaged {
 
     void grow() {
 #ifdef CORENEURON_ENABLE_GPU
-        nrn_assert(!"NetSendBuffer_t::grow is not supported on GPU");
+        int cannot_reallocate_on_device = 0;
+        assert(cannot_reallocate_on_device);
 #else
         int new_size = _size * 2;
         grow_buf(&_sendtype, _size, new_size);

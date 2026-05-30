@@ -317,6 +317,7 @@ SYNAPSE_DELAY_MS = _env_float("MIND_SIM_HL23_CONN_DELAY_MS", 0.5)
 SPIKE_THRESHOLD_MV = _env_float("MIND_SIM_HL23_SPIKE_THRESHOLD_MV", 0.0)
 
 DEVICE = os.environ.get("MIND_SIM_HL23_DEVICE", "cpu").strip() or "cpu"
+NUM_THREADS = _env_int("MIND_SIM_HL23_NUM_THREADS", 1)
 V_INIT_MV = -80.0
 SAVE_OUTPUT = True
 SAVE_TRACES = _env_path(
@@ -429,7 +430,8 @@ def main() -> int:
         f"pv_swc={pv_swc} pv_cells={NUM_CELLS_PV} | "
         f"vip_swc={vip_swc} vip_cells={NUM_CELLS_VIP} | "
         f"dt={DT_MS}ms tstop={TSTOP_MS}ms v_init={V_INIT_MV}mV "
-        f"target_seg_length_um={TARGET_SEG_LENGTH_UM} celsius={CELSIUS_C}",
+        f"target_seg_length_um={TARGET_SEG_LENGTH_UM} celsius={CELSIUS_C} "
+        f"device={DEVICE} num_threads={NUM_THREADS}",
         flush=True,
     )
     build_t0 = time.perf_counter()
@@ -437,6 +439,7 @@ def main() -> int:
     sim = ms.Sim()
     sim.set_spike_output_enabled(False)
     sim.set_device(DEVICE)
+    sim.set_num_threads(NUM_THREADS)
     sim.set_dt(float(DT_MS))
     if int(sim.load_mech_metadata(str(HL23_MECH_PATH))) != 0:
         raise RuntimeError(f"failed to load HL23 MOD mechanisms: {HL23_MECH_PATH}")
@@ -1083,6 +1086,7 @@ def main() -> int:
             dtype=np.int32,
         ),
         "runtime_backend": np.asarray(f"mind_sim_core_neuron_{DEVICE}"),
+        "num_threads": np.asarray(NUM_THREADS, dtype=np.int32),
     }
     print(
         f"[spike] events={int(spike_times_ms.size)} "

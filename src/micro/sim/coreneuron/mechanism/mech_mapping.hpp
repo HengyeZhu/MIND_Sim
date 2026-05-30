@@ -38,14 +38,6 @@ double* get_var_location_from_var_name(int mech_id,
                                        const std::string_view variable_name,
                                        Memb_list* ml,
                                        int local_index);
-double* try_get_var_location_from_var_name(int mech_id,
-                                           const std::string_view mech_name,
-                                           const std::string_view variable_name,
-                                           Memb_list* ml,
-                                           int local_index);
-int try_get_var_offset_from_var_name(int mech_id,
-                                     const std::string_view mech_name,
-                                     const std::string_view variable_name);
 
 // initialize mapping of variable names of mechanism, to their places in memory
 void register_all_variables_offsets(int mech_id, SerializedNames variable_names);

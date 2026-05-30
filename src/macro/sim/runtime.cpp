@@ -86,6 +86,14 @@ mind_sim::macro::sim::MacroSimulationResult MacroRuntime::run(double t_stop, dou
         const double start_time = step * dt_macro;
         const double stop_time = std::min(t_stop, start_time + dt_macro);
 
+        for (auto& owner: field_owners) {
+            step_neural_field(owner,
+                              roi_count,
+                              current_input_soa,
+                              current_exposure_soa,
+                              start_time,
+                              stop_time - start_time);
+        }
         for (auto& group: region_groups) {
             group.rule->step_group(group.roi_indices,
                                    roi_count,
@@ -97,14 +105,6 @@ mind_sim::macro::sim::MacroSimulationResult MacroRuntime::run(double t_stop, dou
                                    group.write_exposure_offsets,
                                    start_time,
                                    stop_time - start_time);
-        }
-        for (auto& owner: field_owners) {
-            step_neural_field(owner,
-                              roi_count,
-                              current_input_soa,
-                              current_exposure_soa,
-                              start_time,
-                              stop_time - start_time);
         }
 
         write_history_slot(history,

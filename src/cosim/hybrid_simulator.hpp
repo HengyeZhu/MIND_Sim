@@ -10,7 +10,7 @@ class Simulator {
     Simulator(mind_sim::macro::frontend::Network network,
               double dt_micro,
               double dt_macro,
-              double batch_window,
+              double exchange_window,
               bool record_micro_spikes);
 
     [[nodiscard]] mind_sim::cosim::SimulationResult run(double t_stop);
@@ -19,8 +19,8 @@ class Simulator {
     mind_sim::macro::frontend::Network network_;
     double dt_micro_{0.0};
     double dt_macro_{0.0};
-    double batch_window_{0.0};
-    int batch_step_count_{1};
+    double exchange_window_{0.0};
+    int exchange_step_count_{1};
     bool record_micro_spikes_{true};
 };
 

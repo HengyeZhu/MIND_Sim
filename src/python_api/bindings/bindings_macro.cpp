@@ -252,7 +252,7 @@ void bind_macro(nb::module_& m) {
              nb::arg("network"),
              nb::arg("dt_micro"),
              nb::arg("dt_macro"),
-             nb::arg("batch_window"),
+             nb::arg("exchange_window"),
              nb::arg("record_micro_spikes"))
         .def("run",
              &mind_sim::cosim::Simulator::run,

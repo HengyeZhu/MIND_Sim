@@ -30,6 +30,9 @@
 namespace fs = std::filesystem;
 
 namespace coreneuron {
+// Those functions comes from mod file directly
+extern int checkpoint_save_patternstim(_threadargsproto_);
+extern void checkpoint_restore_patternstim(int, double, _threadargsproto_);
 
 CheckPoints::CheckPoints(const std::string& save, const std::string& restore)
     : save_(save)
@@ -611,8 +614,27 @@ bool CheckPoints::initialize() {
 
     allocate_data_in_mechanism_nrn_init();
 
+    // if PatternStim exists, needs initialization
+    for (NrnThreadMembList* tml = nrn_threads[0].tml; tml; tml = tml->next) {
+        if (tml->index == patstimtype && patstim_index >= 0 && patstim_te > 0.0) {
+            Memb_list* ml = tml->ml;
+            checkpoint_restore_patternstim(patstim_index,
+                                           patstim_te,
+                                           /* below correct only for AoS */
+                                           0,
+                                           ml->nodecount,
+                                           ml->data,
+                                           ml->pdata,
+                                           ml->_thread,
+                                           nrn_threads,
+                                           ml,
+                                           0.0);
+            break;
+        }
+    }
+
     // Check that bbcore_write is defined if we want to use checkpoint
-    for (NrnThreadMembList* tml = nrn_threads->tml; tml; tml = tml->next) {
+    for (NrnThreadMembList* tml = nrn_threads[0].tml; tml; tml = tml->next) {
         auto type = tml->index;
         if (corenrn.get_bbcore_read()[type] && !corenrn.get_bbcore_write()[type]) {
             const auto& memb_func = corenrn.get_memb_func(type);
@@ -803,7 +825,24 @@ void CheckPoints::write_tqueue(NrnThread& nt, FileHandler& fh) const {
         fh << vpc->ubound_index_ << "\n";
     }
 
+    // PatternStim
     int patstim_index = -1;
+    for (NrnThreadMembList* tml = nrn_threads[0].tml; tml; tml = tml->next) {
+        if (tml->index == patstimtype) {
+            Memb_list* ml = tml->ml;
+            patstim_index = checkpoint_save_patternstim(
+                /* below correct only for AoS */
+                0,
+                ml->nodecount,
+                ml->data,
+                ml->pdata,
+                ml->_thread,
+                nrn_threads,
+                ml,
+                0.0);
+            break;
+        }
+    }
     fh << patstim_index << " PatternStim\n";
 
     // Avoid extra spikes due to some presyn voltages above threshold

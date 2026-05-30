@@ -11,7 +11,7 @@ Fixed configuration:
 - `duration_ms = 2000.0`
 - `dt_micro_ms = 0.01`
 - `dt_macro_ms = 0.01`
-- `batch_window_ms = 0.25`
+- `exchange_window_ms = 0.25`
 - `connectivity = ~/arbor-tvb-cosim/connectivity_mouse.zip`
 - `micro_roi = 72`
 - `micro mechanism = hhplus`

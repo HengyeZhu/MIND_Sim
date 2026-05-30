@@ -73,15 +73,6 @@ void ensure_core_mechanisms_registered();
 [[nodiscard]] const std::vector<CoreRegisteredMechanism>& core_registered_mechanisms();
 [[nodiscard]] double core_global_scalar(const std::string& name);
 
-void core_note_registered_mechanism(int type, const char** mechanism_info);
-void core_note_writes_concentration(int type);
-void core_note_point_mechanism(int type);
-void core_note_artificial_cell(int type);
-void core_note_net_receive(int type, int weight_count);
-void core_note_prop_size(int type, int psize, int dpsize);
-void core_note_dparam_semantic(int type, int index, const char* semantic);
-void core_note_global_scalar(const char* name, double* value);
-void core_note_global_scalar_field(int type, const char* field_name, const char* hoc_name, double* value);
 void core_set_global_parameter(const std::string& mechanism, const std::string& field, double value);
 void core_set_global_scalar(const std::string& name, double value);
 void core_verify_ion_charges_defined();

@@ -24,6 +24,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <thread>
 #include <utility>
 #include <variant>
 
@@ -80,7 +81,8 @@ void for_each_population_node(const std::vector<TemplateBuildScratch>& built,
                                    : static_cast<std::int32_t>(
                                          nonroot_base + (static_cast<std::size_t>(tpl_parent) - 1));
             }
-            fn(original_index,
+            fn(static_cast<int>(cell),
+               original_index,
                parent_index,
                tpl_nodes.a[tnode],
                tpl_nodes.b[tnode],
@@ -559,7 +561,26 @@ void MicroFrontendModel::set_dt(double dt) {
     dt_ = dt;
     core_neuron_data_->dt = dt_;
     if (!core_neuron_data_->threads.empty()) {
-        core_neuron_data_->threads.front()._dt = dt_;
+        for (auto& thread: core_neuron_data_->threads) {
+            thread._dt = dt_;
+        }
+        core_neuron_data_->bind();
+    }
+    runtime_backend_.reset();
+}
+
+void MicroFrontendModel::set_num_threads(int num_threads) {
+    if (num_threads < 0) {
+        throw std::runtime_error("num_threads must be non-negative");
+    }
+    requested_thread_count_ = num_threads == 0
+                                  ? static_cast<int>(std::max(1u, std::thread::hardware_concurrency()))
+                                  : num_threads;
+    if (microcircuit_built_) {
+        throw std::runtime_error("set_num_threads must be called before build_microcircuit");
+    }
+    if (has_morphology_ && !core_neuron_data_->threads.empty()) {
+        reset_core_node_storage();
         core_neuron_data_->bind();
     }
     runtime_backend_.reset();
@@ -656,6 +677,7 @@ void MicroFrontendModel::build_morphology(std::vector<MorphologyTemplateSpec> te
     nt.shadow_rhs.clear();
     nt.shadow_d.clear();
     morph_parent_index_.assign(morph_layout_.nnode, -1);
+    original_node_gid_.assign(morph_layout_.nnode, -1);
     morph_area_.assign(morph_layout_.nnode, 0.0);
     axial_a_ra1_.assign(morph_layout_.nnode, 0.0);
     axial_b_ra1_.assign(morph_layout_.nnode, 0.0);
@@ -667,13 +689,15 @@ void MicroFrontendModel::build_morphology(std::vector<MorphologyTemplateSpec> te
         for_each_population_node(
             built,
             morph_layout_,
-            [&](std::size_t original_index,
+            [&](int gid,
+                std::size_t original_index,
                 std::int32_t parent_index,
                 double a,
                 double b,
                 double area,
                 double ri,
                 double a_scale) {
+                original_node_gid_[original_index] = gid;
                 morph_parent_index_[original_index] = parent_index;
                 axial_a_ra1_[original_index] = a;
                 axial_b_ra1_[original_index] = b;
@@ -1266,17 +1290,17 @@ double* MicroFrontendModel::resolve_variable_pointer(const VariableRef& ref, con
         throw std::runtime_error(std::string("micro variable ") + action +
                                  " requires built CoreNEURON thread data");
     }
-    auto& thread = core_neuron_data_->threads.front();
-
     auto resolve_voltage_node = [&]() {
         const int original_node = resolve_original_node(morph_layout_, ref.gid, ref.section_index, ref.x);
+        auto& thread = core_neuron_data_->threads[static_cast<std::size_t>(
+            thread_for_original_node(original_node))];
         const int node_index = runtime_node_for_original(original_node);
         const auto values = thread.actual_v();
         if (node_index < 0 || static_cast<std::size_t>(node_index) >= values.size()) {
             throw std::runtime_error(std::string("variable ") + action +
                                      " resolved an invalid node index");
         }
-        return node_index;
+        return std::pair<mind_sim::micro::sim::CoreNeuronThread*, int>{&thread, node_index};
     };
 
     auto resolve_field_offset = [](const mind_micro_biophysical::MechanismMetadata& metadata,
@@ -1304,8 +1328,8 @@ double* MicroFrontendModel::resolve_variable_pointer(const VariableRef& ref, con
 
     if (ref.kind == VariableRef::Kind::LocationVoltage ||
         (ref.kind == VariableRef::Kind::Location && ref.mech == "global" && ref.var == "v")) {
-        const int node_index = resolve_voltage_node();
-        auto values = thread.actual_v();
+        auto [thread, node_index] = resolve_voltage_node();
+        auto values = thread->actual_v();
         return values.data() + static_cast<std::size_t>(node_index);
     }
     if (ref.kind == VariableRef::Kind::Location) {
@@ -1313,7 +1337,7 @@ double* MicroFrontendModel::resolve_variable_pointer(const VariableRef& ref, con
             throw std::runtime_error(std::string("mechanism variable ") + action +
                                      " requires non-empty mechanism and variable names");
         }
-        const int node_index = resolve_voltage_node();
+        auto [thread, node_index] = resolve_voltage_node();
         const auto type_it = core_neuron_data_->mechanism_type.find(ref.mech);
         if (type_it == core_neuron_data_->mechanism_type.end()) {
             throw std::runtime_error(std::string("mechanism variable ") + action +
@@ -1321,10 +1345,10 @@ double* MicroFrontendModel::resolve_variable_pointer(const VariableRef& ref, con
         }
         const int type = type_it->second;
         const auto ml_it = std::find_if(
-            thread.memb_lists.begin(),
-            thread.memb_lists.end(),
+            thread->memb_lists.begin(),
+            thread->memb_lists.end(),
             [type](const auto& ml) { return ml.type == type; });
-        if (ml_it == thread.memb_lists.end() || ml_it->ml.data == nullptr) {
+        if (ml_it == thread->memb_lists.end() || ml_it->ml.data == nullptr) {
             throw std::runtime_error(std::string("mechanism variable ") + action +
                                      " found no Memb_list for: " + ref.mech);
         }
@@ -1354,6 +1378,13 @@ double* MicroFrontendModel::resolve_variable_pointer(const VariableRef& ref, con
         }
         const auto& metadata = mechanism_catalog_.require(insert.metadata_id);
         const int field_offset = resolve_field_offset(metadata, ref.var, ref.array_index);
+        if (insert_index >= insert_runtime_thread_.size() ||
+            insert_runtime_thread_[insert_index] < 0) {
+            throw std::runtime_error(std::string("object variable ") + action +
+                                     " has no built runtime instance");
+        }
+        auto& thread = core_neuron_data_->threads[static_cast<std::size_t>(
+            insert_runtime_thread_[insert_index])];
         const auto ml_it = std::find_if(
             thread.memb_lists.begin(),
             thread.memb_lists.end(),
@@ -1362,7 +1393,7 @@ double* MicroFrontendModel::resolve_variable_pointer(const VariableRef& ref, con
             throw std::runtime_error(std::string("object variable ") + action +
                                      " found no Memb_list for: " + metadata.name);
         }
-        const auto instance_index = insert.instance_begin;
+        const auto instance_index = insert_runtime_row_[insert_index];
         const auto data_index = static_cast<std::size_t>(field_offset) *
                                     static_cast<std::size_t>(ml_it->ml._nodecount_padded) +
                                 instance_index;
@@ -1473,9 +1504,45 @@ int MicroFrontendModel::runtime_node_for_original(int original_node) const {
     return runtime_node_by_original_[static_cast<std::size_t>(original_node)];
 }
 
+int MicroFrontendModel::thread_for_gid(int gid) const {
+    if (gid < 0 || static_cast<std::size_t>(gid) >= gid_thread_.size()) {
+        return 0;
+    }
+    return gid_thread_[static_cast<std::size_t>(gid)];
+}
+
+int MicroFrontendModel::thread_for_original_node(int original_node) const {
+    if (original_node < 0 || static_cast<std::size_t>(original_node) >= original_node_thread_.size()) {
+        return 0;
+    }
+    return original_node_thread_[static_cast<std::size_t>(original_node)];
+}
+
+int MicroFrontendModel::thread_for_instance(const CoreMechanismInstance& instance) const {
+    if (instance.node_index >= 0) {
+        return thread_for_original_node(instance.node_index);
+    }
+    if (instance.gid >= 0) {
+        return thread_for_gid(instance.gid);
+    }
+    return 0;
+}
+
 void MicroFrontendModel::reset_core_node_storage() {
-    auto& nt = core_neuron_data_->threads.front();
-    coreneuron::nrn_nthread = 1;
+    const int cell_count = morph_layout_.num_cells_total;
+    int thread_count = std::max(1, requested_thread_count_);
+    if (core_neuron_data_->device_config.kind == mind_sim::micro::sim::MicroDeviceKind::Gpu) {
+        thread_count = 1;
+    }
+    thread_count = std::max(1, std::min(thread_count, std::max(1, cell_count)));
+    core_neuron_data_->threads.clear();
+    core_neuron_data_->threads.resize(static_cast<std::size_t>(thread_count));
+    core_neuron_data_->runtime_threads.clear();
+    core_neuron_data_->runtime_threads.resize(static_cast<std::size_t>(thread_count));
+    core_neuron_data_->input_event_targets.clear();
+    core_neuron_data_->netcon_presyn_order.clear();
+    coreneuron::nrn_nthread = thread_count;
+    coreneuron::nrn_threads = core_neuron_data_->nrn_threads();
     const int cell_permute =
         mind_sim::micro::sim::cell_permute_for_device(core_neuron_data_->device_config.kind);
     coreneuron::corenrn_param.cell_interleave_permute =
@@ -1486,28 +1553,87 @@ void MicroFrontendModel::reset_core_node_storage() {
     coreneuron::destroy_interleave_info();
     coreneuron::create_interleave_info();
 
-    auto parent_for_permute = morph_parent_index_;
-    int* const runtime_order = coreneuron::interleave_order(
-        nt.id,
-        nt.ncell,
-        nt.end,
-        parent_for_permute.data());
-    runtime_node_by_original_.assign(runtime_order, runtime_order + nt.end);
-    delete[] runtime_order;
+    gid_thread_.assign(static_cast<std::size_t>(cell_count), 0);
+    thread_gids_.assign(static_cast<std::size_t>(thread_count), {});
+    for (int gid = 0; gid < cell_count; ++gid) {
+        const int tid = std::min(thread_count - 1, (gid * thread_count) / cell_count);
+        gid_thread_[static_cast<std::size_t>(gid)] = tid;
+        thread_gids_[static_cast<std::size_t>(tid)].push_back(gid);
+    }
 
-    nt.allocate_node_data(morph_layout_.nnode);
-    nt.node_permutation = runtime_node_by_original_;
-    nt.v_parent_index.assign(morph_layout_.nnode, -1);
-    auto actual_a = nt.actual_a();
-    auto actual_b = nt.actual_b();
-    auto area = nt.actual_area();
-    for (std::size_t original = 0; original < morph_layout_.nnode; ++original) {
-        const auto runtime = static_cast<std::size_t>(runtime_node_by_original_[original]);
-        const int parent = morph_parent_index_[original];
-        nt.v_parent_index[runtime] = parent >= 0 ? runtime_node_by_original_[static_cast<std::size_t>(parent)] : -1;
-        actual_a[runtime] = axial_a_ra1_[original];
-        actual_b[runtime] = axial_b_ra1_[original];
-        area[runtime] = morph_area_[original];
+    original_node_thread_.assign(morph_layout_.nnode, 0);
+    runtime_node_by_original_.assign(morph_layout_.nnode, -1);
+    original_nodes_by_thread_.assign(static_cast<std::size_t>(thread_count), {});
+    for (int tid = 0; tid < thread_count; ++tid) {
+        auto& originals = original_nodes_by_thread_[static_cast<std::size_t>(tid)];
+        originals.insert(originals.end(),
+                         thread_gids_[static_cast<std::size_t>(tid)].begin(),
+                         thread_gids_[static_cast<std::size_t>(tid)].end());
+    }
+    for (std::size_t original = static_cast<std::size_t>(cell_count);
+         original < morph_layout_.nnode;
+         ++original) {
+        const int gid = original_node_gid_[original];
+        const int tid = thread_for_gid(gid);
+        original_nodes_by_thread_[static_cast<std::size_t>(tid)].push_back(static_cast<int>(original));
+    }
+
+    std::vector<int> local_index_by_original(morph_layout_.nnode, -1);
+    for (int tid = 0; tid < thread_count; ++tid) {
+        const auto& originals = original_nodes_by_thread_[static_cast<std::size_t>(tid)];
+        for (std::size_t local = 0; local < originals.size(); ++local) {
+            const int original = originals[local];
+            local_index_by_original[static_cast<std::size_t>(original)] = static_cast<int>(local);
+            original_node_thread_[static_cast<std::size_t>(original)] = tid;
+        }
+    }
+
+    for (int tid = 0; tid < thread_count; ++tid) {
+        auto& nt = core_neuron_data_->threads[static_cast<std::size_t>(tid)];
+        nt = mind_sim::micro::sim::CoreNeuronThread{};
+        nt.id = tid;
+        nt._dt = dt_;
+        nt.ncell = static_cast<int>(thread_gids_[static_cast<std::size_t>(tid)].size());
+        nt.end = static_cast<int>(original_nodes_by_thread_[static_cast<std::size_t>(tid)].size());
+        for (int j = 0; j < BEFORE_AFTER_SIZE; ++j) {
+            nt.tbl[j] = nullptr;
+        }
+
+        std::vector<int> local_parent(static_cast<std::size_t>(nt.end), -1);
+        const auto& originals = original_nodes_by_thread_[static_cast<std::size_t>(tid)];
+        for (std::size_t local = 0; local < originals.size(); ++local) {
+            const int parent = morph_parent_index_[static_cast<std::size_t>(originals[local])];
+            local_parent[local] =
+                parent >= 0 ? local_index_by_original[static_cast<std::size_t>(parent)] : -1;
+        }
+        int* const runtime_order = coreneuron::interleave_order(
+            nt.id,
+            nt.ncell,
+            nt.end,
+            local_parent.data());
+        nt.node_permutation.assign(runtime_order, runtime_order + nt.end);
+        for (std::size_t local = 0; local < originals.size(); ++local) {
+            runtime_node_by_original_[static_cast<std::size_t>(originals[local])] =
+                runtime_order[local];
+        }
+        delete[] runtime_order;
+
+        nt.allocate_node_data(static_cast<std::size_t>(nt.end));
+        nt.v_parent_index.assign(static_cast<std::size_t>(nt.end), -1);
+        auto actual_a = nt.actual_a();
+        auto actual_b = nt.actual_b();
+        auto area = nt.actual_area();
+        for (std::size_t local = 0; local < originals.size(); ++local) {
+            const int original = originals[local];
+            const auto runtime = static_cast<std::size_t>(
+                runtime_node_by_original_[static_cast<std::size_t>(original)]);
+            const int parent = morph_parent_index_[static_cast<std::size_t>(original)];
+            nt.v_parent_index[runtime] =
+                parent >= 0 ? runtime_node_by_original_[static_cast<std::size_t>(parent)] : -1;
+            actual_a[runtime] = axial_a_ra1_[static_cast<std::size_t>(original)];
+            actual_b[runtime] = axial_b_ra1_[static_cast<std::size_t>(original)];
+            area[runtime] = morph_area_[static_cast<std::size_t>(original)];
+        }
     }
 }
 
@@ -1550,15 +1676,15 @@ void MicroFrontendModel::apply_section_axial_resistance() {
     if (core_neuron_data_->threads.empty()) {
         throw std::runtime_error("cannot apply axial resistance before morphology core data exists");
     }
-    auto& nt = core_neuron_data_->threads.front();
     if (axial_a_ra1_.size() != morph_layout_.nnode || axial_b_ra1_.size() != morph_layout_.nnode ||
         axial_ri_ra1_.size() != morph_layout_.nnode || axial_a_scale_.size() != morph_layout_.nnode) {
         throw std::runtime_error("morphology axial coefficient cache is inconsistent with core node count");
     }
-    auto actual_a = nt.actual_a();
-    auto actual_b = nt.actual_b();
 
     for (int gid = 0; gid < morph_layout_.num_cells_total; ++gid) {
+        auto& nt = core_neuron_data_->threads[static_cast<std::size_t>(thread_for_gid(gid))];
+        auto actual_a = nt.actual_a();
+        auto actual_b = nt.actual_b();
         const auto& tpl = mind_micro_model::require_cell_template(morph_layout_, gid);
         const auto section_count_value = mind_micro_model::section_count(morph_layout_, gid);
         for (std::size_t section_index = 0; section_index < section_count_value; ++section_index) {
@@ -1600,20 +1726,21 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
         mind_sim::micro::sim::core_verify_ion_charges_defined();
     }
 
-    auto& nt = core_neuron_data_->threads[0];
     {
         apply_section_axial_resistance();
     }
-    {
+    for (auto& nt: core_neuron_data_->threads) {
         nt.memb_lists.clear();
         nt.tml_storage.clear();
         nt.pntproc_storage.clear();
         nt.pntproc_event_target_ids.clear();
         nt.presyn_storage.clear();
+        nt.presyn_source_gids.clear();
         nt.presyn_helpers.clear();
         nt.input_presyns.clear();
+        nt.input_presyn_source_gids.clear();
         nt.netcon_storage.clear();
-        nt.netcon_presyn_order.clear();
+        nt.netcon_source_gids.clear();
         nt.netcon_weight_counts.clear();
         nt.weight_storage.clear();
         nt.pnt2presyn_ix_storage.clear();
@@ -1626,26 +1753,44 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
         nt.random123_storage.clear();
         nt.n_real_output = 0;
         nt.shadow_rhs_cnt = 0;
-        core_neuron_data_->mechanism_type.clear();
-        core_neuron_data_->mechanisms.clear();
     }
+    core_neuron_data_->mechanism_type.clear();
+    core_neuron_data_->mechanisms.clear();
+    insert_runtime_thread_.assign(core_mechanism_builder_.inserts.size(), -1);
+    insert_runtime_row_.assign(core_mechanism_builder_.inserts.size(), 0);
+
+    for (int build_tid = 0;
+         build_tid < static_cast<int>(core_neuron_data_->threads.size());
+         ++build_tid) {
+    auto& nt = core_neuron_data_->threads[static_cast<std::size_t>(build_tid)];
+    const auto block_instance_slots = [&](const CoreMechanismBlockBuilder& block) {
+        std::vector<std::size_t> slots;
+        slots.reserve(block.instances.size());
+        for (std::size_t slot = 0; slot < block.instances.size(); ++slot) {
+            if (thread_for_instance(block.instances[slot]) == build_tid) {
+                slots.push_back(slot);
+            }
+        }
+        return slots;
+    };
 
     std::size_t point_process_count = 0;
     std::size_t vdata_count = 0;
     std::size_t random123_count = 0;
     for (const auto& block : core_mechanism_builder_.blocks) {
         const auto& metadata = mechanism_catalog_.require(block.metadata_id);
+        const auto slots = block_instance_slots(block);
         if (metadata.kind != mind_micro_biophysical::MechanismKind::Density) {
-            point_process_count += block.instances.size();
+            point_process_count += slots.size();
         }
         for (const auto& binding : dparam_bindings_for_metadata(metadata.id)) {
             if (binding.kind == mind_sim::micro::sim::CoreDParamKind::PointProcess ||
                 binding.kind == mind_sim::micro::sim::CoreDParamKind::NetSend ||
                 binding.kind == mind_sim::micro::sim::CoreDParamKind::BbcorePointer) {
-                vdata_count += block.instances.size();
+                vdata_count += slots.size();
             } else if (binding.kind == mind_sim::micro::sim::CoreDParamKind::Random) {
-                vdata_count += block.instances.size();
-                random123_count += block.instances.size();
+                vdata_count += slots.size();
+                random123_count += slots.size();
             }
         }
     }
@@ -1670,15 +1815,15 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
     };
 
     mind_sim::micro::sim::CoreMembList cap;
-    std::vector<double> cap_by_runtime_node(morph_layout_.nnode, 0.0);
+    std::vector<double> cap_by_runtime_node(static_cast<std::size_t>(nt.end), 0.0);
     std::size_t cap_data_size = 0;
     {
         cap.type = intern_mechanism_type("capacitance");
         cap.name = "capacitance";
         cap.metadata_id = -1;
-        std::vector<unsigned char> cap_node_present(morph_layout_.nnode, 0);
+        std::vector<unsigned char> cap_node_present(static_cast<std::size_t>(nt.end), 0);
         std::size_t cap_node_count = 0;
-        for (int gid = 0; gid < morph_layout_.num_cells_total; ++gid) {
+        for (int gid: thread_gids_[static_cast<std::size_t>(build_tid)]) {
             const auto section_count_value = mind_micro_model::section_count(morph_layout_, gid);
             for (std::size_t section_index = 0; section_index < section_count_value; ++section_index) {
                 const double cm = section_properties_.cm[section_property_offset(gid, section_index)];
@@ -1733,9 +1878,11 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
             for (const auto& ion : block_ions) {
                 auto& node_marks = ion_node_marks_by_ion[ion];
                 if (node_marks.empty()) {
-                    node_marks.assign(morph_layout_.nnode, 0);
+                    node_marks.assign(static_cast<std::size_t>(nt.end), 0);
                 }
-                for (const auto& instance : block.instances) {
+                const auto slots = block_instance_slots(block);
+                for (const auto instance_slot : slots) {
+                    const auto& instance = block.instances[instance_slot];
                     if (instance.node_index < 0) {
                         continue;
                     }
@@ -1771,7 +1918,7 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
             ion_ml.metadata_id = ion_metadata.id;
             PendingIonMembList pending{};
             pending.field_index_by_name.reserve(ion_metadata.fields.size());
-            pending.row_by_node.assign(morph_layout_.nnode, -1);
+            pending.row_by_node.assign(static_cast<std::size_t>(nt.end), -1);
             for (std::size_t row = 0; row < ion_ml.nodeindices.size(); ++row) {
                 pending.row_by_node[static_cast<std::size_t>(ion_ml.nodeindices[row])] =
                     static_cast<int>(row);
@@ -1781,7 +1928,7 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
                 pending.field_index_by_name.emplace(field.name, static_cast<int>(field_index));
             }
             pending.ml = std::move(ion_ml);
-            ion_styles_by_node.emplace(ion, std::vector<int>(morph_layout_.nnode, 0));
+            ion_styles_by_node.emplace(ion, std::vector<int>(static_cast<std::size_t>(nt.end), 0));
             ion_memb_lists.emplace(ion, std::move(pending));
         }
     }
@@ -1793,9 +1940,10 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
     for (const auto& block : core_mechanism_builder_.blocks) {
         const auto& metadata = mechanism_catalog_.require(block.metadata_id);
         const int type = intern_mechanism_type(metadata.name);
+        const auto slots = block_instance_slots(block);
         exact_mechanism_data_size += mechanism_data_size(
             type,
-            padded_node_count(static_cast<int>(block.instances.size()), type));
+            padded_node_count(static_cast<int>(slots.size()), type));
     }
     ThreadDataAppender data_appender(nt, exact_mechanism_data_size);
 
@@ -1921,7 +2069,9 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
             continue;
         }
 
-        for (const auto& instance : block.instances) {
+        const auto slots = block_instance_slots(block);
+        for (const auto instance_slot : slots) {
+            const auto& instance = block.instances[instance_slot];
             if (instance.node_index < 0) {
                 continue;
             }
@@ -1955,6 +2105,9 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
 
     {
         for (const auto& override : ion_range_overrides_) {
+            if (thread_for_gid(override.gid) != build_tid) {
+                continue;
+            }
             auto ion_it = ion_memb_lists.find(override.ion);
             if (ion_it == ion_memb_lists.end()) {
                 continue;
@@ -2002,6 +2155,9 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
 
     {
         for (const auto& override : ion_style_overrides_) {
+            if (thread_for_gid(override.gid) != build_tid) {
+                continue;
+            }
             auto style_it = ion_styles_by_node.find(override.ion);
             if (style_it == ion_styles_by_node.end()) {
                 continue;
@@ -2062,6 +2218,10 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
         const int metadata_id = block.metadata_id;
         const auto& metadata = mechanism_catalog_.require(metadata_id);
         const auto& instances = block.instances;
+        const auto slots = block_instance_slots(block);
+        if (slots.empty()) {
+            continue;
+        }
         mind_sim::micro::sim::CoreMembList ml;
         ml.type = intern_mechanism_type(metadata.name);
         core_neuron_data_->mechanisms[static_cast<std::size_t>(ml.type)].metadata_id = metadata.id;
@@ -2072,11 +2232,10 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
         ml.is_event_target = metadata.kind != mind_micro_biophysical::MechanismKind::Density;
 
         std::vector<int> runtime_nodes(instances.size(), -1);
-        for (std::size_t instance_slot = 0; instance_slot < instances.size(); ++instance_slot) {
+        for (const auto instance_slot: slots) {
             runtime_nodes[instance_slot] = runtime_node_for_original(instances[instance_slot].node_index);
         }
-        std::vector<std::size_t> row_order(instances.size());
-        std::iota(row_order.begin(), row_order.end(), 0);
+        std::vector<std::size_t> row_order = slots;
         if (metadata.kind != mind_micro_biophysical::MechanismKind::ArtificialCell) {
             std::stable_sort(row_order.begin(), row_order.end(), [&](std::size_t lhs, std::size_t rhs) {
                 return runtime_nodes[lhs] < runtime_nodes[rhs];
@@ -2085,9 +2244,15 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
         std::vector<std::size_t> row_by_instance(instances.size(), 0);
         for (std::size_t row = 0; row < row_order.size(); ++row) {
             row_by_instance[row_order[row]] = row;
+            const auto insert_id = static_cast<std::size_t>(instances[row_order[row]].insert_id);
+            if (insert_id < insert_runtime_thread_.size() &&
+                core_mechanism_builder_.inserts[insert_id].placement != MechanismPlacementKind::SectionSet) {
+                insert_runtime_thread_[insert_id] = build_tid;
+                insert_runtime_row_[insert_id] = row;
+            }
         }
 
-        ml.nodeindices.reserve(instances.size());
+        ml.nodeindices.reserve(row_order.size());
         for (const auto instance_slot : row_order) {
             ml.nodeindices.push_back(runtime_nodes[instance_slot]);
         }
@@ -2131,7 +2296,7 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
                 const auto field_data_base =
                     static_cast<std::size_t>(field_data_offset + element) *
                     static_cast<std::size_t>(ml.ml._nodecount_padded);
-                std::fill_n(ml_data + field_data_base, instances.size(), field.default_value);
+                std::fill_n(ml_data + field_data_base, row_order.size(), field.default_value);
             }
         }
         for (std::size_t row = 0; row < row_order.size(); ++row) {
@@ -2183,14 +2348,17 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
         }
 
         int pntproc_base = -1;
+        std::vector<int> pntproc_index_by_instance(instances.size(), -1);
         if (metadata.kind != mind_micro_biophysical::MechanismKind::Density) {
             pntproc_base = static_cast<int>(nt.pntproc_storage.size());
-            for (std::size_t instance_slot = 0; instance_slot < instances.size(); ++instance_slot) {
+            for (const auto instance_slot: slots) {
                 const auto& instance = instances[instance_slot];
+                pntproc_index_by_instance[instance_slot] =
+                    static_cast<int>(nt.pntproc_storage.size());
                 nt.pntproc_storage.push_back(coreneuron::Point_process{
                     ._i_instance = static_cast<int>(row_by_instance[instance_slot]),
                     ._type = static_cast<short>(ml.type),
-                    ._tid = 0,
+                    ._tid = static_cast<short>(build_tid),
                 });
                 nt.pntproc_event_target_ids.push_back(instance.event_target_id);
             }
@@ -2265,7 +2433,7 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
                         slot = append_vdata(
                             nt,
                             &nt.pntproc_storage[static_cast<std::size_t>(
-                                pntproc_base + static_cast<int>(instance_slot))]);
+                                pntproc_index_by_instance[instance_slot])]);
                         break;
                     case mind_sim::micro::sim::CoreDParamKind::Random:
                         slot = append_random123(nt);
@@ -2330,18 +2498,23 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
     {
         build_tml_from_registered_execution_order(nt);
     }
+    }
     {
         core_neuron_data_->bind();
     }
 }
 
 void MicroFrontendModel::rebuild_core_network() {
-    auto& nt = core_neuron_data_->threads[0];
-    {
+    core_neuron_data_->input_event_targets.clear();
+    core_neuron_data_->netcon_presyn_order.clear();
+    for (auto& nt: core_neuron_data_->threads) {
         nt.presyn_storage.clear();
+        nt.presyn_source_gids.clear();
         nt.presyn_helpers.clear();
         nt.input_presyns.clear();
+        nt.input_presyn_source_gids.clear();
         nt.netcon_storage.clear();
+        nt.netcon_source_gids.clear();
         nt.netcon_weight_counts.clear();
         nt.net_send_buffer.clear();
         nt.pnt2presyn_ix_storage.clear();
@@ -2351,29 +2524,105 @@ void MicroFrontendModel::rebuild_core_network() {
         nt.weight_storage = network_registry_.event_edge_weights();
     }
 
+    struct RuntimeRef {
+        int thread{-1};
+        int index{-1};
+        bool input{false};
+    };
+
+    const auto& sources = network_registry_.event_source_slots();
+    const auto& targets = network_registry_.event_target_slots();
+    const auto& edges = network_registry_.event_edges();
+
+    int max_visible_gid = -1;
+    for (const auto& source : sources) {
+        if (source.source_kind == mind_micro_network::NetConSourceKind::RealCell) {
+            max_visible_gid = std::max(max_visible_gid, source.real_source.gid);
+        } else if (source.source_kind == mind_micro_network::NetConSourceKind::EventTarget) {
+            max_visible_gid =
+                std::max(max_visible_gid,
+                         network_registry_.event_target_gid(source.source_event_target_id));
+        }
+    }
+    constexpr int preferred_core_source_gid_base = 1000000000;
+    const int core_source_gid_base = std::max(preferred_core_source_gid_base, max_visible_gid + 1);
+    if (sources.size() >
+        static_cast<std::size_t>(std::numeric_limits<int>::max() - core_source_gid_base)) {
+        throw std::runtime_error("too many CoreNEURON NetCon source slots for internal gid map");
+    }
+    std::vector<int> source_slot_core_gid(sources.size(), -1);
+    for (std::size_t source_slot = 0; source_slot < sources.size(); ++source_slot) {
+        source_slot_core_gid[source_slot] =
+            core_source_gid_base + static_cast<int>(source_slot);
+    }
+
+    std::vector<RuntimeRef> event_target_runtime(network_registry_.event_targets().size());
     std::vector<int> event_target_to_pntproc(network_registry_.event_targets().size(), -1);
-    {
+    for (std::size_t tid = 0; tid < core_neuron_data_->threads.size(); ++tid) {
+        auto& nt = core_neuron_data_->threads[tid];
         for (std::size_t i = 0; i < nt.pntproc_storage.size(); ++i) {
             const int event_target_id = nt.pntproc_event_target_ids[i];
             event_target_to_pntproc[static_cast<std::size_t>(event_target_id)] = static_cast<int>(i);
+            event_target_runtime[static_cast<std::size_t>(event_target_id)] = RuntimeRef{
+                .thread = static_cast<int>(tid),
+                .index = static_cast<int>(i),
+                .input = false,
+            };
         }
     }
 
-    std::vector<int> source_slot_to_presyn(network_registry_.event_source_slots().size(), -1);
-    std::vector<int> source_slot_to_input_presyn(network_registry_.event_source_slots().size(), -1);
-    {
-        for (std::size_t source_slot = 0; source_slot < network_registry_.event_source_slots().size(); ++source_slot) {
-            const auto& source = network_registry_.event_source_slots()[source_slot];
-            if (source.source_kind == mind_micro_network::NetConSourceKind::SpikeInput) {
-                coreneuron::InputPreSyn input;
-                source_slot_to_input_presyn[source_slot] = static_cast<int>(nt.input_presyns.size());
-                network_registry_.set_spike_input_runtime_index(
-                    source.spike_input_id,
-                    static_cast<int>(nt.input_presyns.size()));
-                nt.input_presyns.push_back(input);
+    std::vector<RuntimeRef> target_slot_runtime(targets.size());
+    for (std::size_t target_slot = 0; target_slot < targets.size(); ++target_slot) {
+        const int event_target_id = targets[target_slot].event_target_id;
+        target_slot_runtime[target_slot] =
+            event_target_runtime[static_cast<std::size_t>(event_target_id)];
+    }
+
+    const auto source_thread = [&](std::size_t source_slot) {
+        const auto& source = sources[source_slot];
+        if (source.source_kind == mind_micro_network::NetConSourceKind::RealCell) {
+            return thread_for_gid(source.real_source.gid);
+        }
+        if (source.source_kind == mind_micro_network::NetConSourceKind::EventTarget) {
+            return event_target_runtime[static_cast<std::size_t>(source.source_event_target_id)].thread;
+        }
+        for (const auto& edge: edges) {
+            if (edge.source_slot == static_cast<int>(source_slot)) {
+                return target_slot_runtime[static_cast<std::size_t>(edge.target_slot)].thread;
+            }
+        }
+        return 0;
+    };
+
+    std::vector<RuntimeRef> source_slot_runtime(sources.size());
+    const auto build_source_kind = [&](mind_micro_network::NetConSourceKind kind) {
+        for (std::size_t source_slot = 0; source_slot < sources.size(); ++source_slot) {
+            const auto& source = sources[source_slot];
+            if (source.source_kind != kind) {
                 continue;
             }
-
+            const int tid = source_thread(source_slot);
+            auto& nt = core_neuron_data_->threads[static_cast<std::size_t>(tid)];
+            if (source.source_kind == mind_micro_network::NetConSourceKind::SpikeInput) {
+                const int input_index = static_cast<int>(nt.input_presyns.size());
+                const int runtime_index =
+                    static_cast<int>(core_neuron_data_->input_event_targets.size());
+                core_neuron_data_->input_event_targets.push_back(
+                    mind_sim::micro::sim::CoreInputEventTarget{
+                        .thread_index = tid,
+                        .input_presyn_index = input_index,
+                    });
+                network_registry_.set_spike_input_runtime_index(source.spike_input_id,
+                                                                runtime_index);
+                nt.input_presyns.push_back(coreneuron::InputPreSyn{});
+                nt.input_presyn_source_gids.push_back(source_slot_core_gid[source_slot]);
+                source_slot_runtime[source_slot] = RuntimeRef{
+                    .thread = tid,
+                    .index = input_index,
+                    .input = true,
+                };
+                continue;
+            }
             coreneuron::PreSyn presyn;
             presyn.threshold_ = source.threshold;
             if (source.source_kind == mind_micro_network::NetConSourceKind::RealCell) {
@@ -2389,74 +2638,77 @@ void MicroFrontendModel::rebuild_core_network() {
                 presyn.pntsrc_ = nt.pntproc_storage.data() + pntproc_index;
                 presyn.gid_ = network_registry_.event_target_gid(source.source_event_target_id);
             }
-            source_slot_to_presyn[source_slot] = static_cast<int>(nt.presyn_storage.size());
+            source_slot_runtime[source_slot] = RuntimeRef{
+                .thread = tid,
+                .index = static_cast<int>(nt.presyn_storage.size()),
+                .input = false,
+            };
             nt.presyn_storage.push_back(presyn);
+            nt.presyn_source_gids.push_back(source_slot_core_gid[source_slot]);
             nt.presyn_helpers.push_back(coreneuron::PreSynHelper{});
         }
-    }
+    };
+    build_source_kind(mind_micro_network::NetConSourceKind::RealCell);
+    build_source_kind(mind_micro_network::NetConSourceKind::EventTarget);
+    build_source_kind(mind_micro_network::NetConSourceKind::SpikeInput);
 
-    std::vector<int> target_slot_to_pntproc(network_registry_.event_target_slots().size(), -1);
-    {
-        for (std::size_t target_slot = 0; target_slot < network_registry_.event_target_slots().size(); ++target_slot) {
-            const int event_target_id = network_registry_.event_target_slots()[target_slot].event_target_id;
-            const int pntproc_index =
-                event_target_to_pntproc[static_cast<std::size_t>(event_target_id)];
-            target_slot_to_pntproc[target_slot] = pntproc_index;
-        }
-    }
-
-    std::vector<int> source_slot_nc_count(network_registry_.event_source_slots().size(), 0);
-    std::vector<int> source_slot_nc_index(network_registry_.event_source_slots().size(), -1);
-    {
-        for (const auto& edge : network_registry_.event_edges()) {
+    std::vector<int> source_slot_nc_count(sources.size(), 0);
+    std::vector<int> source_slot_nc_index(sources.size(), -1);
+    for (const auto& edge : edges) {
             source_slot_nc_count[static_cast<std::size_t>(edge.source_slot)] += 1;
+    }
+    int nc_cursor = 0;
+    for (std::size_t source_slot = 0; source_slot < sources.size(); ++source_slot) {
+        auto& ref = source_slot_runtime[source_slot];
+        if (ref.thread < 0 || ref.index < 0 || ref.input) {
+            continue;
         }
-        int nc_cursor = 0;
-        for (std::size_t source_slot = 0; source_slot < source_slot_to_presyn.size(); ++source_slot) {
-            const int presyn_index = source_slot_to_presyn[source_slot];
-            if (presyn_index < 0) {
-                continue;
-            }
-            auto& presyn = nt.presyn_storage[static_cast<std::size_t>(presyn_index)];
+        source_slot_nc_index[source_slot] = nc_cursor;
+            auto& presyn = core_neuron_data_->threads[static_cast<std::size_t>(ref.thread)]
+                               .presyn_storage[static_cast<std::size_t>(ref.index)];
             presyn.nc_index_ = nc_cursor;
             presyn.nc_cnt_ = source_slot_nc_count[source_slot];
-            source_slot_nc_index[source_slot] = nc_cursor;
-            nc_cursor += source_slot_nc_count[source_slot];
-        }
-        for (std::size_t source_slot = 0; source_slot < source_slot_to_input_presyn.size(); ++source_slot) {
-            const int input_presyn_index = source_slot_to_input_presyn[source_slot];
-            if (input_presyn_index < 0) {
-                continue;
-            }
-            auto& input = nt.input_presyns[static_cast<std::size_t>(input_presyn_index)];
-            input.nc_index_ = nc_cursor;
-            input.nc_cnt_ = source_slot_nc_count[source_slot];
-            source_slot_nc_index[source_slot] = nc_cursor;
-            nc_cursor += source_slot_nc_count[source_slot];
-        }
+        nc_cursor += source_slot_nc_count[source_slot];
     }
-    std::vector<int> source_edge_seen(network_registry_.event_source_slots().size(), 0);
-    {
-        nt.netcon_storage.resize(network_registry_.event_edges().size());
-        nt.netcon_presyn_order.assign(network_registry_.event_edges().size(), -1);
-        nt.netcon_weight_counts.assign(network_registry_.event_edges().size(), 0);
-        for (std::size_t edge_index = 0; edge_index < network_registry_.event_edges().size(); ++edge_index) {
-            const auto& edge = network_registry_.event_edges()[edge_index];
-            const int presyn_order_index =
-                source_slot_nc_index[static_cast<std::size_t>(edge.source_slot)] +
-                source_edge_seen[static_cast<std::size_t>(edge.source_slot)]++;
-            const int netcon_index = static_cast<int>(edge_index);
-            auto& netcon = nt.netcon_storage[static_cast<std::size_t>(netcon_index)];
-            netcon.active_ = true;
-            netcon.delay_ = edge.delay;
-            netcon.target_ = nt.pntproc_storage.data() + target_slot_to_pntproc[edge.target_slot];
-            netcon.u.weight_index_ = edge.weight_offset;
-            nt.netcon_weight_counts[static_cast<std::size_t>(netcon_index)] = edge.weight_count;
-            nt.netcon_presyn_order[static_cast<std::size_t>(presyn_order_index)] = netcon_index;
+    for (std::size_t source_slot = 0; source_slot < sources.size(); ++source_slot) {
+        auto& ref = source_slot_runtime[source_slot];
+        if (ref.thread < 0 || ref.index < 0 || !ref.input) {
+            continue;
         }
+        source_slot_nc_index[source_slot] = nc_cursor;
+        auto& input = core_neuron_data_->threads[static_cast<std::size_t>(ref.thread)]
+                          .input_presyns[static_cast<std::size_t>(ref.index)];
+        input.nc_index_ = nc_cursor;
+        input.nc_cnt_ = source_slot_nc_count[source_slot];
+        nc_cursor += source_slot_nc_count[source_slot];
     }
 
-    {
+    core_neuron_data_->netcon_presyn_order.assign(edges.size(), {});
+    std::vector<int> source_edge_seen(sources.size(), 0);
+    for (std::size_t edge_index = 0; edge_index < edges.size(); ++edge_index) {
+        const auto& edge = edges[edge_index];
+        const int presyn_order_index =
+            source_slot_nc_index[static_cast<std::size_t>(edge.source_slot)] +
+            source_edge_seen[static_cast<std::size_t>(edge.source_slot)]++;
+        const auto& target_ref = target_slot_runtime[static_cast<std::size_t>(edge.target_slot)];
+        auto& nt = core_neuron_data_->threads[static_cast<std::size_t>(target_ref.thread)];
+        const int netcon_index = static_cast<int>(nt.netcon_storage.size());
+        nt.netcon_storage.push_back(coreneuron::NetCon{});
+        nt.netcon_source_gids.push_back(source_slot_core_gid[static_cast<std::size_t>(edge.source_slot)]);
+        nt.netcon_weight_counts.push_back(edge.weight_count);
+        auto& netcon = nt.netcon_storage.back();
+        netcon.active_ = true;
+        netcon.delay_ = edge.delay;
+        netcon.target_ = nt.pntproc_storage.data() + target_ref.index;
+        netcon.u.weight_index_ = edge.weight_offset;
+        core_neuron_data_->netcon_presyn_order[static_cast<std::size_t>(presyn_order_index)] =
+            mind_sim::micro::sim::CoreNetConRef{
+                .thread_index = target_ref.thread,
+                .netcon_index = netcon_index,
+            };
+    }
+
+    for (auto& nt: core_neuron_data_->threads) {
         const auto capacity = static_cast<std::size_t>(core_neuron_data_->mechanism_capacity());
         std::vector<std::size_t> counts(capacity, 0);
         for (const auto& pnt : nt.pntproc_storage) {
@@ -2478,16 +2730,14 @@ void MicroFrontendModel::rebuild_core_network() {
             nt.pnt2presyn_ix_storage[row + static_cast<std::size_t>(pnt._i_instance)] =
                 static_cast<int>(presyn_index);
         }
-    }
 
-    nt.n_weight = static_cast<int>(nt.weight_storage.size());
-    nt.n_netcon = static_cast<int>(nt.netcon_storage.size());
-    nt.n_presyn = static_cast<int>(nt.presyn_storage.size());
-    nt.n_input_presyn = static_cast<int>(nt.input_presyns.size());
-    nt.net_send_buffer.assign(static_cast<std::size_t>(nt.n_real_output), 0);
-    {
-        core_neuron_data_->bind();
+        nt.n_weight = static_cast<int>(nt.weight_storage.size());
+        nt.n_netcon = static_cast<int>(nt.netcon_storage.size());
+        nt.n_presyn = static_cast<int>(nt.presyn_storage.size());
+        nt.n_input_presyn = static_cast<int>(nt.input_presyns.size());
+        nt.net_send_buffer.assign(static_cast<std::size_t>(nt.n_real_output), 0);
     }
+    core_neuron_data_->bind();
 }
 
 }  // namespace mind_sim::micro::frontend

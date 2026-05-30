@@ -40,10 +40,6 @@ void nrn_deliver_events(NrnThread* nt) {
     update_net_receive_buffer(nt);
 
     for (auto& net_buf_receive: corenrn.get_net_buf_receive()) {
-        const int type = net_buf_receive.second;
-        if (type < 0 || nt->_ml_list == nullptr || nt->_ml_list[type] == nullptr) {
-            continue;
-        }
         (*net_buf_receive.first)(nt);
     }
 }
@@ -61,20 +57,24 @@ void init_net_events() {
 
 #ifdef CORENEURON_ENABLE_GPU
     /* weight vectors could be updated (from INITIAL block of NET_RECEIVE, update those on GPU's */
-    NrnThread* nt = nrn_threads;
-    double* weights = nt->weights;
-    int n_weight = nt->n_weight;
-    if (n_weight && nt->compute_gpu) {
-        nrn_pragma_acc(update device(weights [0:n_weight]))
-        nrn_pragma_omp(target update to(weights [0:n_weight]))
+    for (int ith = 0; ith < nrn_nthread; ++ith) {
+        NrnThread* nt = nrn_threads + ith;
+        double* weights = nt->weights;
+        int n_weight = nt->n_weight;
+        if (n_weight && nt->compute_gpu) {
+            nrn_pragma_acc(update device(weights [0:n_weight]))
+            nrn_pragma_omp(target update to(weights [0:n_weight]))
+        }
     }
 #endif
 }
 
 void nrn_play_init() {
-    NrnThread* nt = nrn_threads;
-    for (int i = 0; i < nt->n_vecplay; ++i) {
-        ((PlayRecord*) nt->_vecplay[i])->play_init();
+    for (int ith = 0; ith < nrn_nthread; ++ith) {
+        NrnThread* nt = nrn_threads + ith;
+        for (int i = 0; i < nt->n_vecplay; ++i) {
+            ((PlayRecord*) nt->_vecplay[i])->play_init();
+        }
     }
 }
 

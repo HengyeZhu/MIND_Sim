@@ -430,7 +430,7 @@ void nrn_setup(const char* filesdat,
     // Fortunately, empty threads work fine.
     // Allocate NrnThread* nrn_threads of size ngroup (minimum 2)
     // Note that rank with 0 dataset/cellgroup works fine
-    nrn_threads_create();
+    nrn_threads_create(userParams.ngroup <= 1 ? 2 : userParams.ngroup);
 
     // from nrn_has_net_event create pnttype2presyn for use in phase2.
     auto& memb_func = corenrn.get_memb_funcs();
@@ -484,8 +484,10 @@ void nrn_setup(const char* filesdat,
     if (corenrn_file_mode) {
         coreneuron::phase_wrapper<coreneuron::phase::one>(userParams, !corenrn_file_mode);
     } else {
-        Phase1 p1{nrn_threads->id};
-        p1.populate(*nrn_threads, mut);
+        nrn_multithread_job([](NrnThread* n) {
+            Phase1 p1{n->id};
+            p1.populate(*n, mut);
+        });
     }
 
     // from the gid2out map and the nrnthreads_netcon_srcgid array,
@@ -493,7 +495,9 @@ void nrn_setup(const char* filesdat,
     // allocate the process wide InputPreSyn array
     determine_inputpresyn();
 
-    // read the rest of the gidgroup's data and complete the setup.
+    // read the rest of the gidgroup's data and complete the setup for each
+    // thread.
+    /* nrn_multithread_job supports serial, pthread, and openmp. */
     coreneuron::phase_wrapper<coreneuron::phase::two>(userParams, !corenrn_file_mode);
 
     // gap junctions
@@ -510,7 +514,7 @@ void nrn_setup(const char* filesdat,
                                                                              sizeof(sgid_t));
         }
 
-        nrn_partrans::gap_data_indices_setup(nrn_threads);
+        nrn_multithread_job(nrn_partrans::gap_data_indices_setup);
         nrn_partrans::gap_mpi_setup(userParams.ngroup);
 
         // Whether allocated in NEURON or here, delete here.

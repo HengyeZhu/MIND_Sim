@@ -18,16 +18,17 @@
 #include "coreneuron/mechanism/register_mech.hpp"
 #include "coreneuron/nrniv/nrniv_decl.h"
 #include "coreneuron/utils/nrn_assert.h"
+#include "coreneuron/mechanism/mech/cfile/cabvars.h"
 #include "coreneuron/io/nrn2core_direct.h"
 #include "coreneuron/coreneuron.hpp"
-#include "coreneuron/mechanism/eion.hpp"
+#include "coreneuron/mechanism//eion.hpp"
 
 static char banner[] = "Duke, Yale, and the BlueBrain Project -- Copyright 1984-2020";
 
 namespace coreneuron {
 extern int nrn_nobanner_;
-void capacitance_reg();
 
+// NB: this should go away
 extern std::string cnrn_version();
 std::map<std::string, int> mech2type;
 
@@ -81,6 +82,7 @@ static void mk_mech(std::istream& s) {
     s >> version;
     check_bbcore_write_version(version);
 
+    //  printf("reading %s\n", fname);
     int n = 0;
     nrn_assert(s >> n);
 
@@ -120,6 +122,7 @@ static void mk_mech(std::istream& s) {
             // printf("%s %s\n", mname, iname);
             ion_reg(iname, charge);
         }
+        // printf("%s %d %d\n", mname, nrn_get_mechtype(mname), type);
     }
 
     if (nrnmpi_myid < 1 && nrn_nobanner_ == 0) {
@@ -129,7 +132,13 @@ static void mk_mech(std::istream& s) {
         fprintf(stderr, " \n");
         fflush(stderr);
     }
-    capacitance_reg();
+    /* will have to put this back if any mod file refers to diam */
+    //	register_mech(morph_mech, morph_alloc, (Pfri)0, (Pfri)0, (Pfri)0, (Pfri)0, -1, 0);
+
+    /// Calling _reg functions for the default mechanisms from the file mech/cfile/cabvars.h
+    for (int i = 0; mechanism[i]; i++) {
+        (*mechanism[i])();
+    }
 }
 
 /// Get mechanism type by the mechanism name

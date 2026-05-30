@@ -468,6 +468,11 @@ struct Sim {
         return 0;
     }
     double get_dt() const { return model.dt(); }
+    int set_num_threads(int num_threads) {
+        model.set_num_threads(num_threads);
+        return 0;
+    }
+    int get_num_threads() const { return model.num_threads(); }
     int load_mech_metadata(const std::string& path) {
         model.load_mech_metadata(path);
         return 0;

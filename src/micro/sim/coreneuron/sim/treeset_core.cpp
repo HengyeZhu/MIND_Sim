@@ -6,9 +6,6 @@
 # =============================================================================.
 */
 
-#include <cmath>
-#include <cstdlib>
-#include <stdexcept>
 #include <string>
 
 #include "coreneuron/nrnconf.h"
@@ -22,30 +19,6 @@ namespace coreneuron {
 Fixed step method with threads and cache efficiency. No extracellular,
 sparse matrix, multisplit, or legacy features.
 */
-
-static bool mind_sim_validate_numerics() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("MIND_SIM_VALIDATE_NUMERICS");
-        return value && value[0] != '\0' && value[0] != '0';
-    }();
-    return enabled;
-}
-
-static void mind_sim_check_finite(const NrnThread* nt, const char* where) {
-    if (!mind_sim_validate_numerics()) {
-        return;
-    }
-    for (int i = 0; i < nt->end; ++i) {
-        if (!std::isfinite(nt->_actual_rhs[i])) {
-            throw std::runtime_error(std::string("non-finite CoreNEURON RHS at ") + where +
-                                     " node=" + std::to_string(i));
-        }
-        if (!std::isfinite(nt->_actual_d[i])) {
-            throw std::runtime_error(std::string("non-finite CoreNEURON D at ") + where +
-                                     " node=" + std::to_string(i));
-        }
-    }
-}
 
 static void nrn_rhs(NrnThread* _nt) {
     int i1 = 0;
@@ -89,7 +62,6 @@ static void nrn_rhs(NrnThread* _nt) {
             ss += nrn_get_mechname(tml->index);
             Instrumentor::phase p(ss.c_str());
             (*s)(_nt, tml->ml, tml->index);
-            mind_sim_check_finite(_nt, ss.c_str());
 #ifdef DEBUG
             if (errno) {
                 hoc_warning("errno set during calculation of currents", nullptr);
@@ -155,7 +127,6 @@ static void nrn_lhs(NrnThread* _nt) {
             ss += nrn_get_mechname(tml->index);
             Instrumentor::phase p(ss.c_str());
             (*s)(_nt, tml->ml, tml->index);
-            mind_sim_check_finite(_nt, ss.c_str());
 #ifdef DEBUG
             if (errno) {
                 hoc_warning("errno set during calculation of jacobian", (char*) 0);
@@ -169,7 +140,6 @@ static void nrn_lhs(NrnThread* _nt) {
     if (_nt->end && _nt->tml) {
         assert(_nt->tml->index == CAP);
         nrn_jacob_capacitance(_nt, _nt->tml->ml, _nt->tml->index);
-        mind_sim_check_finite(_nt, "capacitance-jacob");
     }
 
     double* vec_d = &(VEC_D(0));

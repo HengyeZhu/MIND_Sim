@@ -65,7 +65,7 @@ void set_report_buffer_size(int n) {
 
 void finalize_report() {
 #ifdef ENABLE_SONATA_REPORTS
-    sonata_flush(nrn_threads->_t);
+    sonata_flush(nrn_threads[0]._t);
 #endif
 }
 }  // Namespace coreneuron
