@@ -859,6 +859,20 @@ struct NetworkView {
         const int id = sim->model.gid_connect(gid, post.insert_id, weight, delay);
         return NetConView{sim, id};
     }
+    NetConView event_connect(const ArtificialCellView& source,
+                             const PointProcessView& post,
+                             double weight,
+                             double delay) const {
+        const int id = sim->model.event_target_connect(source.insert_id, post.insert_id, weight, delay);
+        return NetConView{sim, id};
+    }
+    NetConView event_connect(const PointProcessView& source,
+                             const PointProcessView& post,
+                             double weight,
+                             double delay) const {
+        const int id = sim->model.event_target_connect(source.insert_id, post.insert_id, weight, delay);
+        return NetConView{sim, id};
+    }
     SpikeInputView spike_input() const {
         const int id = sim->model.register_spike_input_source();
         return SpikeInputView{sim, id};

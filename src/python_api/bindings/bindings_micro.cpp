@@ -329,6 +329,30 @@ void bind_micro(nb::module_& m) {
              nb::arg("post"),
              nb::arg("weight"),
              nb::arg("delay"))
+        .def("event_connect",
+             [](const NetworkView& network,
+                const ArtificialCellView& source,
+                const PointProcessView& post,
+                double weight,
+                double delay) {
+                 return network.event_connect(source, post, weight, delay);
+             },
+             nb::arg("source"),
+             nb::arg("post"),
+             nb::arg("weight"),
+             nb::arg("delay"))
+        .def("event_connect",
+             [](const NetworkView& network,
+                const PointProcessView& source,
+                const PointProcessView& post,
+                double weight,
+                double delay) {
+                 return network.event_connect(source, post, weight, delay);
+             },
+             nb::arg("source"),
+             nb::arg("post"),
+             nb::arg("weight"),
+             nb::arg("delay"))
         .def("spike_input", &NetworkView::spike_input)
         .def("spike_inputs", &NetworkView::spike_inputs, nb::arg("count"))
         .def("spike_connect",

@@ -219,6 +219,10 @@ class MicroFrontendModel {
                                           const VariableRef& source,
                                           std::optional<double> threshold);
     [[nodiscard]] int gid_connect(int gid, int post_insert_id, double weight, double delay);
+    [[nodiscard]] int event_target_connect(int source_insert_id,
+                                           int post_insert_id,
+                                           double weight,
+                                           double delay);
     [[nodiscard]] int register_spike_input_source();
     [[nodiscard]] int spike_input_connect(int spike_input_id,
                                           int post_insert_id,

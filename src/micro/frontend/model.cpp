@@ -1224,6 +1224,23 @@ int MicroFrontendModel::gid_connect(int gid, int post_insert_id, double weight, 
     return network_registry_.register_gid_connect(gid, target_id, weight, delay);
 }
 
+int MicroFrontendModel::event_target_connect(int source_insert_id,
+                                             int post_insert_id,
+                                             double weight,
+                                             double delay) {
+    const auto source_idx = require_insert_index(source_insert_id);
+    const int source_target_id = core_mechanism_builder_.inserts[source_idx].target_id;
+    if (source_target_id < 0) {
+        throw std::runtime_error("event_target_connect source must be a point process or artificial cell");
+    }
+    const auto post_idx = require_insert_index(post_insert_id);
+    const int target_id = core_mechanism_builder_.inserts[post_idx].target_id;
+    if (target_id < 0) {
+        throw std::runtime_error("event_target_connect target must be a point process");
+    }
+    return network_registry_.register_event_target_netcon(source_target_id, target_id, weight, delay);
+}
+
 int MicroFrontendModel::register_spike_input_source() {
     return network_registry_.register_spike_input_source();
 }
