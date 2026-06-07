@@ -1,27 +1,47 @@
 #include "python_api/bindings/bindings.hpp"
 
+#include <cstdint>
+
 namespace mind_sim::python_api::bindings {
+
+namespace {
+
+std::vector<std::vector<double>> square_connectivity_matrix(const Connectivity& connectivity,
+                                                            const std::vector<double>& flat) {
+    const int n = connectivity.roi_count();
+    std::vector<std::vector<double>> out(static_cast<std::size_t>(n),
+                                         std::vector<double>(static_cast<std::size_t>(n), 0.0));
+    for (int target = 0; target < n; ++target) {
+        for (int source = 0; source < n; ++source) {
+            out[static_cast<std::size_t>(target)][static_cast<std::size_t>(source)] =
+                flat[static_cast<std::size_t>(target * n + source)];
+        }
+    }
+    return out;
+}
+
+}  // namespace
 
 void bind_macro(nb::module_& m) {
     nb::class_<ScalarBuffer>(m, "ScalarBuffer")
         .def(nb::init<>())
-        .def(nb::init<std::size_t>(), nb::arg("exposure_count"))
+        .def(nb::init<std::size_t>(), nb::arg("output_count"))
         .def_rw("values", &ScalarBuffer::values)
         .def("get",
-             [](const ScalarBuffer& buffer, int exposure_id) {
-                 return buffer.get(exposure_id, "ScalarBuffer.get");
+             [](const ScalarBuffer& buffer, int output_id) {
+                 return buffer.get(output_id, "ScalarBuffer.get");
              },
-             nb::arg("exposure_id"))
+             nb::arg("output_id"))
         .def("set",
-             [](ScalarBuffer& buffer, int exposure_id, double value) {
-                 buffer.at(exposure_id, "ScalarBuffer.set") = value;
+             [](ScalarBuffer& buffer, int output_id, double value) {
+                 buffer.at(output_id, "ScalarBuffer.set") = value;
              },
-             nb::arg("exposure_id"),
+             nb::arg("output_id"),
              nb::arg("value"))
         .def("__len__", &ScalarBuffer::size)
         .def("__repr__",
              [](const ScalarBuffer& buffer) {
-                 return "<mind_sim.ScalarBuffer exposures=" + std::to_string(buffer.size()) + ">";
+                 return "<mind_sim.ScalarBuffer outputs=" + std::to_string(buffer.size()) + ">";
              });
 
     nb::class_<ROI>(m, "ROI")
@@ -40,6 +60,16 @@ void bind_macro(nb::module_& m) {
              nb::arg("labels"),
              nb::arg("weights"),
              nb::arg("delays"))
+        .def_static("from_csv", &Connectivity::from_csv, nb::arg("path"))
+        .def_prop_ro("labels", [](const Connectivity& connectivity) { return connectivity.labels(); })
+        .def_prop_ro("weights",
+                     [](const Connectivity& connectivity) {
+                         return square_connectivity_matrix(connectivity, connectivity.weights());
+                     })
+        .def_prop_ro("delays",
+                     [](const Connectivity& connectivity) {
+                         return square_connectivity_matrix(connectivity, connectivity.delays());
+                     })
         .def("rois", &Connectivity::rois)
         .def("roi_count", &Connectivity::roi_count)
         .def("roi_index", &Connectivity::roi_index, nb::arg("label"))
@@ -111,11 +141,12 @@ void bind_macro(nb::module_& m) {
              });
 
     nb::class_<Network>(m, "_Network")
-        .def(nb::init<Connectivity, std::vector<std::string>, std::vector<std::string>, std::vector<int>>(),
+        .def(nb::init<Connectivity, std::vector<std::string>, std::vector<std::string>, std::vector<int>, std::vector<int>>(),
              nb::arg("connectivity"),
              nb::arg("inputs"),
-             nb::arg("exposures"),
-             nb::arg("recorded_rois"))
+             nb::arg("outputs"),
+             nb::arg("recorded_rois"),
+             nb::arg("recorded_outputs"))
         .def("roi",
              nb::overload_cast<int>(&Network::roi, nb::const_),
              nb::arg("index"))
@@ -124,22 +155,15 @@ void bind_macro(nb::module_& m) {
              nb::arg("label"))
         .def("rois", &Network::rois)
         .def("inputs", &Network::inputs)
-        .def("exposures", &Network::exposures)
+        .def("outputs", &Network::outputs)
         .def("recorded_rois", &Network::recorded_rois)
+        .def("recorded_outputs", &Network::recorded_outputs)
         .def("set_recorded_rois", &Network::set_recorded_rois, nb::arg("recorded_rois"))
+        .def("set_recorded_outputs", &Network::set_recorded_outputs, nb::arg("recorded_outputs"))
         .def("input_index", &Network::input_index, nb::arg("input"))
         .def("input_count", &Network::input_count)
-        .def("exposure_index", &Network::exposure_index, nb::arg("exposure"))
-        .def("exposure_count", &Network::exposure_count)
-        .def("set_initial_exposure",
-             &Network::set_initial_exposure,
-             nb::arg("roi"),
-             nb::arg("exposure"))
-        .def("set_initial_exposure_value",
-             &Network::set_initial_exposure_value,
-             nb::arg("roi"),
-             nb::arg("exposure"),
-             nb::arg("value"))
+        .def("output_index", &Network::output_index, nb::arg("output"))
+        .def("output_count", &Network::output_count)
         .def("set_dc_input",
              &Network::set_dc_input,
              nb::arg("roi"),
@@ -149,22 +173,22 @@ void bind_macro(nb::module_& m) {
              nb::arg("roi"),
              nb::arg("input"),
              nb::arg("value"))
-        .def("couple",
-             &Network::couple,
+        .def("macro2macro",
+             &Network::macro_to_macro,
              nb::arg("source_roi"),
              nb::arg("target_roi"),
              nb::arg("rule"),
              nb::arg("params"),
-             nb::arg("read_exposure_offsets"),
-             nb::arg("write_input_offsets"))
+             nb::arg("source_exposure_offsets"),
+             nb::arg("target_input_offsets"))
         .def("use_region_rule",
              &Network::use_region_rule,
              nb::arg("roi"),
              nb::arg("rule"),
              nb::arg("state"),
              nb::arg("params"),
-             nb::arg("read_input_offsets"),
-             nb::arg("write_exposure_offsets"))
+             nb::arg("target_input_offsets"),
+             nb::arg("source_exposure_offsets"))
         .def("use_neural_field",
              &network_use_neural_field,
              nb::arg("name"),
@@ -173,55 +197,122 @@ void bind_macro(nb::module_& m) {
              nb::arg("local"),
              nb::arg("state"),
              nb::arg("params"),
-             nb::arg("read_input_offsets"),
+             nb::arg("target_input_offsets"),
              nb::arg("reducer_state_indices"),
-             nb::arg("reducer_exposure_indices"))
-        .def("use_micro",
-             &network_use_micro,
-             nb::arg("name"),
-             nb::arg("micro"))
+             nb::arg("reducer_output_indices"))
         .def("bind_micro_roi",
              &network_bind_micro_roi,
              nb::arg("micro_circuit_index"),
              nb::arg("roi"),
              nb::arg("gid_range_begins"),
              nb::arg("gid_range_ends"))
-        .def("configure_micro_input_rule",
-             &network_configure_micro_input_rule,
-             nb::arg("roi"),
-             nb::arg("input_rule"),
-             nb::arg("input_state"),
-             nb::arg("input_params"),
-             nb::arg("random_rules"),
-             nb::arg("random_states"),
-             nb::arg("input_port_bases"),
-             nb::arg("input_read_offsets"))
         .def("configure_micro_output_rule",
              &Network::configure_micro_output_rule,
              nb::arg("roi"),
              nb::arg("output_rule"),
              nb::arg("output_state"),
              nb::arg("output_params"),
-             nb::arg("output_write_offsets"))
+             nb::arg("source_exposure_offsets"))
         .def("roi_index", &Network::roi_index, nb::arg("label"))
         .def("roi_count", &Network::roi_count);
 
-    nb::class_<mind_sim::macro::sim::ExposureRecord>(m, "ExposureRecord")
-        .def_ro("roi_count", &mind_sim::macro::sim::ExposureRecord::roi_count)
-        .def_ro("exposure_count", &mind_sim::macro::sim::ExposureRecord::exposure_count)
-        .def_ro("roi_indices", &mind_sim::macro::sim::ExposureRecord::roi_indices)
-        .def_ro("values", &mind_sim::macro::sim::ExposureRecord::values)
+    nb::class_<NetworkBuilder>(m, "_NetworkBuilder")
+        .def(nb::init<Connectivity>(),
+             nb::arg("connectivity"))
+        .def("roi",
+             nb::overload_cast<int>(&NetworkBuilder::roi, nb::const_),
+             nb::arg("index"))
+        .def("roi",
+             nb::overload_cast<const std::string&>(&NetworkBuilder::roi, nb::const_),
+             nb::arg("label"))
+        .def("rois", &NetworkBuilder::rois)
+        .def("roi_count", &NetworkBuilder::roi_count)
+        .def("min_positive_delay", &NetworkBuilder::min_positive_delay)
+        .def("record_rois", &NetworkBuilder::record_rois, nb::arg("roi_indices"))
+        .def("record_all_rois", &NetworkBuilder::record_all_rois)
+        .def("record_outputs", &NetworkBuilder::record_outputs, nb::arg("output_names"))
+        .def("record_all_outputs", &NetworkBuilder::record_all_outputs)
+        .def("set_dt", &NetworkBuilder::set_dt, nb::arg("dt"))
+        .def("set_exchange_window",
+             &NetworkBuilder::set_exchange_window,
+             nb::arg("exchange_window"))
+        .def("load_mech",
+             &NetworkBuilder::load_mech,
+             nb::arg("directory"))
+        .def("set_dc_input",
+             &NetworkBuilder::set_dc_input,
+             nb::arg("roi"),
+             nb::arg("values"))
+        .def("use_region",
+             &NetworkBuilder::use_region,
+             nb::arg("roi"),
+             nb::arg("library_path"),
+             nb::arg("initial_state") = std::unordered_map<std::string, double>{},
+             nb::arg("params") = std::unordered_map<std::string, double>{})
+        .def("use_neural_field",
+             &NetworkBuilder::use_neural_field,
+             nb::arg("name"),
+             nb::arg("library_path"),
+             nb::arg("node_map"),
+             nb::arg("local"),
+             nb::arg("initial_state") = std::unordered_map<std::string, double>{},
+             nb::arg("params") = std::unordered_map<std::string, double>{})
+        .def("macro2macro",
+             &NetworkBuilder::macro2macro,
+             nb::arg("source_roi"),
+             nb::arg("target_roi"),
+             nb::arg("library_path"),
+             nb::arg("params") = std::unordered_map<std::string, double>{})
+        .def("use_micro",
+             nb::overload_cast<int>(&NetworkBuilder::use_micro),
+             nb::arg("roi"))
+        .def("macro2micro",
+             &NetworkBuilder::macro2micro,
+             nb::arg("roi"),
+             nb::arg("library_path"),
+             nb::arg("gid"),
+             nb::arg("target"),
+             nb::arg("weight"),
+             nb::arg("delay"),
+             nb::arg("state") = std::unordered_map<std::string, double>{},
+             nb::arg("params") = std::unordered_map<std::string, double>{})
+        .def("micro2macro",
+             &NetworkBuilder::micro2macro,
+             nb::arg("roi"),
+             nb::arg("library_path"),
+             nb::arg("state") = std::unordered_map<std::string, double>{},
+             nb::arg("params") = std::unordered_map<std::string, double>{})
+        .def("build", &NetworkBuilder::build);
+
+    nb::class_<MacroConfig>(m, "_MacroConfig")
+        .def("load_mech", &MacroConfig::load_mech, nb::arg("directory"))
+        .def("dt", &MacroConfig::set_dt, nb::arg("dt"))
+        .def("exchange_window",
+             &MacroConfig::set_exchange_window,
+             nb::arg("exchange_window"))
+        .def("apply", &MacroConfig::apply, nb::arg("builder"));
+    static MacroConfig macro_config;
+    m.attr("_macro_config") = nb::cast(&macro_config);
+
+    nb::class_<mind_sim::macro::sim::RecordTable>(m, "RecordTable")
+        .def_ro("roi_count", &mind_sim::macro::sim::RecordTable::roi_count)
+        .def_ro("output_count", &mind_sim::macro::sim::RecordTable::output_count)
+        .def_ro("roi_indices", &mind_sim::macro::sim::RecordTable::roi_indices)
+        .def_ro("output_indices", &mind_sim::macro::sim::RecordTable::output_indices)
+        .def_ro("values", &mind_sim::macro::sim::RecordTable::values)
         .def_prop_ro("recorded_roi_count",
-                     &mind_sim::macro::sim::ExposureRecord::recorded_roi_count)
-        .def_prop_ro("sample_count", &mind_sim::macro::sim::ExposureRecord::sample_count);
+                     &mind_sim::macro::sim::RecordTable::recorded_roi_count)
+        .def_prop_ro("recorded_output_count",
+                     &mind_sim::macro::sim::RecordTable::recorded_output_count)
+        .def_prop_ro("sample_count", &mind_sim::macro::sim::RecordTable::sample_count);
 
     nb::class_<mind_sim::macro::sim::MacroSimulationResult>(m, "MacroSimulationResult")
         .def_ro("times", &mind_sim::macro::sim::MacroSimulationResult::times)
-        .def_ro("exposures", &mind_sim::macro::sim::MacroSimulationResult::exposures)
+        .def_ro("records", &mind_sim::macro::sim::MacroSimulationResult::records)
         .def("save_h5",
              &mind_sim::io::save_macro_result_h5,
              nb::arg("path"),
-             nb::arg("exposure_names"),
+             nb::arg("output_names"),
              nb::arg("roi_labels"),
              nb::arg("timing_s") = std::vector<double>{},
              nb::arg("metadata") = std::vector<double>{});
@@ -229,31 +320,35 @@ void bind_macro(nb::module_& m) {
     nb::class_<MacroRuntime>(m, "MacroRuntime")
         .def(nb::init<Network>(), nb::arg("network"))
         .def("run",
-             &MacroRuntime::run,
+             nb::overload_cast<double>(&MacroRuntime::run),
              nb::arg("t_stop"),
-             nb::arg("dt_macro"),
              nb::call_guard<nb::gil_scoped_release>());
+
+    nb::class_<mind_sim::micro::sim::MicroSpikeTable>(m, "MicroSpikeTable")
+        .def_ro("time", &mind_sim::micro::sim::MicroSpikeTable::time)
+        .def_ro("gid", &mind_sim::micro::sim::MicroSpikeTable::gid)
+        .def_prop_ro("size", &mind_sim::micro::sim::MicroSpikeTable::size);
+
+    nb::class_<mind_sim::micro::sim::MicroEventTable>(m, "MicroEventTable")
+        .def_ro("time", &mind_sim::micro::sim::MicroEventTable::time)
+        .def_ro("index", &mind_sim::micro::sim::MicroEventTable::index)
+        .def_prop_ro("size", &mind_sim::micro::sim::MicroEventTable::size);
 
     nb::class_<mind_sim::cosim::SimulationResult>(m, "SimulationResult")
         .def_ro("times", &mind_sim::cosim::SimulationResult::times)
-        .def_ro("exposures", &mind_sim::cosim::SimulationResult::exposures)
-        .def_ro("micro_spikes_by_roi", &mind_sim::cosim::SimulationResult::micro_spikes_by_roi)
+        .def_ro("records", &mind_sim::cosim::SimulationResult::records)
         .def("save_h5",
              &mind_sim::io::save_cosim_result_h5,
              nb::arg("path"),
-             nb::arg("exposure_names"),
+             nb::arg("output_names"),
              nb::arg("roi_labels"),
-             nb::arg("spike_roi"),
              nb::arg("timing_s") = std::vector<double>{},
              nb::arg("metadata") = std::vector<double>{});
 
     nb::class_<mind_sim::cosim::Simulator>(m, "Simulator")
-        .def(nb::init<Network, double, double, double, bool>(),
+        .def(nb::init<Network, std::uint64_t>(),
              nb::arg("network"),
-             nb::arg("dt_micro"),
-             nb::arg("dt_macro"),
-             nb::arg("exchange_window"),
-             nb::arg("record_micro_spikes"))
+             nb::arg("macro2micro_seed") = 1)
         .def("run",
              &mind_sim::cosim::Simulator::run,
              nb::arg("t_stop"),

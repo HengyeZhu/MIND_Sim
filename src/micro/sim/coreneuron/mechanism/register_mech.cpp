@@ -7,6 +7,7 @@
 */
 
 #include <cstring>
+#include <cstdlib>
 
 #include "coreneuron/nrnconf.h"
 #include "nrnoc/ion_semantics.h"
@@ -465,12 +466,8 @@ void _nrn_setdata_reg(int i, void (*call)(double*, Datum*)) {
 }
 
 Memb_func::~Memb_func() {
-    if (sym != nullptr) {
-        free(sym);
-    }
-    if (dparam_semantics != nullptr) {
-        free(dparam_semantics);
-    }
+    std::free(sym);
+    std::free(dparam_semantics);
 }
 
 }  // namespace coreneuron

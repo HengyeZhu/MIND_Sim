@@ -14,8 +14,8 @@ void Network::use_neural_field(
     LocalConnectivity local_connectivity,
     std::vector<double> state_soa,
     std::vector<double> params,
-    std::vector<int> read_input_offsets,
-    std::vector<FieldExposureReducer> reducers) {
+    std::vector<int> target_input_offsets,
+    std::vector<FieldOutputReducer> reducers) {
     if (name.empty()) {
         throw std::runtime_error("Network.use_neural_field requires a non-empty field name");
     }
@@ -27,8 +27,8 @@ void Network::use_neural_field(
             throw std::runtime_error("neural field name is already used: " + name);
         }
     }
-    if (read_input_offsets.size() != static_cast<std::size_t>(rule->input_count())) {
-        throw std::runtime_error("NeuralFieldRule READ offset count does not match rule");
+    if (target_input_offsets.size() != static_cast<std::size_t>(rule->input_count())) {
+        throw std::runtime_error("NeuralFieldRule target input offset count does not match rule");
     }
     const auto& node_to_roi = node_map.node_to_roi();
     const auto& node_weights = node_map.node_weights();
@@ -62,7 +62,7 @@ void Network::use_neural_field(
         .state_soa = std::move(state_soa),
         .previous_state_soa = std::move(previous_state_soa),
         .params = std::move(params),
-        .read_input_offsets = std::move(read_input_offsets),
+        .target_input_offsets = std::move(target_input_offsets),
         .reducers = std::move(reducer_plan),
         .owned_rois = std::move(mapping.owned_rois),
     });
@@ -118,12 +118,12 @@ Network::FieldMappingInfo Network::build_field_mapping(
         info.roi_node_offsets.push_back(info.roi_node_offsets.back() + node_count_for_roi);
     }
 
-    auto write_positions = info.roi_node_offsets;
+    auto fill_positions = info.roi_node_offsets;
     for (std::size_t node = 0; node < node_to_roi.size(); ++node) {
         const int roi = node_to_roi[node];
         const int position = owner_position_by_roi[static_cast<std::size_t>(roi)];
         const auto slot = static_cast<std::size_t>(
-            write_positions[static_cast<std::size_t>(position)]++);
+            fill_positions[static_cast<std::size_t>(position)]++);
         info.roi_nodes[slot] = static_cast<int>(node);
         info.roi_node_weights[slot] =
             node_weights[node] / roi_weight_sum[static_cast<std::size_t>(roi)];
@@ -158,15 +158,15 @@ void Network::validate_field_local_connectivity(const std::vector<int>& local_in
     }
 }
 
-std::vector<FieldExposurePlan> Network::build_field_reducers(
-    std::vector<FieldExposureReducer> reducers,
+std::vector<FieldOutputPlan> Network::build_field_reducers(
+    std::vector<FieldOutputReducer> reducers,
     const mind_sim::macro::sim::NeuralFieldRule& rule,
     int node_count) const {
     if (reducers.empty()) {
-        throw std::runtime_error("neural field requires at least one ROI exposure reducer");
+        throw std::runtime_error("neural field requires at least one ROI output reducer");
     }
-    std::vector<unsigned char> exposure_seen(static_cast<std::size_t>(exposure_count()), 0);
-    std::vector<FieldExposurePlan> plan;
+    std::vector<unsigned char> output_seen(static_cast<std::size_t>(output_count()), 0);
+    std::vector<FieldOutputPlan> plan;
     plan.reserve(reducers.size());
     const auto node_stride = static_cast<std::size_t>(node_count);
     const auto roi_stride = static_cast<std::size_t>(roi_count());
@@ -174,17 +174,17 @@ std::vector<FieldExposurePlan> Network::build_field_reducers(
         if (reducer.state_index < 0 || reducer.state_index >= rule.state_count()) {
             throw std::runtime_error("neural field reducer state index out of range");
         }
-        if (reducer.exposure_index < 0 || reducer.exposure_index >= exposure_count()) {
-            throw std::runtime_error("neural field reducer exposure index out of range");
+        if (reducer.output_index < 0 || reducer.output_index >= output_count()) {
+            throw std::runtime_error("neural field reducer output index out of range");
         }
-        const auto exposure_index = static_cast<std::size_t>(reducer.exposure_index);
-        if (exposure_seen[exposure_index] != 0) {
-            throw std::runtime_error("neural field reducers must write unique exposures");
+        const auto output_index = static_cast<std::size_t>(reducer.output_index);
+        if (output_seen[output_index] != 0) {
+            throw std::runtime_error("neural field reducers must target unique outputs");
         }
-        exposure_seen[exposure_index] = 1;
-        plan.push_back(FieldExposurePlan{
+        output_seen[output_index] = 1;
+        plan.push_back(FieldOutputPlan{
             .state_offset = static_cast<std::size_t>(reducer.state_index) * node_stride,
-            .exposure_offset = exposure_index * roi_stride,
+            .output_offset = output_index * roi_stride,
         });
     }
     return plan;

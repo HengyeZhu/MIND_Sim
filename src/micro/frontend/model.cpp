@@ -615,10 +615,10 @@ void MicroFrontendModel::set_device(const std::string& device) {
     runtime_backend_.reset();
 }
 
-void MicroFrontendModel::load_mech_metadata(std::string path) {
-    mechanism_catalog_.load_metadata_path(path);
+void MicroFrontendModel::load_mech(std::string path) {
+    mechanism_catalog_.load_mech_path(path);
     refresh_mechanism_runtime_cache();
-    loaded_mech_metadata_paths_.push_back(std::move(path));
+    loaded_mech_paths_.push_back(std::move(path));
 }
 
 int MicroFrontendModel::ion_register(std::string ion, double charge) {

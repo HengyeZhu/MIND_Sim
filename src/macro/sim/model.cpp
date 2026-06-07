@@ -21,17 +21,17 @@ void validate_vector_size(const std::vector<double>& values, int expected, const
     }
 }
 
-const mind_sim::mind_mod::AbiRuleDescriptor& descriptor_of(
+const mind_sim::mod::AbiRuleDescriptor& descriptor_of(
     const mind_sim::utils::DynamicLibrary& library,
-    mind_sim::mind_mod::AbiRuleKind expected,
+    mind_sim::mod::AbiRuleKind expected,
     const char* what) {
     const auto descriptor_fn =
-        reinterpret_cast<mind_sim::mind_mod::DescriptorFn>(library.symbol("mind_rule_descriptor"));
+        reinterpret_cast<mind_sim::mod::DescriptorFn>(library.symbol("mind_rule_descriptor"));
     const auto* descriptor = descriptor_fn();
     if (!descriptor) {
         throw std::runtime_error(std::string(what) + " has null descriptor");
     }
-    if (descriptor->abi_version != mind_sim::mind_mod::kMindModAbiVersion) {
+    if (descriptor->abi_version != mind_sim::mod::kModAbiVersion) {
         throw std::runtime_error(std::string(what) + " ABI version mismatch");
     }
     if (descriptor->kind != static_cast<int>(expected)) {
@@ -53,21 +53,46 @@ int descriptor_name_index(int count, const char* const* names, const char* targe
                              target);
 }
 
+std::vector<std::string> descriptor_names(int count, const char* const* names) {
+    std::vector<std::string> out;
+    out.reserve(static_cast<std::size_t>(count));
+    for (int index = 0; index < count; ++index) {
+        out.emplace_back(names[index]);
+    }
+    return out;
+}
+
+std::vector<double> descriptor_defaults(int count, const double* values) {
+    std::vector<double> out;
+    out.reserve(static_cast<std::size_t>(count));
+    for (int index = 0; index < count; ++index) {
+        out.push_back(values[index]);
+    }
+    return out;
+}
+
 }  // namespace
 
 RegionRule::RegionRule(std::string library_path)
     : library_(mind_sim::utils::load_dynamic_library(std::move(library_path))),
-      step_(reinterpret_cast<mind_sim::mind_mod::RegionApplyFn>(
+      step_(reinterpret_cast<mind_sim::mod::RegionApplyFn>(
           library_->symbol("mind_region_rule_apply"))) {
     const auto& descriptor =
-        descriptor_of(*library_, mind_sim::mind_mod::AbiRuleKind::Region, "RegionRule");
+        descriptor_of(*library_, mind_sim::mod::AbiRuleKind::Region, "RegionRule");
     name_ = descriptor.name;
-    input_count_ = descriptor.read_count;
-    exposure_count_ = descriptor.write_count;
+    input_count_ = descriptor.target_input_count;
+    output_count_ = descriptor.source_exposure_count;
     state_count_ = descriptor.state_count;
     param_count_ = descriptor.param_count;
-    if (exposure_count_ == 0) {
-        throw std::runtime_error("RegionRule exposure_count must be positive");
+    target_input_names_ = descriptor_names(descriptor.target_input_count, descriptor.target_input_names);
+    source_exposure_names_ =
+        descriptor_names(descriptor.source_exposure_count, descriptor.source_exposure_names);
+    state_names_ = descriptor_names(descriptor.state_count, descriptor.state_names);
+    state_defaults_ = descriptor_defaults(descriptor.state_count, descriptor.state_defaults);
+    param_names_ = descriptor_names(descriptor.param_count, descriptor.param_names);
+    param_defaults_ = descriptor_defaults(descriptor.param_count, descriptor.param_defaults);
+    if (output_count_ == 0) {
+        throw std::runtime_error("RegionRule output_count must be positive");
     }
 }
 
@@ -79,8 +104,8 @@ int RegionRule::input_count() const noexcept {
     return input_count_;
 }
 
-int RegionRule::exposure_count() const noexcept {
-    return exposure_count_;
+int RegionRule::output_count() const noexcept {
+    return output_count_;
 }
 
 int RegionRule::state_count() const noexcept {
@@ -95,6 +120,30 @@ const std::string& RegionRule::library_path() const noexcept {
     return library_->path();
 }
 
+const std::vector<std::string>& RegionRule::target_input_names() const noexcept {
+    return target_input_names_;
+}
+
+const std::vector<std::string>& RegionRule::source_exposure_names() const noexcept {
+    return source_exposure_names_;
+}
+
+const std::vector<std::string>& RegionRule::state_names() const noexcept {
+    return state_names_;
+}
+
+const std::vector<double>& RegionRule::state_defaults() const noexcept {
+    return state_defaults_;
+}
+
+const std::vector<std::string>& RegionRule::param_names() const noexcept {
+    return param_names_;
+}
+
+const std::vector<double>& RegionRule::param_defaults() const noexcept {
+    return param_defaults_;
+}
+
 void RegionRule::validate_state(const std::vector<double>& state) const {
     validate_vector_size(state, state_count_, "RegionRule state");
 }
@@ -106,27 +155,27 @@ void RegionRule::validate_params(const std::vector<double>& params) const {
 void RegionRule::step_group(const std::vector<int>& roi_indices,
                             int roi_count,
                             const std::vector<double>& input_soa,
-                            std::vector<double>& exposure_soa,
+                            std::vector<double>& output_soa,
                             std::vector<double>& state_soa,
                             const std::vector<double>& params_soa,
-                            const std::vector<int>& read_input_offsets,
-                            const std::vector<int>& write_exposure_offsets,
+                            const std::vector<int>& target_input_offsets,
+                            const std::vector<int>& source_exposure_offsets,
                             double t,
                             double dt) const {
-    mind_sim::mind_mod::AbiRegionContext context{
+    mind_sim::mod::AbiRegionContext context{
         .owner_count = static_cast<int>(roi_indices.size()),
         .roi_indices = roi_indices.data(),
         .roi_count = roi_count,
         .input_count = input_count_,
         .input_soa = input_soa.data(),
-        .exposure_count = exposure_count_,
-        .exposure_soa = exposure_soa.data(),
+        .exposure_count = output_count_,
+        .exposure_soa = output_soa.data(),
         .state_count = state_count_,
         .state_soa = state_soa.data(),
         .param_count = param_count_,
         .params_soa = params_soa.data(),
-        .read_input_offsets = read_input_offsets.data(),
-        .write_exposure_offsets = write_exposure_offsets.data(),
+        .target_input_offsets = target_input_offsets.data(),
+        .source_exposure_offsets = source_exposure_offsets.data(),
         .t = t,
         .dt = dt,
     };
@@ -135,14 +184,22 @@ void RegionRule::step_group(const std::vector<int>& roi_indices,
 
 NeuralFieldRule::NeuralFieldRule(std::string library_path)
     : library_(mind_sim::utils::load_dynamic_library(std::move(library_path))),
-      step_(reinterpret_cast<mind_sim::mind_mod::NeuralFieldApplyFn>(
+      step_(reinterpret_cast<mind_sim::mod::NeuralFieldApplyFn>(
           library_->symbol("mind_neural_field_rule_apply"))) {
     const auto& descriptor =
-        descriptor_of(*library_, mind_sim::mind_mod::AbiRuleKind::NeuralField, "NeuralFieldRule");
+        descriptor_of(*library_, mind_sim::mod::AbiRuleKind::NeuralField, "NeuralFieldRule");
     name_ = descriptor.name;
-    input_count_ = descriptor.read_count;
+    input_count_ = descriptor.target_input_count;
     state_count_ = descriptor.state_count;
     param_count_ = descriptor.param_count;
+    target_input_names_ = descriptor_names(descriptor.target_input_count, descriptor.target_input_names);
+    source_exposure_names_ =
+        descriptor_names(descriptor.source_exposure_count, descriptor.source_exposure_names);
+    state_names_ = descriptor_names(descriptor.state_count, descriptor.state_names);
+    state_defaults_ = descriptor_defaults(descriptor.state_count, descriptor.state_defaults);
+    param_names_ = descriptor_names(descriptor.param_count, descriptor.param_names);
+    param_defaults_ = descriptor_defaults(descriptor.param_count, descriptor.param_defaults);
+    local_state_names_ = descriptor_names(descriptor.local_state_count, descriptor.local_state_names);
     if (state_count_ == 0) {
         throw std::runtime_error("NeuralFieldRule state_count must be positive");
     }
@@ -174,6 +231,34 @@ const std::string& NeuralFieldRule::library_path() const noexcept {
     return library_->path();
 }
 
+const std::vector<std::string>& NeuralFieldRule::target_input_names() const noexcept {
+    return target_input_names_;
+}
+
+const std::vector<std::string>& NeuralFieldRule::source_exposure_names() const noexcept {
+    return source_exposure_names_;
+}
+
+const std::vector<std::string>& NeuralFieldRule::state_names() const noexcept {
+    return state_names_;
+}
+
+const std::vector<double>& NeuralFieldRule::state_defaults() const noexcept {
+    return state_defaults_;
+}
+
+const std::vector<std::string>& NeuralFieldRule::param_names() const noexcept {
+    return param_names_;
+}
+
+const std::vector<double>& NeuralFieldRule::param_defaults() const noexcept {
+    return param_defaults_;
+}
+
+const std::vector<std::string>& NeuralFieldRule::local_state_names() const noexcept {
+    return local_state_names_;
+}
+
 void NeuralFieldRule::validate_state(const std::vector<double>& state, int node_count) const {
     if (node_count <= 0) {
         throw std::runtime_error("NeuralFieldRule node_count must be positive");
@@ -195,7 +280,7 @@ void NeuralFieldRule::step(int node_count,
                            const std::vector<int>& local_indptr,
                            const std::vector<int>& local_indices,
                            const std::vector<double>& local_weights,
-                           const std::vector<int>& read_input_offsets,
+                           const std::vector<int>& target_input_offsets,
                            double t,
                            double dt) const {
     const auto node_stride = static_cast<std::size_t>(node_count);
@@ -205,7 +290,7 @@ void NeuralFieldRule::step(int node_count,
                     node_stride,
                     previous_state_soa.begin() + static_cast<std::ptrdiff_t>(offset));
     }
-    mind_sim::mind_mod::AbiNeuralFieldContext context{
+    mind_sim::mod::AbiNeuralFieldContext context{
         .node_count = node_count,
         .node_to_roi = node_to_roi.data(),
         .roi_count = roi_count,
@@ -219,74 +304,95 @@ void NeuralFieldRule::step(int node_count,
         .local_indptr = local_indptr.data(),
         .local_indices = local_indices.data(),
         .local_weights = local_weights.data(),
-        .read_input_offsets = read_input_offsets.data(),
+        .target_input_offsets = target_input_offsets.data(),
         .t = t,
         .dt = dt,
     };
     step_(&context);
 }
 
-CouplingRule::CouplingRule(std::string name,
+MacroToMacroRule::MacroToMacroRule(std::string name,
                            std::string library_path,
                            int input_count,
-                           int exposure_count,
+                           int output_count,
                            int param_count)
     : name_(std::move(name)),
       library_(mind_sim::utils::load_dynamic_library(std::move(library_path))),
-      apply_(reinterpret_cast<decltype(apply_)>(library_->symbol("mind_coupling_rule_apply"))),
+      apply_(reinterpret_cast<decltype(apply_)>(library_->symbol("mind_macro_to_macro_rule_apply"))),
       input_count_(input_count),
-      exposure_count_(exposure_count),
+      output_count_(output_count),
       param_count_(param_count) {
     if (name_.empty()) {
-        throw std::runtime_error("CouplingRule name must be non-empty");
+        throw std::runtime_error("MacroToMacroRule name must be non-empty");
     }
-    validate_count(input_count_, "CouplingRule input_count");
-    validate_count(exposure_count_, "CouplingRule exposure_count");
-    validate_count(param_count_, "CouplingRule param_count");
-    if (exposure_count_ == 0) {
-        throw std::runtime_error("CouplingRule exposure_count must be positive");
+    validate_count(input_count_, "MacroToMacroRule input_count");
+    validate_count(output_count_, "MacroToMacroRule output_count");
+    validate_count(param_count_, "MacroToMacroRule param_count");
+    if (output_count_ == 0) {
+        throw std::runtime_error("MacroToMacroRule output_count must be positive");
     }
 }
 
-CouplingRule::CouplingRule(std::string library_path)
+MacroToMacroRule::MacroToMacroRule(std::string library_path)
     : library_(mind_sim::utils::load_dynamic_library(std::move(library_path))),
-      apply_(reinterpret_cast<mind_sim::mind_mod::CouplingApplyFn>(
-          library_->symbol("mind_coupling_rule_apply"))) {
+      apply_(reinterpret_cast<mind_sim::mod::MacroToMacroApplyFn>(
+          library_->symbol("mind_macro_to_macro_rule_apply"))) {
     const auto& descriptor =
-        descriptor_of(*library_, mind_sim::mind_mod::AbiRuleKind::Coupling, "CouplingRule");
+        descriptor_of(*library_, mind_sim::mod::AbiRuleKind::MacroToMacro, "MacroToMacroRule");
     name_ = descriptor.name;
-    input_count_ = descriptor.write_count;
-    exposure_count_ = descriptor.read_count;
+    input_count_ = descriptor.target_input_count;
+    output_count_ = descriptor.source_exposure_count;
     param_count_ = descriptor.param_count;
+    source_exposure_names_ =
+        descriptor_names(descriptor.source_exposure_count, descriptor.source_exposure_names);
+    target_input_names_ = descriptor_names(descriptor.target_input_count, descriptor.target_input_names);
+    param_names_ = descriptor_names(descriptor.param_count, descriptor.param_names);
+    param_defaults_ = descriptor_defaults(descriptor.param_count, descriptor.param_defaults);
 }
 
-const std::string& CouplingRule::name() const noexcept {
+const std::string& MacroToMacroRule::name() const noexcept {
     return name_;
 }
 
-int CouplingRule::input_count() const noexcept {
+int MacroToMacroRule::input_count() const noexcept {
     return input_count_;
 }
 
-int CouplingRule::exposure_count() const noexcept {
-    return exposure_count_;
+int MacroToMacroRule::output_count() const noexcept {
+    return output_count_;
 }
 
-int CouplingRule::param_count() const noexcept {
+int MacroToMacroRule::param_count() const noexcept {
     return param_count_;
 }
 
-const std::string& CouplingRule::library_path() const noexcept {
+const std::string& MacroToMacroRule::library_path() const noexcept {
     return library_->path();
 }
 
-void CouplingRule::validate_params(const std::vector<double>& params) const {
-    validate_vector_size(params, param_count_, "CouplingRule params");
+const std::vector<std::string>& MacroToMacroRule::source_exposure_names() const noexcept {
+    return source_exposure_names_;
 }
 
-void CouplingRule::apply_flat(int roi_count,
+const std::vector<std::string>& MacroToMacroRule::target_input_names() const noexcept {
+    return target_input_names_;
+}
+
+const std::vector<std::string>& MacroToMacroRule::param_names() const noexcept {
+    return param_names_;
+}
+
+const std::vector<double>& MacroToMacroRule::param_defaults() const noexcept {
+    return param_defaults_;
+}
+
+void MacroToMacroRule::validate_params(const std::vector<double>& params) const {
+    validate_vector_size(params, param_count_, "MacroToMacroRule params");
+}
+
+void MacroToMacroRule::apply_flat(int roi_count,
                               int input_count,
-                              int exposure_count,
+                              int output_count,
                               int history_capacity,
                               int step,
                               const std::vector<int>& target_indices,
@@ -298,12 +404,12 @@ void CouplingRule::apply_flat(int roi_count,
                               const std::vector<double>& history,
                               std::vector<double>& inputs,
                               const std::vector<double>& params,
-                              const std::vector<int>& read_exposure_offsets,
-                              const std::vector<int>& write_input_offsets) const {
-    mind_sim::mind_mod::AbiCouplingContext context{
+                              const std::vector<int>& source_exposure_offsets,
+                              const std::vector<int>& target_input_offsets) const {
+    mind_sim::mod::AbiMacroToMacroContext context{
         .roi_count = roi_count,
         .input_count = input_count,
-        .exposure_count = exposure_count,
+        .exposure_count = output_count,
         .history_capacity = history_capacity,
         .step = step,
         .target_count = static_cast<int>(target_indices.size()),
@@ -317,8 +423,8 @@ void CouplingRule::apply_flat(int roi_count,
         .inputs = inputs.data(),
         .param_count = param_count_,
         .params = params.data(),
-        .read_exposure_offsets = read_exposure_offsets.data(),
-        .write_input_offsets = write_input_offsets.data(),
+        .source_exposure_offsets = source_exposure_offsets.data(),
+        .target_input_offsets = target_input_offsets.data(),
     };
     apply_(&context);
 }

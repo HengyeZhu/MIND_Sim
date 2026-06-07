@@ -80,12 +80,8 @@ struct Memb_func {
     }
     Memb_func& operator=(Memb_func&& other) noexcept {
         if (this != &other) {
-            if (sym != nullptr) {
-                free(sym);
-            }
-            if (dparam_semantics != nullptr) {
-                free(dparam_semantics);
-            }
+            std::free(sym);
+            std::free(dparam_semantics);
             alloc = other.alloc;
             current = other.current;
             jacob = other.jacob;

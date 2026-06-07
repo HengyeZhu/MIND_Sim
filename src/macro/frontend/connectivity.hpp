@@ -18,6 +18,8 @@ class Connectivity {
                  std::vector<std::vector<double>> weights,
                  std::vector<std::vector<double>> delays);
 
+    [[nodiscard]] static Connectivity from_csv(const std::string& path);
+
     [[nodiscard]] int roi_count() const noexcept;
     [[nodiscard]] const std::vector<ROI>& rois() const noexcept;
     [[nodiscard]] const std::vector<std::string>& labels() const noexcept;

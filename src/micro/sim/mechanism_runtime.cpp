@@ -10,13 +10,11 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstdlib>
 #include <dlfcn.h>
 #include <filesystem>
 #include <map>
 #include <optional>
 #include <set>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -43,10 +41,14 @@ std::vector<mind_sim::micro::sim::CoreDParamBinding> g_dparam_bindings;
 std::unordered_map<std::string, std::unordered_map<std::string, double*>> g_global_scalars;
 std::unordered_map<std::string, double*> g_global_scalars_by_name;
 std::unordered_map<std::string, std::vector<double>> g_parameter_defaults_by_mechanism;
+std::unordered_map<std::string,
+                   std::unordered_map<std::string, neuron::mechanism::field_role>>
+    g_registered_field_roles_by_mechanism;
 std::unordered_map<std::string, std::vector<neuron::mechanism::detail::data_field_info>>
     g_neuron_side_fields_by_mechanism;
 std::unordered_map<std::string, std::vector<neuron::mechanism::detail::dparam_field_info>>
     g_neuron_side_dparam_fields_by_mechanism;
+std::unordered_map<std::string, std::vector<std::string>> g_dparam_semantics_by_mechanism;
 std::vector<int> g_memb_order;
 std::vector<int> g_memb_order_rank_by_type;
 int g_memb_order_lastion = EXTRACELL + 1;
@@ -59,10 +61,12 @@ struct LoadedMechanismLibrary {
     void* handle{nullptr};
     void (*modl_reg)(){nullptr};
     bool registered{false};
+    std::vector<int> mechanism_types{};
 };
 
 std::vector<LoadedMechanismLibrary> g_loaded_libraries;
 std::set<std::filesystem::path> g_loaded_library_paths;
+LoadedMechanismLibrary* g_active_loaded_library = nullptr;
 
 [[nodiscard]] std::string trim(std::string_view value) {
     std::size_t begin = 0;
@@ -239,156 +243,26 @@ struct MechanismArtifactPath {
     std::filesystem::path library_path{};
 };
 
-[[nodiscard]] bool has_mod_sources(const std::filesystem::path& dir) {
-    if (!std::filesystem::is_directory(dir)) {
-        return false;
-    }
-    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
-        if (entry.is_regular_file() && entry.path().extension() == ".mod") {
-            return true;
-        }
-    }
-    return false;
-}
-
-[[nodiscard]] std::string shell_quote(const std::filesystem::path& path) {
-    std::string quoted = "'";
-    for (char c : path.string()) {
-        if (c == '\'') {
-            quoted += "'\\''";
-        } else {
-            quoted += c;
-        }
-    }
-    quoted += "'";
-    return quoted;
-}
-
-[[nodiscard]] std::string shell_quote(std::string_view value) {
-    std::string quoted = "'";
-    for (char c : value) {
-        if (c == '\'') {
-            quoted += "'\\''";
-        } else {
-            quoted += c;
-        }
-    }
-    quoted += "'";
-    return quoted;
-}
-
-void append_file_signature(std::ostringstream& out, const std::filesystem::path& path) {
-    std::error_code ec;
-    out << path.string() << '\n';
-    out << std::filesystem::file_size(path, ec) << '\n';
-    ec.clear();
-    out << std::filesystem::last_write_time(path, ec).time_since_epoch().count() << '\n';
-}
-
-[[nodiscard]] std::string mechanism_source_signature(const std::filesystem::path& path) {
-    std::ostringstream out;
-    out << path.string() << '\n';
-    out << MIND_SIM_CXX_COMPILER << '\n';
-    out << MIND_SIM_MODCC_BACKEND << '\n';
-    out << MIND_SIM_MODCC_CXX_FLAGS << '\n';
-    out << MIND_SIM_MODCC_LINK_FLAGS << '\n';
-    append_file_signature(out, MIND_SIM_MODCC);
-    append_file_signature(out, MIND_SIM_NMODL_EXECUTABLE);
-    append_file_signature(out,
-                          std::filesystem::path{MIND_SIM_NMODL_SOURCE_DIR} /
-                              "src/nmodl/codegen/codegen_coreneuron_cpp_visitor.cpp");
-    append_file_signature(out,
-                          std::filesystem::path{MIND_SIM_NMODL_SOURCE_DIR} /
-                              "src/nmodl/codegen/codegen_info.hpp");
-    append_file_signature(out,
-                          std::filesystem::path{MIND_SIM_MECHANISM_INCLUDE_DIR} /
-                              "coreneuron/mechanism/neuron_registration.hpp");
-    if (std::filesystem::is_regular_file(path)) {
-        out << std::filesystem::file_size(path) << '\n'
-            << std::filesystem::last_write_time(path).time_since_epoch().count() << '\n';
-        return out.str();
-    }
-    for (const auto& entry : std::filesystem::directory_iterator(path)) {
-        if (!entry.is_regular_file() || entry.path().extension() != ".mod") {
-            continue;
-        }
-        out << entry.path().filename().string() << '\n'
-            << entry.file_size() << '\n'
-            << entry.last_write_time().time_since_epoch().count() << '\n';
-    }
-    return out.str();
-}
-
-[[nodiscard]] std::filesystem::path compile_mod_sources(const std::filesystem::path& path) {
-    const auto signature = mechanism_source_signature(path);
-    const auto hash = std::hash<std::string>{}(signature);
-    std::ostringstream name;
-    name << "mind_sim_mechanisms_" << std::hex << hash;
-    const auto build_dir = std::filesystem::temp_directory_path() / name.str();
-    const auto library = build_dir / "libmindcorenrnmech.so";
-    if (std::filesystem::is_regular_file(library)) {
-        return canonical_existing_path(library);
-    }
-    std::filesystem::create_directories(build_dir);
-
-    std::string command = shell_quote(std::string_view{MIND_SIM_PYTHON_EXECUTABLE}) + " " +
-                          shell_quote(std::string_view{MIND_SIM_MODCC}) + " --nmodl " +
-                          shell_quote(std::string_view{MIND_SIM_NMODL_EXECUTABLE}) + " --cxx " +
-                          shell_quote(std::string_view{MIND_SIM_CXX_COMPILER}) + " --output " +
-                          shell_quote(build_dir) + " --backend " +
-                          shell_quote(std::string_view{MIND_SIM_MODCC_BACKEND}) +
-                          " --cxx-flag=" +
-                          shell_quote(std::string_view{MIND_SIM_MODCC_CXX_FLAGS}) +
-                          " --link-flag=" +
-                          shell_quote(std::string_view{MIND_SIM_MODCC_LINK_FLAGS}) +
-                          " --include " +
-                          shell_quote(std::string_view{MIND_SIM_MECHANISM_INCLUDE_DIR}) +
-                          " --define CORENEURON_BUILD"
-                          " --define CORENRN_BUILD=1"
-                          " --define VECTORIZE=1"
-                          " --define HAVE_MALLOC_H"
-                          " --define EIGEN_DONT_PARALLELIZE"
-                          " --define LAYOUT=0"
-                          " --define ENABLE_SPLAYTREE_QUEUING"
-                          " --define NRNMPI=0"
-                          " --define NRN_MULTISEND=0"
-                          " --define DISABLE_HOC_EXP"
-                          " --define NET_RECEIVE_BUFFERING=0"
-                          " --define NRN_PRCELLSTATE=0"
-#ifdef MIND_SIM_ENABLE_GPU
-                          " --define CORENEURON_ENABLE_GPU"
-#endif
-                          " " +
-                          shell_quote(path);
-    const int status = std::system(command.c_str());
-    if (status != 0) {
-        throw std::runtime_error("MIND_Sim MOD compilation failed for: " + path.string());
-    }
-    return canonical_existing_path(library);
-}
-
 [[nodiscard]] MechanismArtifactPath resolve_mechanism_artifact_path(
     const std::filesystem::path& requested_path) {
     const auto path = canonical_existing_path(requested_path);
     std::filesystem::path library_path;
-    if (std::filesystem::is_regular_file(path) && path.extension() == ".mod") {
-        library_path = compile_mod_sources(path);
-    } else if (std::filesystem::is_regular_file(path) && path.filename() == "libmindcorenrnmech.so") {
+    if (std::filesystem::is_regular_file(path) && path.filename() == "libcorenrnmech.so") {
         library_path = path;
-    } else if (has_mod_sources(path)) {
-        library_path = compile_mod_sources(path);
     } else if (std::filesystem::is_directory(path) &&
-               std::filesystem::is_regular_file(path / "libmindcorenrnmech.so")) {
-        library_path = path / "libmindcorenrnmech.so";
+               std::filesystem::is_regular_file(path / "libcorenrnmech.so")) {
+        library_path = path / "libcorenrnmech.so";
+    } else if (std::filesystem::is_directory(path) &&
+               std::filesystem::is_regular_file(path / "x86_64" / "libcorenrnmech.so")) {
+        library_path = path / "x86_64" / "libcorenrnmech.so";
     } else {
         throw std::runtime_error(
-            "could not find libmindcorenrnmech.so or MOD sources under mechanism path: " +
-            path.string());
+            "could not find CoreNEURON mechanism library libcorenrnmech.so under mechanism path: " +
+            path.string() + "; run nrnivmodl -coreneuron and mind_nrnivmodl on the MOD directory first");
     }
 
-    const auto canonical_library = canonical_existing_path(library_path);
     return MechanismArtifactPath{
-        .library_path = canonical_library,
+        .library_path = canonical_existing_path(library_path),
     };
 }
 
@@ -415,8 +289,12 @@ void promote_this_extension_symbols_to_global() {
 
 [[nodiscard]] std::string normalize_registered_field_name(std::string name,
                                                          std::string_view mechanism) {
-    (void)mechanism;
     name = trim(name);
+    const std::string suffix = "_" + std::string(mechanism);
+    if (name.size() > suffix.size() &&
+        name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        name.resize(name.size() - suffix.size());
+    }
     return name;
 }
 
@@ -454,6 +332,64 @@ void add_or_update_field(mind_sim::micro::sim::CoreRegisteredMechanism& info,
     });
 }
 
+[[nodiscard]] std::vector<neuron::mechanism::detail::data_field_info>
+data_fields_from_mechanism_info(const std::string& mechanism, const char** mechanism_info) {
+    std::vector<neuron::mechanism::detail::data_field_info> fields;
+    if (mechanism.empty() || mechanism_info == nullptr || mechanism_info[2] == nullptr) {
+        return fields;
+    }
+    int section = 0;
+    for (int index = 2; mechanism_info[index] != nullptr || section < 3; ++index) {
+        if (mechanism_info[index] == nullptr) {
+            ++section;
+            if (mechanism_info[index + 1] == nullptr) {
+                break;
+            }
+            continue;
+        }
+        neuron::mechanism::field_role role = neuron::mechanism::field_role::range;
+        if (section == 0) {
+            role = neuron::mechanism::field_role::parameter;
+        } else if (section == 1) {
+            role = neuron::mechanism::field_role::assigned;
+        } else if (section == 2) {
+            role = neuron::mechanism::field_role::state;
+        }
+        fields.push_back(neuron::mechanism::detail::data_field_info{
+            .name = normalize_registered_field_name(mechanism_info[index], mechanism),
+            .array_size = 1,
+            .role = role,
+        });
+    }
+    return fields;
+}
+
+[[nodiscard]] int data_field_scalar_count(
+    const std::vector<neuron::mechanism::detail::data_field_info>& fields) {
+    int count = 0;
+    for (const auto& field : fields) {
+        count += std::max(field.array_size, 1);
+    }
+    return count;
+}
+
+void pad_registered_data_fields_to_prop_size(const std::string& mechanism, int psize) {
+    auto fields_it = g_neuron_side_fields_by_mechanism.find(mechanism);
+    if (fields_it == g_neuron_side_fields_by_mechanism.end() || psize <= 0) {
+        return;
+    }
+    auto& fields = fields_it->second;
+    int offset = data_field_scalar_count(fields);
+    while (offset < psize) {
+        fields.push_back(neuron::mechanism::detail::data_field_info{
+            .name = "__mind_internal_data_" + std::to_string(offset),
+            .array_size = 1,
+            .role = neuron::mechanism::field_role::range,
+        });
+        ++offset;
+    }
+}
+
 [[nodiscard]] mind_sim::micro::sim::CoreMechanismFieldRole role_from_registered_field_role(
     neuron::mechanism::field_role role) {
     using Role = mind_sim::micro::sim::CoreMechanismFieldRole;
@@ -468,6 +404,21 @@ void add_or_update_field(mind_sim::micro::sim::CoreRegisteredMechanism& info,
         return Role::Range;
     }
     return Role::Range;
+}
+
+[[nodiscard]] neuron::mechanism::field_role registered_role_for_field(
+    const std::string& mechanism,
+    const std::string& field,
+    neuron::mechanism::field_role default_role) {
+    const auto mech_it = g_registered_field_roles_by_mechanism.find(mechanism);
+    if (mech_it == g_registered_field_roles_by_mechanism.end()) {
+        return default_role;
+    }
+    const auto field_it = mech_it->second.find(field);
+    if (field_it == mech_it->second.end()) {
+        return default_role;
+    }
+    return field_it->second;
 }
 
 [[nodiscard]] mind_sim::micro::sim::CoreDParamKind dparam_kind_from_semantic(
@@ -506,9 +457,37 @@ void add_or_update_field(mind_sim::micro::sim::CoreRegisteredMechanism& info,
     }
     const auto& info = g_registered_mechanisms[static_cast<std::size_t>(type)];
     if (info.name != ion + "_ion" || info.fields.empty()) {
-        throw std::runtime_error("CoreNEURON ion mechanism metadata is incomplete for: " + ion + "_ion");
+        throw std::runtime_error("CoreNEURON ion mechanism data layout is incomplete for: " + ion + "_ion");
     }
     return info;
+}
+
+[[nodiscard]] std::string infer_ion_target_from_dparam_field(const std::string& field,
+                                                            const std::string& ion) {
+    const std::string prefix = "_ion_";
+    if (!field.starts_with(prefix)) {
+        return {};
+    }
+    const std::string suffix = field.substr(prefix.size());
+    if (suffix == "i" + ion) {
+        return "i" + ion;
+    }
+    if (suffix == "di" + ion + "dv") {
+        return "di" + ion + "_dv_";
+    }
+    if (suffix == "d" + ion + "dv") {
+        return "di" + ion + "_dv_";
+    }
+    if (suffix == ion + "i" || suffix == ion + "o") {
+        return suffix;
+    }
+    if (suffix == ion + "_erev") {
+        return "e" + ion;
+    }
+    if (suffix == "e" + ion) {
+        return suffix;
+    }
+    return suffix;
 }
 
 [[nodiscard]] std::pair<std::string, int> resolve_registered_ion_field(
@@ -562,8 +541,12 @@ void add_or_update_field(mind_sim::micro::sim::CoreRegisteredMechanism& info,
         std::string ion = effective_semantic.substr(0, effective_semantic.size() - 4);
         std::string mechanism_field;
         int ion_field = -1;
-        if (!registered_target.empty()) {
-            auto resolved = resolve_registered_ion_field(ion, registered_target);
+        const std::string target =
+            registered_target.empty()
+                ? infer_ion_target_from_dparam_field(registered_field_name, ion)
+                : registered_target;
+        if (!target.empty()) {
+            auto resolved = resolve_registered_ion_field(ion, target);
             mechanism_field = std::move(resolved.first);
             ion_field = resolved.second;
         }
@@ -605,6 +588,53 @@ void set_dparam_binding(mind_sim::micro::sim::CoreRegisteredMechanism& info,
     info.dparam_bindings[index] = std::move(binding);
 }
 
+void rebuild_dparam_bindings_for(mind_sim::micro::sim::CoreRegisteredMechanism& info) {
+    if (info.name.empty()) {
+        return;
+    }
+    const auto semantics_it = g_dparam_semantics_by_mechanism.find(info.name);
+    if (semantics_it == g_dparam_semantics_by_mechanism.end()) {
+        return;
+    }
+    for (std::size_t index = 0; index < semantics_it->second.size(); ++index) {
+        const auto& semantic = semantics_it->second[index];
+        if (semantic.empty()) {
+            continue;
+        }
+        std::string registered_field_name;
+        std::string registered_semantic;
+        std::string registered_target;
+        int ion_conc_style = 0;
+        int ion_rev_style = 0;
+        bool ion_write_interior = false;
+        bool ion_write_exterior = false;
+        const auto dparam_fields_it = g_neuron_side_dparam_fields_by_mechanism.find(info.name);
+        if (dparam_fields_it != g_neuron_side_dparam_fields_by_mechanism.end() &&
+            index < dparam_fields_it->second.size()) {
+            const auto& field = dparam_fields_it->second[index];
+            registered_field_name = field.name;
+            registered_semantic = field.semantic;
+            registered_target = field.target;
+            ion_conc_style = field.ion_conc_style;
+            ion_rev_style = field.ion_rev_style;
+            ion_write_interior = field.ion_write_interior;
+            ion_write_exterior = field.ion_write_exterior;
+        }
+        set_dparam_binding(
+            info,
+            binding_from_semantic(info.name,
+                                  static_cast<int>(index),
+                                  semantic,
+                                  registered_field_name,
+                                  registered_semantic,
+                                  registered_target,
+                                  ion_conc_style,
+                                  ion_rev_style,
+                                  ion_write_interior,
+                                  ion_write_exterior));
+    }
+}
+
 void apply_registered_data_fields(mind_sim::micro::sim::CoreRegisteredMechanism& info) {
     if (info.type < 0 || info.name.empty()) {
         return;
@@ -628,12 +658,14 @@ void apply_registered_data_fields(mind_sim::micro::sim::CoreRegisteredMechanism&
     int data_offset = 0;
     for (const auto& field : fields_it->second) {
         std::string name = normalize_registered_field_name(field.name, info.name);
-        const auto role = role_from_registered_field_role(field.role);
+        const auto role =
+            role_from_registered_field_role(registered_role_for_field(info.name, name, field.role));
         double default_value = 0.0;
-        if (role == mind_sim::micro::sim::CoreMechanismFieldRole::Parameter &&
-            defaults != nullptr &&
-            default_index < defaults->size()) {
-            default_value = (*defaults)[default_index++];
+        if (role == mind_sim::micro::sim::CoreMechanismFieldRole::Parameter) {
+            if (defaults != nullptr && default_index < defaults->size()) {
+                default_value = (*defaults)[default_index];
+            }
+            ++default_index;
         }
         auto existing = std::find_if(info.fields.begin(), info.fields.end(), [&](const auto& item) {
             return item.name == name;
@@ -737,6 +769,14 @@ void call_loaded_modl_reg_once() {
             throw std::runtime_error("loaded CoreNEURON mechanism library has no modl_reg: " +
                                      library.library_path.string());
         }
+        struct ActiveLibraryScope {
+            explicit ActiveLibraryScope(LoadedMechanismLibrary* library) {
+                g_active_loaded_library = library;
+            }
+            ~ActiveLibraryScope() {
+                g_active_loaded_library = nullptr;
+            }
+        } active_scope{&library};
         library.modl_reg();
         library.registered = true;
         registered_any = true;
@@ -753,6 +793,32 @@ void call_loaded_modl_reg_once() {
                                  std::to_string(type));
     }
     return g_registered_mechanisms[static_cast<std::size_t>(type)].name;
+}
+
+void validate_generated_data_fields_registered_for(const LoadedMechanismLibrary& library) {
+    for (const int type : library.mechanism_types) {
+        if (type < 0 || static_cast<std::size_t>(type) >= g_registered_mechanisms.size()) {
+            throw std::runtime_error("data-field validation saw invalid CoreNEURON mechanism type " +
+                                     std::to_string(type));
+        }
+        const auto& info = g_registered_mechanisms[static_cast<std::size_t>(type)];
+        if (info.name.empty()) {
+            throw std::runtime_error("data-field validation saw an unnamed CoreNEURON mechanism type " +
+                                     std::to_string(type));
+        }
+        const auto fields_it = g_neuron_side_fields_by_mechanism.find(info.name);
+        if (fields_it == g_neuron_side_fields_by_mechanism.end() || fields_it->second.empty()) {
+            throw std::runtime_error(
+                "CoreNEURON generated registration did not provide data fields for mechanism '" +
+                info.name + "' from " + library.library_path.string());
+        }
+    }
+}
+
+void validate_loaded_library_generated_fields(LoadedMechanismLibrary& library) {
+    mark_dparam_binding_cache_dirty();
+    ensure_dparam_binding_cache_current();
+    validate_generated_data_fields_registered_for(library);
 }
 
 }  // namespace
@@ -789,6 +855,7 @@ void register_data_fields(
     target.reserve(dparam_info.size());
     target.insert(target.end(), dparam_info.begin(), dparam_info.end());
     apply_registered_data_fields(g_registered_mechanisms[static_cast<std::size_t>(type)]);
+    rebuild_dparam_bindings_for(g_registered_mechanisms[static_cast<std::size_t>(type)]);
     mark_dparam_binding_cache_dirty();
 }
 
@@ -800,6 +867,12 @@ void load_core_mechanism_library(const std::filesystem::path& path) {
     const auto artifact = resolve_mechanism_artifact_path(path);
     if (g_loaded_library_paths.contains(artifact.library_path)) {
         ensure_core_mechanisms_registered();
+        for (auto& library : g_loaded_libraries) {
+            if (library.library_path == artifact.library_path) {
+                validate_loaded_library_generated_fields(library);
+                break;
+            }
+        }
         return;
     }
 
@@ -836,6 +909,7 @@ void load_core_mechanism_library(const std::filesystem::path& path) {
     });
 
     ensure_core_mechanisms_registered();
+    validate_loaded_library_generated_fields(g_loaded_libraries.back());
 }
 
 void ensure_core_mechanisms_registered() {
@@ -904,6 +978,35 @@ double core_global_scalar(const std::string& name) {
 
 namespace nrn_registration_mirror {
 
+void record_field_roles_from_mechanism_info(const std::string& mechanism,
+                                            const char** mechanism_info) {
+    if (mechanism.empty() || mechanism_info == nullptr || mechanism_info[2] == nullptr) {
+        return;
+    }
+
+    auto& roles = g_registered_field_roles_by_mechanism[mechanism];
+    roles.clear();
+    int section = 0;
+    for (int index = 2; mechanism_info[index] != nullptr || section < 3; ++index) {
+        if (mechanism_info[index] == nullptr) {
+            ++section;
+            if (mechanism_info[index + 1] == nullptr) {
+                break;
+            }
+            continue;
+        }
+        neuron::mechanism::field_role role = neuron::mechanism::field_role::range;
+        if (section == 0) {
+            role = neuron::mechanism::field_role::parameter;
+        } else if (section == 1) {
+            role = neuron::mechanism::field_role::assigned;
+        } else if (section == 2) {
+            role = neuron::mechanism::field_role::state;
+        }
+        roles[normalize_registered_field_name(mechanism_info[index], mechanism)] = role;
+    }
+}
+
 void mechanism_registered(int type, const char** mechanism_info) {
     if (type < 0 || mechanism_info == nullptr || mechanism_info[1] == nullptr) {
         return;
@@ -918,6 +1021,18 @@ void mechanism_registered(int type, const char** mechanism_info) {
     }
     g_mechanism_name_by_type[static_cast<std::size_t>(type)] = info.name;
     g_recent_registered_type = type;
+    record_field_roles_from_mechanism_info(info.name, mechanism_info);
+    if (!g_neuron_side_fields_by_mechanism.contains(info.name)) {
+        g_neuron_side_fields_by_mechanism[info.name] =
+            data_fields_from_mechanism_info(info.name, mechanism_info);
+        apply_registered_data_fields(info);
+    }
+    if (g_active_loaded_library != nullptr) {
+        auto& types = g_active_loaded_library->mechanism_types;
+        if (std::find(types.begin(), types.end(), type) == types.end()) {
+            types.push_back(type);
+        }
+    }
 }
 
 void writes_concentration(int type) {
@@ -981,6 +1096,8 @@ void prop_size(int type, int psize, int dpsize) {
     auto& info = g_registered_mechanisms[static_cast<std::size_t>(type)];
     info.parameter_size = psize;
     info.dparam_size = dpsize;
+    pad_registered_data_fields_to_prop_size(info.name, psize);
+    apply_registered_data_fields(info);
     if (info.dparam_bindings.size() < static_cast<std::size_t>(dpsize)) {
         info.dparam_bindings.resize(static_cast<std::size_t>(dpsize));
     }
@@ -992,6 +1109,11 @@ void dparam_semantic(int type, int index, const char* semantic) {
     }
     ensure_type_slot(type);
     auto& info = g_registered_mechanisms[static_cast<std::size_t>(type)];
+    auto& stored_semantics = g_dparam_semantics_by_mechanism[info.name];
+    if (stored_semantics.size() <= static_cast<std::size_t>(index)) {
+        stored_semantics.resize(static_cast<std::size_t>(index) + 1);
+    }
+    stored_semantics[static_cast<std::size_t>(index)] = semantic;
     std::string registered_field_name;
     std::string registered_semantic;
     std::string registered_target;

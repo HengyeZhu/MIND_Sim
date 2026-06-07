@@ -57,7 +57,7 @@ class MechanismCatalog {
 
     int register_mechanism(MechanismMetadata metadata);
     int sync_registered_mechanisms();
-    int load_metadata_path(const std::filesystem::path& path);
+    int load_mech_path(const std::filesystem::path& path);
 
   private:
     std::vector<MechanismMetadata> mechanisms_{};

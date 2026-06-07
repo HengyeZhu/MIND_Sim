@@ -1,7 +1,7 @@
 #pragma once
 
 #include "micro/frontend/model.hpp"
-#include "bridge/sim/interfaces.hpp"
+#include "cosim/bridge/interfaces.hpp"
 #include "coreneuron/io/output_spikes.hpp"
 #include "cosim/hybrid_simulator.hpp"
 #include "macro/frontend/local_connectivity.hpp"
@@ -11,16 +11,15 @@
 #include "morph/section_distance.hpp"
 #include "morph/section_spec.hpp"
 #include "io/result_hdf5.hpp"
-#include "mind_mod/abi.hpp"
-#include "mind_mod/rule_mod.hpp"
-#include "utils/dynamic_library.hpp"
-#include "utils/rule_source_common.hpp"
+#include "python_api/bindings/network_builder.hpp"
+#include "mod/abi.hpp"
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/unordered_map.h>
 
 #include <cmath>
 #include <cstddef>
@@ -29,6 +28,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -41,20 +41,18 @@ using mind_sim::micro::frontend::MechanismPlacementKind;
 using mind_sim::micro::frontend::MorphologyTemplateSpec;
 using mind_sim::micro::frontend::VariableRef;
 using mind_sim::macro::frontend::Connectivity;
-using mind_sim::macro::frontend::FieldExposureReducer;
+using mind_sim::macro::frontend::FieldOutputReducer;
 using mind_sim::macro::frontend::GidRange;
 using mind_sim::macro::frontend::LocalConnectivity;
 using mind_sim::macro::frontend::LocalConnectivityEdge;
 using mind_sim::macro::frontend::Network;
 using mind_sim::macro::frontend::NodeToRoiMap;
 using mind_sim::macro::frontend::ROI;
-using mind_sim::macro::sim::CouplingRule;
+using mind_sim::macro::sim::MacroToMacroRule;
 using mind_sim::macro::sim::MacroRuntime;
 using mind_sim::macro::sim::NeuralFieldRule;
 using mind_sim::macro::sim::RegionRule;
 using mind_sim::macro::sim::ScalarBuffer;
-using mind_sim::bridge::sim::RandomStreamBinding;
-using mind_sim::bridge::sim::RandomStreamRule;
 using mind_micro_biophysical::ObjectOpKind;
 using mind_micro_biophysical::ParamList;
 using mind_micro_biophysical::ParamValue;
@@ -218,6 +216,10 @@ struct Sim;
 struct PointProcessView;
 struct ArtificialCellView;
 
+void register_default_micro(Sim* sim);
+void unregister_default_micro(Sim* sim);
+Sim& default_micro();
+
 struct RecorderBuffer {
     Sim* sim{};
     bool records_time{false};
@@ -345,11 +347,12 @@ inline NodeToRoiMap node_to_roi_map_from_surface(
 }
 
 struct Sim {
-    Sim() = default;
+    Sim();
     Sim(const Sim&) = delete;
     Sim& operator=(const Sim&) = delete;
-    Sim(Sim&&) noexcept = default;
-    Sim& operator=(Sim&&) noexcept = default;
+    Sim(Sim&&) noexcept = delete;
+    Sim& operator=(Sim&&) noexcept = delete;
+    ~Sim();
 
     std::string name{"micro"};
     MicroFrontendModel model{};
@@ -473,8 +476,8 @@ struct Sim {
         return 0;
     }
     int get_num_threads() const { return model.num_threads(); }
-    int load_mech_metadata(const std::string& path) {
-        model.load_mech_metadata(path);
+    int load_mech(const std::string& path) {
+        model.load_mech(path);
         return 0;
     }
     int ion_register(const std::string& ion, double charge) {
@@ -489,8 +492,8 @@ struct Sim {
     void set_global(const std::string& name, double value) {
         model.set_global_scalar(name, value);
     }
-    std::vector<std::string> get_loaded_mech_metadata_paths() const {
-        return model.loaded_mech_metadata_paths();
+    std::vector<std::string> get_loaded_mech_paths() const {
+        return model.loaded_mech_paths();
     }
     ArtificialCellView insert(const std::string& mech, ParamList params);
     Sim& build_morphology(nb::handle templates) {
@@ -836,19 +839,6 @@ struct SpikeInputView {
     int runtime_index() const { return sim->model.spike_input_runtime_index(source_id); }
 };
 
-struct SpikeInputGroupView {
-    Sim* sim{};
-    std::vector<int> source_ids{};
-
-    int size() const { return static_cast<int>(source_ids.size()); }
-    SpikeInputView get(int index) const {
-        return SpikeInputView{sim, source_ids[static_cast<std::size_t>(index)]};
-    }
-    int runtime_base() const {
-        return sim->model.spike_input_runtime_index(source_ids.front());
-    }
-};
-
 struct NetworkView {
     Sim* sim{};
 
@@ -877,15 +867,7 @@ struct NetworkView {
         const int id = sim->model.register_spike_input_source();
         return SpikeInputView{sim, id};
     }
-    SpikeInputGroupView spike_inputs(int count) const {
-        std::vector<int> ids;
-        ids.reserve(static_cast<std::size_t>(count));
-        for (int i = 0; i < count; ++i) {
-            ids.push_back(sim->model.register_spike_input_source());
-        }
-        return SpikeInputGroupView{sim, std::move(ids)};
-    }
-    NetConView spike_connect(const SpikeInputView& source,
+    NetConView macro_connect(const SpikeInputView& source,
                              const PointProcessView& post,
                              double weight,
                              double delay) const {
@@ -1015,6 +997,17 @@ inline PopulationView sim_population(Sim& sim, const std::string& name) {
     return PopulationView{&sim, range.name, range.gid_begin, range.gid_end};
 }
 
+inline std::vector<PopulationView> sim_populations(Sim& sim) {
+    std::vector<PopulationView> out;
+    const int count = sim.model.population_count();
+    out.reserve(static_cast<std::size_t>(count));
+    for (int index = 0; index < count; ++index) {
+        const auto& range = sim.model.population(static_cast<std::size_t>(index));
+        out.push_back(PopulationView{&sim, range.name, range.gid_begin, range.gid_end});
+    }
+    return out;
+}
+
 inline NetworkView sim_network(Sim& sim) {
     return NetworkView{&sim};
 }
@@ -1036,13 +1029,6 @@ inline std::vector<GidRange> make_gid_ranges(const std::vector<int>& begins,
     return ranges;
 }
 
-inline int network_use_micro(Network& network, const std::string& name, Sim& micro) {
-    if (!micro.model.core_initialized()) {
-        throw std::runtime_error("Network.use_micro requires an initialized micro Sim");
-    }
-    return network.use_micro(name, micro.model.core_neuron_data_shared());
-}
-
 inline void network_use_neural_field(Network& network,
                                      const std::string& name,
                                      std::shared_ptr<NeuralFieldRule> rule,
@@ -1050,18 +1036,18 @@ inline void network_use_neural_field(Network& network,
                                      LocalConnectivity local_connectivity,
                                      std::vector<double> state_soa,
                                      std::vector<double> params,
-                                     std::vector<int> read_input_offsets,
+                                     std::vector<int> target_input_offsets,
                                      const std::vector<int>& reducer_state_indices,
-                                     const std::vector<int>& reducer_exposure_indices) {
-    if (reducer_state_indices.size() != reducer_exposure_indices.size()) {
-        throw std::runtime_error("field reducer state/exposure vectors must have the same size");
+                                     const std::vector<int>& reducer_output_indices) {
+    if (reducer_state_indices.size() != reducer_output_indices.size()) {
+        throw std::runtime_error("field reducer state/output vectors must have the same size");
     }
-    std::vector<FieldExposureReducer> reducers;
+    std::vector<FieldOutputReducer> reducers;
     reducers.reserve(reducer_state_indices.size());
     for (std::size_t index = 0; index < reducer_state_indices.size(); ++index) {
-        reducers.push_back(FieldExposureReducer{
+        reducers.push_back(FieldOutputReducer{
             .state_index = reducer_state_indices[index],
-            .exposure_index = reducer_exposure_indices[index],
+            .output_index = reducer_output_indices[index],
         });
     }
     network.use_neural_field(std::move(name),
@@ -1070,7 +1056,7 @@ inline void network_use_neural_field(Network& network,
                              std::move(local_connectivity),
                              std::move(state_soa),
                              std::move(params),
-                             std::move(read_input_offsets),
+                             std::move(target_input_offsets),
                              std::move(reducers));
 }
 
@@ -1082,103 +1068,6 @@ inline void network_bind_micro_roi(Network& network,
     network.bind_micro_roi(micro_circuit_index,
                            roi,
                            make_gid_ranges(gid_range_begins, gid_range_ends));
-}
-
-inline void network_configure_micro_input_rule(
-    Network& network,
-    const ROI& roi,
-    std::shared_ptr<mind_sim::bridge::sim::MicroInputRule> input_rule,
-    std::vector<double> input_state,
-    std::vector<double> input_params,
-    const std::vector<std::shared_ptr<RandomStreamRule>>& random_rules,
-    std::vector<std::vector<double>> random_states,
-    std::vector<int> input_port_bases,
-    std::vector<int> input_read_offsets) {
-    if (random_rules.size() != random_states.size()) {
-        throw std::runtime_error("random provider/state vectors must have the same size");
-    }
-    std::vector<RandomStreamBinding> random_streams;
-    random_streams.reserve(random_rules.size());
-    for (std::size_t index = 0; index < random_rules.size(); ++index) {
-        random_streams.push_back(RandomStreamBinding{
-            .rule = random_rules[index],
-            .state = std::move(random_states[index]),
-        });
-    }
-    network.configure_micro_input_rule(roi,
-                                       std::move(input_rule),
-                                       std::move(input_state),
-                                       std::move(input_params),
-                                       std::move(random_streams),
-                                       std::move(input_port_bases),
-                                       std::move(input_read_offsets));
-}
-
-inline std::string abi_kind_name(int kind) {
-    if (kind == static_cast<int>(mind_sim::mind_mod::AbiRuleKind::Coupling)) {
-        return "coupling";
-    }
-    if (kind == static_cast<int>(mind_sim::mind_mod::AbiRuleKind::MicroInput)) {
-        return "micro_input";
-    }
-    if (kind == static_cast<int>(mind_sim::mind_mod::AbiRuleKind::MicroOutput)) {
-        return "micro_output";
-    }
-    if (kind == static_cast<int>(mind_sim::mind_mod::AbiRuleKind::Region)) {
-        return "region";
-    }
-    if (kind == static_cast<int>(mind_sim::mind_mod::AbiRuleKind::NeuralField)) {
-        return "neural_field";
-    }
-    throw std::runtime_error("unknown compiled MindMod kind");
-}
-
-inline std::vector<std::string> abi_names(int count, const char* const* names) {
-    std::vector<std::string> out;
-    out.reserve(static_cast<std::size_t>(count));
-    for (int index = 0; index < count; ++index) {
-        out.emplace_back(names[index]);
-    }
-    return out;
-}
-
-inline std::vector<double> abi_defaults(int count, const double* values) {
-    std::vector<double> out;
-    out.reserve(static_cast<std::size_t>(count));
-    for (int index = 0; index < count; ++index) {
-        out.push_back(values[index]);
-    }
-    return out;
-}
-
-inline nb::dict mind_mod_descriptor_to_dict(const mind_sim::mind_mod::AbiRuleDescriptor& descriptor) {
-    if (descriptor.abi_version != mind_sim::mind_mod::kMindModAbiVersion) {
-        throw std::runtime_error("compiled MindMod ABI version mismatch");
-    }
-    nb::dict out;
-    out["kind"] = abi_kind_name(descriptor.kind);
-    out["name"] = std::string(descriptor.name);
-    out["read"] = abi_names(descriptor.read_count, descriptor.read_names);
-    out["write"] = abi_names(descriptor.write_count, descriptor.write_names);
-    out["emit"] = abi_names(descriptor.emit_count, descriptor.emit_names);
-    out["random"] = abi_names(descriptor.random_count, descriptor.random_names);
-    out["param_names"] = abi_names(descriptor.param_count, descriptor.param_names);
-    out["param_defaults"] = abi_defaults(descriptor.param_count, descriptor.param_defaults);
-    out["state_names"] = abi_names(descriptor.state_count, descriptor.state_names);
-    out["state_defaults"] = abi_defaults(descriptor.state_count, descriptor.state_defaults);
-    out["local_state_names"] = abi_names(descriptor.local_state_count, descriptor.local_state_names);
-    return out;
-}
-
-inline nb::dict inspect_mind_mod_library(const std::string& library_path) {
-    auto library = mind_sim::utils::load_dynamic_library(library_path);
-    const auto descriptor_fn =
-        reinterpret_cast<mind_sim::mind_mod::DescriptorFn>(library->symbol("mind_rule_descriptor"));
-    const auto* descriptor = descriptor_fn();
-    if (!descriptor) {
-        throw std::runtime_error("compiled MindMod returned a null descriptor");
-    }
-    return mind_mod_descriptor_to_dict(*descriptor);
 }
 
 void bind_rules(nb::module_& m);

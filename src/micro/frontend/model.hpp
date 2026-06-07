@@ -153,9 +153,9 @@ class MicroFrontendModel {
     [[nodiscard]] bool spike_output_enabled() const noexcept { return spike_output_enabled_; }
 
     void set_device(const std::string& device);
-    void load_mech_metadata(std::string path);
-    [[nodiscard]] const std::vector<std::string>& loaded_mech_metadata_paths() const noexcept {
-        return loaded_mech_metadata_paths_;
+    void load_mech(std::string path);
+    [[nodiscard]] const std::vector<std::string>& loaded_mech_paths() const noexcept {
+        return loaded_mech_paths_;
     }
     [[nodiscard]] int ion_register(std::string ion, double charge);
     [[nodiscard]] double ion_charge(const std::string& ion_mechanism) const;
@@ -303,7 +303,7 @@ class MicroFrontendModel {
     bool microcircuit_built_{false};
     bool core_initialized_{false};
     bool default_mechanism_metadata_loaded_{false};
-    std::vector<std::string> loaded_mech_metadata_paths_{};
+    std::vector<std::string> loaded_mech_paths_{};
 
     mind_micro_model::CellTemplateMorphLayout morph_layout_{};
     std::vector<PopulationRange> populations_{};

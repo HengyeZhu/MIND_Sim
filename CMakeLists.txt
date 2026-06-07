@@ -16,7 +16,9 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "NVHPC|PGI")
 endif()
 
 find_package(OpenMP REQUIRED)
-find_package(Python 3.10 COMPONENTS Interpreter Development.Module REQUIRED)
+find_package(Python 3.10 COMPONENTS Interpreter Development REQUIRED)
+find_package(BISON REQUIRED)
+find_package(FLEX REQUIRED)
 
 execute_process(
   COMMAND "${Python_EXECUTABLE}" -c "import sys; print(sys.prefix)"
@@ -39,27 +41,21 @@ execute_process(
 )
 find_package(nanobind CONFIG REQUIRED)
 
-set(MIND_SIM_MODCC_BACKEND "cpu")
+set(MIND_SIM_NMODL_BACKEND "cpu")
 set(MIND_SIM_GPU_COMPILE_OPTIONS)
 set(MIND_SIM_GPU_LINK_OPTIONS)
-set(MIND_SIM_MODCC_GPU_DEFINE_ARGS)
 set(MIND_SIM_GPU_RUNTIME_LIBRARY)
 
 if(MIND_SIM_ENABLE_GPU)
   if(NOT CMAKE_CXX_COMPILER_ID MATCHES "NVHPC|PGI")
     message(FATAL_ERROR "MIND_SIM_ENABLE_GPU requires the NVIDIA HPC SDK C++ compiler (nvc++).")
   endif()
-  set(MIND_SIM_MODCC_BACKEND "openacc")
+  set(MIND_SIM_NMODL_BACKEND "openacc")
   set(MIND_SIM_RUNTIME_FP_FLAGS "-O2")
-  set(MIND_SIM_MODCC_FP_FLAGS "-O2" "-Mautoinline")
+  set(MIND_SIM_MOD_FP_FLAGS "-O2" "-Mautoinline")
   set(MIND_SIM_GPU_COMPILE_OPTIONS "-cuda" "-gpu=${MIND_SIM_GPU_ARCHS}" "-acc")
   set(MIND_SIM_GPU_LINK_OPTIONS "-cuda" "-gpu=${MIND_SIM_GPU_ARCHS}" "-acc")
-  list(APPEND MIND_SIM_MODCC_FP_FLAGS "-DR123_USE_INTRIN_H=0" "-DEIGEN_DONT_VECTORIZE=1")
-  list(APPEND MIND_SIM_MODCC_GPU_DEFINE_ARGS
-    --define CORENEURON_ENABLE_GPU
-    --define R123_USE_INTRIN_H=0
-    --define EIGEN_DONT_VECTORIZE=1
-  )
+  list(APPEND MIND_SIM_MOD_FP_FLAGS "-DR123_USE_INTRIN_H=0" "-DEIGEN_DONT_VECTORIZE=1")
   find_package(CUDAToolkit QUIET)
   if(CUDAToolkit_FOUND)
     set(MIND_SIM_GPU_RUNTIME_LIBRARY CUDA::cudart)
@@ -83,27 +79,151 @@ else()
     "-O3" "-march=native" "-mtune=native" "-fno-math-errno"
     "-ffp-contract=off" "-fno-semantic-interposition" "-funroll-loops"
   )
-  set(MIND_SIM_MODCC_FP_FLAGS ${MIND_SIM_RUNTIME_FP_FLAGS})
+  set(MIND_SIM_MOD_FP_FLAGS ${MIND_SIM_RUNTIME_FP_FLAGS})
 endif()
 
-list(APPEND MIND_SIM_MODCC_FP_FLAGS ${MIND_SIM_GPU_COMPILE_OPTIONS})
-string(REPLACE ";" " " MIND_SIM_MODCC_FP_FLAGS_TEXT "${MIND_SIM_MODCC_FP_FLAGS}")
-string(STRIP "${OpenMP_CXX_FLAGS} ${MIND_SIM_MODCC_FP_FLAGS_TEXT}" MIND_SIM_MODCC_CXX_FLAGS)
+list(APPEND MIND_SIM_MOD_FP_FLAGS ${MIND_SIM_GPU_COMPILE_OPTIONS})
+string(REPLACE ";" " " MIND_SIM_MOD_FP_FLAGS_TEXT "${MIND_SIM_MOD_FP_FLAGS}")
+string(STRIP "${OpenMP_CXX_FLAGS} ${MIND_SIM_MOD_FP_FLAGS_TEXT}" MIND_SIM_MOD_CXX_FLAGS)
 
-set(MIND_SIM_MODCC_LINK_OPTIONS ${OpenMP_CXX_FLAGS})
-list(APPEND MIND_SIM_MODCC_LINK_OPTIONS ${MIND_SIM_GPU_LINK_OPTIONS})
+set(MIND_SIM_MOD_LINK_OPTIONS ${OpenMP_CXX_FLAGS})
+list(APPEND MIND_SIM_MOD_LINK_OPTIONS ${MIND_SIM_GPU_LINK_OPTIONS})
 if(OpenMP_CXX_LIBRARIES)
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    list(APPEND MIND_SIM_MODCC_LINK_OPTIONS "-Wl,--no-as-needed")
+    list(APPEND MIND_SIM_MOD_LINK_OPTIONS "-Wl,--no-as-needed")
   endif()
-  list(APPEND MIND_SIM_MODCC_LINK_OPTIONS ${OpenMP_CXX_LIBRARIES})
+  list(APPEND MIND_SIM_MOD_LINK_OPTIONS ${OpenMP_CXX_LIBRARIES})
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    list(APPEND MIND_SIM_MODCC_LINK_OPTIONS "-Wl,--as-needed")
+    list(APPEND MIND_SIM_MOD_LINK_OPTIONS "-Wl,--as-needed")
   endif()
 endif()
-string(REPLACE ";" " " MIND_SIM_MODCC_LINK_FLAGS "${MIND_SIM_MODCC_LINK_OPTIONS}")
+string(REPLACE ";" " " MIND_SIM_MOD_LINK_FLAGS "${MIND_SIM_MOD_LINK_OPTIONS}")
 
-set(MIND_SIM_MODCC "${PROJECT_SOURCE_DIR}/src/micro/mod_compiler/mind_modcc.py")
+set(MIND_SIM_NRN_SOURCE_DIR "${PROJECT_SOURCE_DIR}/src/mod/neuron")
+if(NOT EXISTS "${MIND_SIM_NRN_SOURCE_DIR}/src/nmodl/CMakeLists.txt")
+  message(FATAL_ERROR
+    "MIND_Sim builds MIND-aware NMODL from the vendored NEURON/NMODL source "
+    "under src/mod/neuron, but src/mod/neuron/src/nmodl/CMakeLists.txt is missing."
+  )
+endif()
+
+foreach(module IN ITEMS jinja2 yaml sympy)
+  execute_process(
+    COMMAND "${Python_EXECUTABLE}" -c "import ${module}"
+    RESULT_VARIABLE MIND_SIM_NMODL_MODULE_STATUS
+  )
+  if(NOT MIND_SIM_NMODL_MODULE_STATUS EQUAL 0)
+    message(FATAL_ERROR "Python module ${module} is required to build MIND-aware NMODL.")
+  endif()
+endforeach()
+
+function(mind_sim_add_header_only_target target include_dir)
+  if(NOT TARGET "${target}")
+    add_library("${target}" INTERFACE IMPORTED GLOBAL)
+    set_target_properties("${target}" PROPERTIES
+      INTERFACE_INCLUDE_DIRECTORIES "${include_dir}"
+    )
+  endif()
+endfunction()
+
+mind_sim_add_header_only_target(CLI11::CLI11 "${MIND_SIM_NRN_SOURCE_DIR}/external/CLI11/include")
+mind_sim_add_header_only_target(nlohmann_json::nlohmann_json "${MIND_SIM_NRN_SOURCE_DIR}/external/json/include")
+
+if(NOT TARGET fmt::fmt)
+  add_library(mind_sim_nmodl_fmt INTERFACE)
+  target_include_directories(mind_sim_nmodl_fmt INTERFACE "${MIND_SIM_NRN_SOURCE_DIR}/external/fmt/include")
+  target_compile_definitions(mind_sim_nmodl_fmt INTERFACE FMT_HEADER_ONLY)
+  add_library(fmt::fmt ALIAS mind_sim_nmodl_fmt)
+endif()
+
+if(NOT TARGET spdlog::spdlog)
+  add_library(mind_sim_nmodl_spdlog INTERFACE)
+  target_include_directories(mind_sim_nmodl_spdlog INTERFACE "${MIND_SIM_NRN_SOURCE_DIR}/external/spdlog/include")
+  target_compile_definitions(mind_sim_nmodl_spdlog INTERFACE SPDLOG_FMT_EXTERNAL)
+  target_link_libraries(mind_sim_nmodl_spdlog INTERFACE fmt::fmt)
+  add_library(spdlog::spdlog ALIAS mind_sim_nmodl_spdlog)
+endif()
+
+if(NOT TARGET pybind11::module)
+  add_library(mind_sim_nmodl_pybind11_module INTERFACE)
+  target_include_directories(mind_sim_nmodl_pybind11_module INTERFACE
+    "${MIND_SIM_NRN_SOURCE_DIR}/external/pybind11/include"
+    ${Python_INCLUDE_DIRS}
+  )
+  add_library(pybind11::module ALIAS mind_sim_nmodl_pybind11_module)
+endif()
+if(NOT TARGET pybind11::embed)
+  add_library(mind_sim_nmodl_pybind11_embed INTERFACE)
+  target_include_directories(mind_sim_nmodl_pybind11_embed INTERFACE
+    "${MIND_SIM_NRN_SOURCE_DIR}/external/pybind11/include"
+    ${Python_INCLUDE_DIRS}
+  )
+  add_library(pybind11::embed ALIAS mind_sim_nmodl_pybind11_embed)
+endif()
+
+function(cpp_cc_configure_sanitizers)
+endfunction()
+
+function(cpp_cc_build_time_copy)
+  set(options NO_TARGET)
+  set(one_value_args INPUT OUTPUT)
+  cmake_parse_arguments(COPY "${options}" "${one_value_args}" "" ${ARGN})
+  if(NOT COPY_INPUT OR NOT COPY_OUTPUT)
+    message(FATAL_ERROR "cpp_cc_build_time_copy requires INPUT and OUTPUT")
+  endif()
+  add_custom_command(
+    OUTPUT "${COPY_OUTPUT}"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${COPY_INPUT}" "${COPY_OUTPUT}"
+    DEPENDS "${COPY_INPUT}"
+    VERBATIM
+  )
+  if(NOT COPY_NO_TARGET)
+    get_filename_component(copy_target "${COPY_OUTPUT}" NAME_WE)
+    add_custom_target("${copy_target}" DEPENDS "${COPY_OUTPUT}")
+  endif()
+endfunction()
+
+set(PYTHON_EXECUTABLE "${Python_EXECUTABLE}")
+set(PYTHON_INCLUDE_DIRS ${Python_INCLUDE_DIRS})
+set(PYTHON_LIBRARIES ${Python_LIBRARIES})
+set(PYBIND11_INCLUDE_DIR "${MIND_SIM_NRN_SOURCE_DIR}/external/pybind11/include")
+set(pybind11_INCLUDE_DIRS "${MIND_SIM_NRN_SOURCE_DIR}/external/pybind11/include")
+set(NMODL_NEURON_SOURCE_DIR "${MIND_SIM_NRN_SOURCE_DIR}")
+set(NMODL_ENABLE_PYTHON_BINDINGS OFF CACHE BOOL "Build NMODL Python bindings" FORCE)
+set(NMODL_ENABLE_FLEX_BISON_LINES ON CACHE BOOL "Enable line numbers in generated NMODL parser files" FORCE)
+set(NMODL_AS_SUBPROJECT ON)
+set(NRN_LINK_AGAINST_PYTHON TRUE CACHE BOOL "Link MIND-aware NMODL against Python" FORCE)
+set(NRN_SANITIZER_COMPILER_FLAGS)
+set(NMODL_EXTRA_CXX_FLAGS)
+set(NRN_INSTALL_DATA_PREFIX "")
+set(NRN_INSTALL_PYTHON_PREFIX "lib/python/neuron/")
+set(NMODL_PROJECT_PLATLIB_SOURCE_DIR "${MIND_SIM_NRN_SOURCE_DIR}/src/nmodl")
+set(NMODL_PROJECT_PLATLIB_BINARY_DIR "${PROJECT_BINARY_DIR}/src/nmodl")
+set(NMODL_PROJECT_PURELIB_SOURCE_DIR "${MIND_SIM_NRN_SOURCE_DIR}/share/lib/python/neuron/nmodl")
+set(NMODL_PROJECT_PURELIB_BINARY_DIR "${PROJECT_BINARY_DIR}/lib/python/neuron/nmodl")
+set(NMODL_WRAPPER_LIBS pyembed pywrapper ${CMAKE_DL_LIBS})
+
+include_directories(
+  "${MIND_SIM_NRN_SOURCE_DIR}/external/Random123/include"
+  "${MIND_SIM_NRN_SOURCE_DIR}/external/eigen"
+)
+
+set(MIND_SIM_PARENT_CXX_STANDARD "${CMAKE_CXX_STANDARD}")
+set(CMAKE_CXX_STANDARD 17)
+add_subdirectory("${MIND_SIM_NRN_SOURCE_DIR}/src/nmodl" "${PROJECT_BINARY_DIR}/src/nmodl")
+set(CMAKE_CXX_STANDARD "${MIND_SIM_PARENT_CXX_STANDARD}")
+set_target_properties(nmodl PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin"
+)
+set(MIND_SIM_NMODL "${PROJECT_BINARY_DIR}/bin/nmodl${CMAKE_EXECUTABLE_SUFFIX}")
+add_custom_target(mind_sim_nmodl DEPENDS nmodl)
+get_filename_component(MIND_SIM_NMODL_BIN_DIR "${MIND_SIM_NMODL}" DIRECTORY)
+get_filename_component(MIND_SIM_NMODL_HOME "${MIND_SIM_NMODL_BIN_DIR}" DIRECTORY)
+if(MIND_SIM_NMODL_BACKEND STREQUAL "cpu")
+  set(MIND_SIM_NMODL_BACKEND_ARGS host --c)
+else()
+  set(MIND_SIM_NMODL_BACKEND_ARGS acc --oacc)
+endif()
 set(MIND_SIM_CORENEURON_MOD_DEFINES
   CORENEURON_BUILD
   CORENRN_BUILD=1
@@ -119,7 +239,7 @@ set(MIND_SIM_CORENEURON_MOD_DEFINES
   NRN_PRCELLSTATE=0
 )
 
-function(mind_sim_add_mod_codegen_target)
+function(mind_sim_add_mod_compile_target)
   set(one_value_args
     TARGET
     OUTPUT_DIR
@@ -137,73 +257,66 @@ function(mind_sim_add_mod_codegen_target)
 
   foreach(required_arg TARGET OUTPUT_DIR MODL_REG_NAME OUT_SOURCES)
     if(NOT MODGEN_${required_arg})
-      message(FATAL_ERROR "mind_sim_add_mod_codegen_target requires ${required_arg}")
+      message(FATAL_ERROR "mind_sim_add_mod_compile_target requires ${required_arg}")
     endif()
   endforeach()
   if(NOT MODGEN_MODFILES)
-    message(FATAL_ERROR "mind_sim_add_mod_codegen_target requires at least one MODFILES entry")
+    message(FATAL_ERROR "mind_sim_add_mod_compile_target requires at least one MODFILES entry")
   endif()
   if(NOT MODGEN_COMMENT)
     set(MODGEN_COMMENT "Generating MOD mechanisms for ${MODGEN_TARGET}")
   endif()
 
   set(generated_dir "${MODGEN_OUTPUT_DIR}/core")
+  set(scratch_dir "${MODGEN_OUTPUT_DIR}/scratch")
   set(generated_sources)
+  set(mod_names)
   foreach(modfile IN LISTS MODGEN_MODFILES)
     get_filename_component(mod_name "${modfile}" NAME_WE)
+    list(APPEND mod_names "${mod_name}")
     list(APPEND generated_sources "${generated_dir}/${mod_name}.cpp")
   endforeach()
+  string(JOIN "," mod_names_csv ${mod_names})
   set(modl_reg_source "${MODGEN_MODL_REG_NAME}.cpp")
   if(MODGEN_MODL_REG_NAME STREQUAL "modl_reg")
-    set(modl_reg_source "mind_modl_reg.cpp")
+    set(modl_reg_source "mind_nmodl_reg.cpp")
   endif()
   list(APPEND generated_sources "${generated_dir}/${modl_reg_source}")
-
-  set(include_args)
-  foreach(include_dir IN LISTS MODGEN_INCLUDES)
-    list(APPEND include_args --include "${include_dir}")
-  endforeach()
-
-  set(define_args)
-  foreach(define IN LISTS MODGEN_DEFINES)
-    list(APPEND define_args --define "${define}")
-  endforeach()
 
   file(MAKE_DIRECTORY "${MODGEN_OUTPUT_DIR}")
   set(stamp "${MODGEN_OUTPUT_DIR}/${MODGEN_TARGET}.stamp")
   set(signature "${MODGEN_OUTPUT_DIR}/${MODGEN_TARGET}.signature")
   file(WRITE "${signature}"
-    "backend=${MIND_SIM_MODCC_BACKEND}\n"
+    "backend=${MIND_SIM_NMODL_BACKEND}\n"
+    "nmodl=${MIND_SIM_NMODL}\n"
     "cxx=${CMAKE_CXX_COMPILER}\n"
-    "cxx_flags=${MIND_SIM_MODCC_CXX_FLAGS}\n"
-    "link_flags=${MIND_SIM_MODCC_LINK_FLAGS}\n"
-    "gpu_defines=${MIND_SIM_MODCC_GPU_DEFINE_ARGS}\n"
+    "cxx_flags=${MIND_SIM_MOD_CXX_FLAGS}\n"
+    "link_flags=${MIND_SIM_MOD_LINK_FLAGS}\n"
     "defines=${MODGEN_DEFINES}\n"
   )
   add_custom_command(
     OUTPUT
       "${stamp}"
       ${generated_sources}
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${MODGEN_OUTPUT_DIR}"
-    COMMAND "${Python_EXECUTABLE}" "${MIND_SIM_MODCC}"
-            --nmodl "${MIND_SIM_NMODL}"
-            --cxx "${CMAKE_CXX_COMPILER}"
-            --output "${MODGEN_OUTPUT_DIR}"
-            --backend "${MIND_SIM_MODCC_BACKEND}"
-            --generate-only
-            --modl-reg-name "${MODGEN_MODL_REG_NAME}"
-            "--cxx-flag=${MIND_SIM_MODCC_CXX_FLAGS}"
-            "--link-flag=${MIND_SIM_MODCC_LINK_FLAGS}"
-            ${include_args}
-            ${define_args}
-            ${MIND_SIM_MODCC_GPU_DEFINE_ARGS}
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${generated_dir}" "${scratch_dir}"
+    COMMAND "${CMAKE_COMMAND}" -E env
+            "NMODLHOME=${MIND_SIM_NMODL_HOME}"
+            "${MIND_SIM_NMODL}"
             ${MODGEN_MODFILES}
+            -o "${generated_dir}"
+            --scratch "${scratch_dir}"
+            ${MIND_SIM_NMODL_BACKEND_ARGS}
+            passes
+            --inline
+    COMMAND "${CMAKE_COMMAND}"
+            "-DREG_CPP=${generated_dir}/${modl_reg_source}"
+            "-DFUNCTION_NAME=${MODGEN_MODL_REG_NAME}"
+            "-DMOD_NAMES=${mod_names_csv}"
+            -P "${PROJECT_SOURCE_DIR}/cmake/write_modl_reg.cmake"
     COMMAND "${CMAKE_COMMAND}" -E touch "${stamp}"
     WORKING_DIRECTORY "${PROJECT_BINARY_DIR}"
-    DEPENDS mind_sim_nmodl
-            "${MIND_SIM_NMODL}"
-            "${MIND_SIM_MODCC}"
-            "${signature}"
+    DEPENDS "${signature}"
+            "${PROJECT_SOURCE_DIR}/cmake/write_modl_reg.cmake"
             ${MODGEN_MODFILES}
             ${MODGEN_DEPENDS}
     COMMENT "${MODGEN_COMMENT}"
@@ -211,44 +324,10 @@ function(mind_sim_add_mod_codegen_target)
     VERBATIM
   )
   add_custom_target("${MODGEN_TARGET}" DEPENDS "${stamp}")
+  add_dependencies("${MODGEN_TARGET}" mind_sim_nmodl)
   set_source_files_properties(${generated_sources} PROPERTIES GENERATED TRUE)
   set("${MODGEN_OUT_SOURCES}" ${generated_sources} PARENT_SCOPE)
 endfunction()
-
-include(ProcessorCount)
-ProcessorCount(MIND_SIM_HOST_PROCESSOR_COUNT)
-if(NOT MIND_SIM_HOST_PROCESSOR_COUNT)
-  set(MIND_SIM_HOST_PROCESSOR_COUNT 4)
-endif()
-set(MIND_SIM_NMODL_BUILD_JOBS "${MIND_SIM_HOST_PROCESSOR_COUNT}" CACHE STRING "Parallel jobs used to build the embedded NMODL executable")
-
-set(MIND_SIM_NMODL_SOURCE_DIR "${PROJECT_SOURCE_DIR}/src/micro/mod_compiler/nmodl")
-set(MIND_SIM_NMODL_BUILD_DIR "${PROJECT_BINARY_DIR}/nmodl")
-set(MIND_SIM_NMODL "${MIND_SIM_NMODL_BUILD_DIR}/bin/nmodl")
-set(MIND_SIM_NMODL_BUILDER "${PROJECT_SOURCE_DIR}/src/micro/mod_compiler/build_embedded_nmodl.py")
-set(MIND_SIM_NMODL_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
-if(NOT MIND_SIM_NMODL_BUILD_TYPE)
-  set(MIND_SIM_NMODL_BUILD_TYPE Release)
-endif()
-
-set(MIND_SIM_NMODL_STAMP "${MIND_SIM_NMODL_BUILD_DIR}/mind_sim_nmodl.stamp")
-add_custom_command(
-  OUTPUT "${MIND_SIM_NMODL_STAMP}"
-  COMMAND "${Python_EXECUTABLE}" "${MIND_SIM_NMODL_BUILDER}"
-          --source-dir "${MIND_SIM_NMODL_SOURCE_DIR}"
-          --build-dir "${MIND_SIM_NMODL_BUILD_DIR}"
-          --python "${Python_EXECUTABLE}"
-          --cxx "${CMAKE_CXX_COMPILER}"
-          --build-type "${MIND_SIM_NMODL_BUILD_TYPE}"
-          --jobs "${MIND_SIM_NMODL_BUILD_JOBS}"
-  COMMAND "${CMAKE_COMMAND}" -E touch "${MIND_SIM_NMODL_STAMP}"
-  BYPRODUCTS "${MIND_SIM_NMODL}"
-  DEPENDS "${MIND_SIM_NMODL_BUILDER}"
-  COMMENT "Building embedded NMODL"
-  COMMAND_EXPAND_LISTS
-  VERBATIM
-)
-add_custom_target(mind_sim_nmodl DEPENDS "${MIND_SIM_NMODL_STAMP}")
 
 set(MIND_SIM_CORENEURON_MODFILE_DIR
   "${PROJECT_SOURCE_DIR}/src/micro/sim/coreneuron/mechanism/mech/modfile"
@@ -271,7 +350,7 @@ foreach(name IN LISTS MIND_SIM_DEFAULT_MECHANISM_NAMES)
   )
 endforeach()
 
-mind_sim_add_mod_codegen_target(
+mind_sim_add_mod_compile_target(
   TARGET mind_sim_default_mechanisms
   OUTPUT_DIR "${PROJECT_BINARY_DIR}/default_mechanisms"
   MODL_REG_NAME modl_reg
@@ -297,8 +376,8 @@ list(
   "${PROJECT_SOURCE_DIR}/src/micro/sim/coreneuron/mpi/lib/nrnmpi.cpp"
 )
 
-set(MIND_SIM_BRIDGE_SOURCES
-  src/bridge/sim/interfaces.cpp
+set(MIND_SIM_COSIM_BRIDGE_SOURCES
+  src/cosim/bridge/interfaces.cpp
 )
 
 set(MIND_SIM_MACRO_SOURCES
@@ -331,12 +410,6 @@ set(MIND_SIM_MICRO_SOURCES
   src/micro/sim/micro_runtime.cpp
 )
 
-set(MIND_SIM_MIND_MOD_SOURCES
-  src/mind_mod/rule_mod_analyzer.cpp
-  src/mind_mod/rule_mod_codegen.cpp
-  src/mind_mod/rule_mod_parser.cpp
-)
-
 set(MIND_SIM_IO_SOURCES
   src/io/result_hdf5.cpp
 )
@@ -350,10 +423,9 @@ set(MIND_SIM_COSIM_SOURCES
 )
 
 set(MIND_SIM_NATIVE_CORE_SOURCES
-  ${MIND_SIM_BRIDGE_SOURCES}
+  ${MIND_SIM_COSIM_BRIDGE_SOURCES}
   ${MIND_SIM_MACRO_SOURCES}
   ${MIND_SIM_MICRO_SOURCES}
-  ${MIND_SIM_MIND_MOD_SOURCES}
   ${MIND_SIM_IO_SOURCES}
   ${MIND_SIM_UTILS_SOURCES}
   ${MIND_SIM_COSIM_SOURCES}
@@ -365,17 +437,17 @@ set(MIND_SIM_PYTHON_BINDING_SOURCES
   src/python_api/bindings/bindings_micro.cpp
   src/python_api/bindings/bindings_rules.cpp
   src/python_api/bindings/module.cpp
+  src/python_api/bindings/network_builder.cpp
 )
 
 set(MIND_SIM_BUILD_PYTHON_API_DIR "${PROJECT_BINARY_DIR}/mind_sim")
 set(MIND_SIM_PYTHON_API_SOURCES
   src/python_api/mind_sim/__init__.py
-  src/python_api/mind_sim/_codegen.py
-  src/python_api/mind_sim/_io.py
+  src/python_api/mind_sim/_network.py
   src/python_api/mind_sim/cli.py
-  src/python_api/mind_sim/bridge/__init__.py
   src/python_api/mind_sim/cosim/__init__.py
   src/python_api/mind_sim/macro/__init__.py
+  src/python_api/mind_sim/macro/_io.py
   src/python_api/mind_sim/micro/__init__.py
 )
 set(MIND_SIM_PYTHON_API_STAMP "${PROJECT_BINARY_DIR}/mind_sim_python_api.stamp")
@@ -414,20 +486,6 @@ endfunction()
 function(mind_sim_apply_coreneuron_definitions target)
   target_compile_definitions("${target}" PRIVATE
     ${MIND_SIM_CORENEURON_MOD_DEFINES}
-  )
-endfunction()
-
-function(mind_sim_apply_mind_runtime_definitions target)
-  target_compile_definitions("${target}" PRIVATE
-    MIND_SIM_MODCC="${MIND_SIM_MODCC}"
-    MIND_SIM_NMODL_EXECUTABLE="${MIND_SIM_NMODL}"
-    MIND_SIM_NMODL_SOURCE_DIR="${MIND_SIM_NMODL_SOURCE_DIR}"
-    MIND_SIM_PYTHON_EXECUTABLE="${Python_EXECUTABLE}"
-    MIND_SIM_CXX_COMPILER="${CMAKE_CXX_COMPILER}"
-    MIND_SIM_MODCC_BACKEND="${MIND_SIM_MODCC_BACKEND}"
-    MIND_SIM_MODCC_CXX_FLAGS="${MIND_SIM_MODCC_CXX_FLAGS}"
-    MIND_SIM_MODCC_LINK_FLAGS="${MIND_SIM_MODCC_LINK_FLAGS}"
-    MIND_SIM_MECHANISM_INCLUDE_DIR="${PROJECT_SOURCE_DIR}/src/micro/sim"
   )
 endfunction()
 
@@ -493,7 +551,6 @@ add_library(mind_sim_native_core OBJECT ${MIND_SIM_NATIVE_CORE_SOURCES})
 add_dependencies(mind_sim_native_core mind_sim_default_mechanisms)
 mind_sim_apply_native_includes(mind_sim_native_core)
 mind_sim_apply_coreneuron_definitions(mind_sim_native_core)
-mind_sim_apply_mind_runtime_definitions(mind_sim_native_core)
 mind_sim_apply_gpu_definitions(mind_sim_native_core)
 mind_sim_apply_runtime_compile_options(mind_sim_native_core)
 
@@ -550,6 +607,19 @@ if(MIND_SIM_GPU_LINK_OPTIONS)
   target_link_options(_native PRIVATE ${MIND_SIM_GPU_LINK_OPTIONS})
 endif()
 
+add_executable(mind_nrnivmodl src/mod/mind_nrnivmodl.cpp)
+target_compile_features(mind_nrnivmodl PRIVATE cxx_std_20)
+add_dependencies(mind_nrnivmodl mind_sim_nmodl)
+target_compile_definitions(mind_nrnivmodl PRIVATE
+  MIND_SIM_NMODL_PATH="${MIND_SIM_NMODL}"
+  MIND_SIM_CXX_COMPILER="${CMAKE_CXX_COMPILER}"
+  MIND_SIM_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+  MIND_SIM_MECHANISM_INCLUDE_DIR="${PROJECT_SOURCE_DIR}/src/micro/sim"
+  MIND_SIM_MOD_CXX_FLAGS="${MIND_SIM_MOD_CXX_FLAGS}"
+  MIND_SIM_MOD_LINK_FLAGS="${MIND_SIM_MOD_LINK_FLAGS}"
+)
+install(TARGETS mind_nrnivmodl RUNTIME DESTINATION bin)
+
 enable_testing()
 
 function(mind_sim_add_python_test name script)
@@ -560,7 +630,7 @@ function(mind_sim_add_python_test name script)
   set_tests_properties(
     "${name}"
     PROPERTIES
-      ENVIRONMENT "PYTHONPATH=${PROJECT_BINARY_DIR};PYTHONDONTWRITEBYTECODE=1;MIND_SIM_CODEGEN_CACHE=${PROJECT_BINARY_DIR}/mind_sim_codegen_cache"
+      ENVIRONMENT "PYTHONPATH=${PROJECT_BINARY_DIR};PYTHONDONTWRITEBYTECODE=1"
   )
 endfunction()
 

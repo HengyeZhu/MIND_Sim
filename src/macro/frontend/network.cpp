@@ -1,5 +1,6 @@
 #include "macro/frontend/network.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <stdexcept>
@@ -53,20 +54,27 @@ void validate_buffer_size(const mind_sim::macro::sim::ScalarBuffer& buffer,
     }
 }
 
+void require_positive_finite(double value, const char* what) {
+    if (value <= 0.0 || !std::isfinite(value)) {
+        throw std::runtime_error(std::string(what) + " must be positive and finite");
+    }
+}
+
 }  // namespace
 
 Network::Network(Connectivity connectivity,
                  std::vector<std::string> inputs,
-                 std::vector<std::string> exposures,
-                 std::vector<int> recorded_rois)
+                 std::vector<std::string> outputs,
+                 std::vector<int> recorded_rois,
+                 std::vector<int> recorded_outputs)
     : connectivity_(std::move(connectivity)),
       inputs_(std::move(inputs)),
       input_to_index_(build_name_index(inputs_, "input", false)),
-      exposures_(std::move(exposures)),
-      exposure_to_index_(build_name_index(exposures_, "exposure", true)) {
-    initial_exposures_.assign(
+      outputs_(std::move(outputs)),
+      output_to_index_(build_name_index(outputs_, "output", true)) {
+    output_history_start_.assign(
         static_cast<std::size_t>(roi_count()),
-        mind_sim::macro::sim::ScalarBuffer(static_cast<std::size_t>(exposure_count())));
+        mind_sim::macro::sim::ScalarBuffer(static_cast<std::size_t>(output_count())));
     dc_inputs_.assign(
         static_cast<std::size_t>(roi_count()),
         mind_sim::macro::sim::ScalarBuffer(static_cast<std::size_t>(input_count())));
@@ -74,6 +82,8 @@ Network::Network(Connectivity connectivity,
     micro_circuit_by_roi_.assign(static_cast<std::size_t>(roi_count()), -1);
     micro_binding_by_roi_.assign(static_cast<std::size_t>(roi_count()), -1);
     recorded_rois_ = normalize_roi_indices(std::move(recorded_rois), "record ROI");
+    recorded_outputs_ = normalize_output_indices(std::move(recorded_outputs),
+                                                     "record output");
 }
 
 ROI Network::roi(int roi_index_value) const {
@@ -101,6 +111,24 @@ const Connectivity& Network::connectivity() const noexcept {
     return connectivity_;
 }
 
+void Network::set_dt(double dt_value) {
+    require_positive_finite(dt_value, "macro dt");
+    dt_ = dt_value;
+}
+
+double Network::dt() const noexcept {
+    return dt_;
+}
+
+void Network::set_exchange_window(double exchange_window_value) {
+    require_positive_finite(exchange_window_value, "exchange_window");
+    exchange_window_ = exchange_window_value;
+}
+
+double Network::exchange_window() const noexcept {
+    return exchange_window_;
+}
+
 int Network::input_index(const std::string& input_name) const {
     const auto iter = input_to_index_.find(input_name);
     if (iter == input_to_index_.end()) {
@@ -117,50 +145,66 @@ const std::vector<std::string>& Network::inputs() const noexcept {
     return inputs_;
 }
 
-int Network::exposure_index(const std::string& exposure_name) const {
-    const auto iter = exposure_to_index_.find(exposure_name);
-    if (iter == exposure_to_index_.end()) {
-        throw std::runtime_error("unknown exposure: " + exposure_name);
+int Network::output_index(const std::string& output_name) const {
+    const auto iter = output_to_index_.find(output_name);
+    if (iter == output_to_index_.end()) {
+        throw std::runtime_error("unknown output: " + output_name);
     }
     return iter->second;
 }
 
-int Network::exposure_count() const noexcept {
-    return static_cast<int>(exposures_.size());
+int Network::output_count() const noexcept {
+    return static_cast<int>(outputs_.size());
 }
 
-const std::vector<std::string>& Network::exposures() const noexcept {
-    return exposures_;
+const std::vector<std::string>& Network::outputs() const noexcept {
+    return outputs_;
 }
 
 const std::vector<int>& Network::recorded_rois() const noexcept {
     return recorded_rois_;
 }
 
+const std::vector<int>& Network::recorded_outputs() const noexcept {
+    return recorded_outputs_;
+}
+
 void Network::set_recorded_rois(std::vector<int> recorded_rois) {
     recorded_rois_ = normalize_roi_indices(std::move(recorded_rois), "record ROI");
 }
 
-void Network::set_initial_exposure(const ROI& roi_value,
-                                   const mind_sim::macro::sim::ScalarBuffer& exposure) {
-    validate_roi_index(roi_value.index, "initial exposure ROI");
-    validate_buffer_size(exposure, exposure_count(), "initial exposure", "exposure");
-    initial_exposures_[static_cast<std::size_t>(roi_value.index)] = exposure;
+void Network::set_recorded_outputs(std::vector<int> recorded_outputs) {
+    recorded_outputs_ = normalize_output_indices(std::move(recorded_outputs),
+                                                     "record output");
 }
 
-void Network::set_initial_exposure_value(const ROI& roi_value,
-                                         const std::string& exposure_name,
-                                         double value) {
-    validate_roi_index(roi_value.index, "initial exposure ROI");
-    set_buffer_value(initial_exposures_,
-                     roi_value.index,
-                     exposure_index(exposure_name),
-                     value,
-                     "initial exposure");
+void Network::record_micro(double* value, std::vector<double>* samples) {
+    if (value == nullptr || samples == nullptr) {
+        throw std::runtime_error("record_micro requires non-null variable and sample buffer pointers");
+    }
+    micro_record_targets_.push_back(MicroTraceRecorder{
+        .value = value,
+        .samples = samples,
+    });
 }
 
-const std::vector<mind_sim::macro::sim::ScalarBuffer>& Network::initial_exposures() const noexcept {
-    return initial_exposures_;
+void Network::record_micro_time(std::vector<double>* samples) {
+    if (samples == nullptr) {
+        throw std::runtime_error("record_micro_time requires a non-null sample buffer pointer");
+    }
+    micro_time_record_targets_.push_back(samples);
+}
+
+const std::vector<MicroTraceRecorder>& Network::micro_record_targets() const noexcept {
+    return micro_record_targets_;
+}
+
+const std::vector<std::vector<double>*>& Network::micro_time_record_targets() const noexcept {
+    return micro_time_record_targets_;
+}
+
+const std::vector<mind_sim::macro::sim::ScalarBuffer>& Network::output_history_start() const noexcept {
+    return output_history_start_;
 }
 
 void Network::set_dc_input(const ROI& roi_value,
@@ -185,31 +229,31 @@ const std::vector<mind_sim::macro::sim::ScalarBuffer>& Network::dc_inputs() cons
     return dc_inputs_;
 }
 
-void Network::couple(const ROI& source_roi,
+void Network::macro_to_macro(const ROI& source_roi,
                      const ROI& target_roi,
-                     std::shared_ptr<mind_sim::macro::sim::CouplingRule> rule,
+                     std::shared_ptr<mind_sim::macro::sim::MacroToMacroRule> rule,
                      std::vector<double> params,
-                     std::vector<int> read_exposure_offsets,
-                     std::vector<int> write_input_offsets) {
-    validate_roi_index(source_roi.index, "coupling source ROI");
-    validate_roi_index(target_roi.index, "coupling target ROI");
+                     std::vector<int> source_exposure_offsets,
+                     std::vector<int> target_input_offsets) {
+    validate_roi_index(source_roi.index, "macro-to-macro source ROI");
+    validate_roi_index(target_roi.index, "macro-to-macro target ROI");
     if (!rule) {
-        throw std::runtime_error("Network coupling rule cannot be null");
+        throw std::runtime_error("Network macro-to-macro rule cannot be null");
     }
     rule->validate_params(params);
-    if (read_exposure_offsets.size() != static_cast<std::size_t>(rule->exposure_count())) {
-        throw std::runtime_error("CouplingRule READ offset count does not match rule");
+    if (source_exposure_offsets.size() != static_cast<std::size_t>(rule->output_count())) {
+        throw std::runtime_error("MacroToMacroRule source output offset count does not match rule");
     }
-    if (write_input_offsets.size() != static_cast<std::size_t>(rule->input_count())) {
-        throw std::runtime_error("CouplingRule WRITE offset count does not match rule");
+    if (target_input_offsets.size() != static_cast<std::size_t>(rule->input_count())) {
+        throw std::runtime_error("MacroToMacroRule target input offset count does not match rule");
     }
-    coupling_projections_.push_back(CouplingProjection{
+    macro_to_macro_projections_.push_back(MacroToMacroProjection{
         .source_roi = source_roi.index,
         .target_roi = target_roi.index,
         .rule = std::move(rule),
         .params = std::move(params),
-        .read_exposure_offsets = std::move(read_exposure_offsets),
-        .write_input_offsets = std::move(write_input_offsets),
+        .source_exposure_offsets = std::move(source_exposure_offsets),
+        .target_input_offsets = std::move(target_input_offsets),
     });
 }
 
@@ -217,33 +261,48 @@ void Network::use_region_rule(const ROI& roi_value,
                               std::shared_ptr<mind_sim::macro::sim::RegionRule> rule,
                               std::vector<double> state,
                               std::vector<double> params,
-                              std::vector<int> read_input_offsets,
-                              std::vector<int> write_exposure_offsets) {
+                              std::vector<int> target_input_offsets,
+                              std::vector<int> source_exposure_offsets) {
     validate_roi_index(roi_value.index, "model ROI");
     if (!rule) {
         throw std::runtime_error("Network.use_region_rule requires a RegionRule");
     }
-    if (read_input_offsets.size() != static_cast<std::size_t>(rule->input_count())) {
-        throw std::runtime_error("RegionRule READ offset count does not match rule");
+    if (target_input_offsets.size() != static_cast<std::size_t>(rule->input_count())) {
+        throw std::runtime_error("RegionRule target input offset count does not match rule");
     }
-    if (write_exposure_offsets.size() != static_cast<std::size_t>(rule->exposure_count())) {
-        throw std::runtime_error("RegionRule WRITE offset count does not match rule");
+    if (source_exposure_offsets.size() != static_cast<std::size_t>(rule->output_count())) {
+        throw std::runtime_error("RegionRule source output offset count does not match rule");
     }
     rule->validate_state(state);
     rule->validate_params(params);
     claim_roi(roi_value.index, OwnerKind::NeuralMass);
+
+    const auto& exposure_names = rule->source_exposure_names();
+    const auto& state_names = rule->state_names();
+    for (int exposure = 0; exposure < static_cast<int>(exposure_names.size()); ++exposure) {
+        const auto& exposure_name = exposure_names[static_cast<std::size_t>(exposure)];
+        const auto state_found = std::find(state_names.begin(), state_names.end(), exposure_name);
+        if (state_found == state_names.end()) {
+            continue;
+        }
+        const int state_index = static_cast<int>(state_found - state_names.begin());
+        output_history_start_[static_cast<std::size_t>(roi_value.index)]
+            .values[static_cast<std::size_t>(output_index(exposure_name))] =
+            state[static_cast<std::size_t>(state_index)];
+    }
+
     region_owners_.push_back(RegionOwner{
         .roi_index = roi_value.index,
         .rule = std::move(rule),
         .state = std::move(state),
         .params = std::move(params),
-        .read_input_offsets = std::move(read_input_offsets),
-        .write_exposure_offsets = std::move(write_exposure_offsets),
+        .target_input_offsets = std::move(target_input_offsets),
+        .source_exposure_offsets = std::move(source_exposure_offsets),
     });
 }
 
-const std::vector<CouplingProjection>& Network::coupling_projections() const noexcept {
-    return coupling_projections_;
+const std::vector<MacroToMacroProjection>& Network::macro_to_macro_projections() const noexcept {
+    return macro_to_macro_projections_;
 }
 
 const std::vector<RegionOwner>& Network::region_owners() const noexcept {
@@ -283,6 +342,24 @@ std::vector<int> Network::normalize_roi_indices(std::vector<int> roi_indices,
         validate_roi_index(roi, what);
         if (seen.insert(roi).second) {
             normalized.push_back(roi);
+        }
+    }
+    return normalized;
+}
+
+std::vector<int> Network::normalize_output_indices(std::vector<int> output_indices,
+                                                     const char* what) const {
+    if (output_indices.empty()) {
+        throw std::runtime_error(std::string(what) + " selection must be non-empty");
+    }
+    std::unordered_set<int> seen;
+    std::vector<int> normalized;
+    for (int output: output_indices) {
+        if (output < 0 || output >= output_count()) {
+            throw std::runtime_error(std::string(what) + " index out of range");
+        }
+        if (seen.insert(output).second) {
+            normalized.push_back(output);
         }
     }
     return normalized;

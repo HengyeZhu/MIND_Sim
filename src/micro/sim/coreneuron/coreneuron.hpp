@@ -54,80 +54,34 @@ using DependencyTable = std::vector<std::vector<int>>;
  * this class.
  */
 class CoreNeuron {
-    /**
-     * map if mech is a point process
-     * In the future only a field of Mechanism class
-     */
     std::vector<char> pnt_map; /* so prop_free can know its a point mech*/
-
-    /** Vector mapping the types (IDs) of different mechanisms of mod files between NEURON and
-     * CoreNEURON
-     */
     std::vector<int> different_mechanism_type;
-
-    /**
-     * dependency helper filled by calls to hoc_register_dparam_semantics
-     * used when nrn_mech_depend is called
-     * vector-of-vector DS. First idx is the mech, second idx is the dependent mech.
-     */
     DependencyTable ion_write_dependency;
-
     std::vector<Memb_func> memb_funcs;
-
-    /**
-     * Net send / Net receive
-     * only used in CoreNEURON for book keeping synapse mechs, should go into CoreNEURON class
-     */
     std::vector<std::pair<NetBufReceive_t, int>> net_buf_receive;
     std::vector<int> net_buf_send_type;
-
-    /**
-     * before-after-blocks from nmodl are registered here as function pointers
-     */
-    std::array<BAMech*, BEFORE_AFTER_SIZE> bamech;
-
-    /**
-     * Internal lookup tables. Number of float and int variables in each mechanism and memory layout
-     * future --> mech class
-     */
+    std::array<BAMech*, BEFORE_AFTER_SIZE> bamech{};
     std::vector<std::vector<int>> nrn_array_dims;
     std::vector<int> nrn_prop_param_size;
     std::vector<int> nrn_prop_dparam_size;
     std::vector<int> nrn_mech_data_layout; /* 1 AoS (default), 0 SoA */
-    /* array is parallel to memb_func. All are 0 except 1 for ARTIFICIAL_CELL */
     std::vector<short> nrn_artcell_qindex;
     std::vector<bool> nrn_is_artificial;
-
-    /**
-     * Net Receive function pointer lookup tables
-     */
     std::vector<pnt_receive_t> pnt_receive; /* for synaptic events. */
     std::vector<pnt_receive_t> pnt_receive_init;
     std::vector<short> pnt_receive_size;
-
-    /**
-     * Holds function pointers for WATCH callback
-     */
     std::vector<nrn_watch_check_t> nrn_watch_check;
-
-    /**
-     * values are type numbers of mechanisms which do net_send call
-     * related to NMODL net_event()
-     *
-     */
     std::vector<int> nrn_has_net_event;
-
-    /**
-     * inverse of nrn_has_net_event_ maps the values of nrn_has_net_event_ to the index of
-     * ptntype2presyn
-     */
     std::vector<int> pnttype2presyn;
-
-
     std::vector<bbcore_read_t> nrn_bbcore_read;
     std::vector<bbcore_write_t> nrn_bbcore_write;
 
   public:
+    CoreNeuron() = default;
+    CoreNeuron(const CoreNeuron&) = delete;
+    CoreNeuron& operator=(const CoreNeuron&) = delete;
+    ~CoreNeuron() = default;
+
     auto& get_memb_funcs() {
         return memb_funcs;
     }

@@ -1,9 +1,7 @@
 #include "io/result_hdf5.hpp"
 
-#include <algorithm>
 #include <cstddef>
 #include <filesystem>
-#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -147,107 +145,75 @@ std::size_t step_count_of(const std::vector<double>& times) {
     return times.empty() ? 0 : times.size() - 1;
 }
 
-std::size_t record_stride(const mind_sim::macro::sim::ExposureRecord& record) {
-    return record.roi_indices.size() * static_cast<std::size_t>(record.exposure_count);
+std::size_t record_stride(const mind_sim::macro::sim::RecordTable& record) {
+    return record.roi_indices.size() * static_cast<std::size_t>(record.output_count);
 }
 
-void validate_record(const mind_sim::macro::sim::ExposureRecord& record,
+void validate_record(const mind_sim::macro::sim::RecordTable& record,
                      const std::vector<double>& times,
-                     const std::vector<std::string>& exposure_names,
+                     const std::vector<std::string>& output_names,
                      const std::vector<std::string>& roi_labels) {
-    if (record.exposure_count <= 0 || record.roi_count <= 0 || record.roi_indices.empty()) {
-        throw std::runtime_error("save_h5 requires recorded ROI exposures");
+    if (record.output_count <= 0 || record.roi_count <= 0 || record.roi_indices.empty()) {
+        throw std::runtime_error("save_h5 requires recorded ROI outputs");
     }
-    if (exposure_names.size() != static_cast<std::size_t>(record.exposure_count)) {
-        throw std::runtime_error("save_h5 exposure name count does not match result");
+    if (output_names.size() != static_cast<std::size_t>(record.output_count)) {
+        throw std::runtime_error("save_h5 output name count does not match result");
     }
     if (roi_labels.size() != static_cast<std::size_t>(record.roi_count)) {
         throw std::runtime_error("save_h5 ROI label count does not match result");
     }
     if (record.values.size() != times.size() * record_stride(record)) {
-        throw std::runtime_error("save_h5 recorded exposure array size mismatch");
+        throw std::runtime_error("save_h5 recorded output array size mismatch");
     }
-}
-
-struct SortedSpikes {
-    std::vector<double> time{};
-    std::vector<int> gid{};
-};
-
-SortedSpikes sort_spikes(const mind_sim::micro::sim::MicroSpikeTable& spikes) {
-    std::vector<std::size_t> order(spikes.time.size());
-    std::iota(order.begin(), order.end(), 0);
-    std::stable_sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
-        if (spikes.time[lhs] != spikes.time[rhs]) {
-            return spikes.time[lhs] < spikes.time[rhs];
-        }
-        return spikes.gid[lhs] < spikes.gid[rhs];
-    });
-
-    SortedSpikes sorted;
-    sorted.time.resize(order.size());
-    sorted.gid.resize(order.size());
-    for (std::size_t out_index = 0; out_index < order.size(); ++out_index) {
-        const auto source = order[out_index];
-        sorted.time[out_index] = spikes.time[source];
-        sorted.gid[out_index] = spikes.gid[source];
-    }
-    return sorted;
 }
 
 void write_macro_result(hid_t file,
                         const std::vector<double>& times,
-                        const mind_sim::macro::sim::ExposureRecord& record,
-                        const std::vector<std::string>& exposure_names,
+                        const mind_sim::macro::sim::RecordTable& record,
+                        const std::vector<std::string>& output_names,
                         const std::vector<std::string>& roi_labels,
                         const std::vector<double>& timing_s,
                         const std::vector<double>& metadata) {
     const auto step_count = step_count_of(times);
     const auto recorded_roi_count = record.roi_indices.size();
-    const auto exposure_count = static_cast<std::size_t>(record.exposure_count);
+    const auto output_count = static_cast<std::size_t>(record.output_count);
     const auto stride = record_stride(record);
 
     write_double_dataset(file,
                          "times_ms",
                          {step_count},
                          times.data() + (times.empty() ? 0 : 1));
-    write_strings(file, "exposure_names", exposure_names);
+    write_strings(file, "output_names", output_names);
     write_strings(file, "roi_labels", roi_labels);
     write_int_dataset(file,
                       "recorded_rois",
                       {recorded_roi_count},
                       record.roi_indices.data());
     write_double_dataset(file,
-                         "roi_exposures",
-                         {step_count, recorded_roi_count, exposure_count},
+                         "roi_outputs",
+                         {step_count, recorded_roi_count, output_count},
                          record.values.data() + (times.empty() ? 0 : stride));
     write_double_dataset(file, "timing_s", {timing_s.size()}, timing_s.data());
     write_double_dataset(file, "metadata", {metadata.size()}, metadata.data());
     write_int_attribute(file, "roi_count", record.roi_count);
-    write_int_attribute(file, "exposure_count", record.exposure_count);
-}
-
-void write_spikes(hid_t file, const mind_sim::micro::sim::MicroSpikeTable& spikes) {
-    const auto sorted = sort_spikes(spikes);
-    write_double_dataset(file, "spike_times_ms", {sorted.time.size()}, sorted.time.data());
-    write_int_dataset(file, "spike_gids", {sorted.gid.size()}, sorted.gid.data());
+    write_int_attribute(file, "output_count", record.output_count);
 }
 
 }  // namespace
 
 void save_macro_result_h5(const mind_sim::macro::sim::MacroSimulationResult& result,
                           const std::string& path,
-                          const std::vector<std::string>& exposure_names,
+                          const std::vector<std::string>& output_names,
                           const std::vector<std::string>& roi_labels,
                           const std::vector<double>& timing_s,
                           const std::vector<double>& metadata) {
-    validate_record(result.exposures, result.times, exposure_names, roi_labels);
+    validate_record(result.records, result.times, output_names, roi_labels);
     ensure_parent_directory(path);
     H5File file(path);
     write_macro_result(file.id,
                        result.times,
-                       result.exposures,
-                       exposure_names,
+                       result.records,
+                       output_names,
                        roi_labels,
                        timing_s,
                        metadata);
@@ -255,36 +221,20 @@ void save_macro_result_h5(const mind_sim::macro::sim::MacroSimulationResult& res
 
 void save_cosim_result_h5(const mind_sim::cosim::SimulationResult& result,
                           const std::string& path,
-                          const std::vector<std::string>& exposure_names,
+                          const std::vector<std::string>& output_names,
                           const std::vector<std::string>& roi_labels,
-                          int spike_roi,
                           const std::vector<double>& timing_s,
                           const std::vector<double>& metadata) {
-    validate_record(result.exposures, result.times, exposure_names, roi_labels);
-    if (spike_roi < 0 || static_cast<std::size_t>(spike_roi) >= result.micro_spikes_by_roi.size()) {
-        throw std::runtime_error("save_h5 spike ROI index out of range");
-    }
+    validate_record(result.records, result.times, output_names, roi_labels);
     ensure_parent_directory(path);
     H5File file(path);
     write_macro_result(file.id,
                        result.times,
-                       result.exposures,
-                       exposure_names,
+                       result.records,
+                       output_names,
                        roi_labels,
                        timing_s,
                        metadata);
-    write_spikes(file.id, result.micro_spikes_by_roi[static_cast<std::size_t>(spike_roi)]);
-}
-
-void save_micro_spikes_h5(const mind_sim::micro::sim::MicroSpikeTable& spikes,
-                          const std::string& path,
-                          const std::vector<double>& timing_s,
-                          const std::vector<double>& metadata) {
-    ensure_parent_directory(path);
-    H5File file(path);
-    write_spikes(file.id, spikes);
-    write_double_dataset(file.id, "timing_s", {timing_s.size()}, timing_s.data());
-    write_double_dataset(file.id, "metadata", {metadata.size()}, metadata.data());
 }
 
 void save_vector_h5(const std::vector<double>& values,

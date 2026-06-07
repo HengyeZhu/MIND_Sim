@@ -1,6 +1,51 @@
 #include "python_api/bindings/bindings.hpp"
 
+#include <algorithm>
+
 namespace mind_sim::python_api::bindings {
+
+namespace {
+
+std::vector<Sim*>& default_micro_registry() {
+    static std::vector<Sim*> registry;
+    return registry;
+}
+
+}  // namespace
+
+Sim::Sim() {
+    register_default_micro(this);
+}
+
+Sim::~Sim() {
+    unregister_default_micro(this);
+}
+
+void register_default_micro(Sim* sim) {
+    if (sim == nullptr) {
+        return;
+    }
+    auto& registry = default_micro_registry();
+    if (std::find(registry.begin(), registry.end(), sim) == registry.end()) {
+        registry.push_back(sim);
+    }
+}
+
+void unregister_default_micro(Sim* sim) {
+    auto& registry = default_micro_registry();
+    registry.erase(std::remove(registry.begin(), registry.end(), sim), registry.end());
+}
+
+Sim& default_micro() {
+    auto& registry = default_micro_registry();
+    if (registry.empty()) {
+        throw std::runtime_error("ROI.use_micro() requires one ms.Sim() to exist");
+    }
+    if (registry.size() != 1) {
+        throw std::runtime_error("ROI.use_micro() requires exactly one ms.Sim()");
+    }
+    return *registry.front();
+}
 
 void bind_micro(nb::module_& m) {
     nb::class_<SectionSpec>(m, "section")
@@ -297,26 +342,6 @@ void bind_micro(nb::module_& m) {
                  return "<mind_sim.netcon id=" + std::to_string(nc.connection_id) + ">";
              });
 
-    nb::class_<SpikeInputView>(m, "spike_input")
-        .def_prop_ro("id", &SpikeInputView::id)
-        .def_prop_ro("runtime_index", &SpikeInputView::runtime_index)
-        .def("__repr__",
-             [](const SpikeInputView& source) {
-                 return "<mind_sim.spike_input id=" + std::to_string(source.source_id) + ">";
-             });
-
-    nb::class_<SpikeInputGroupView>(m, "spike_input_group")
-        .def("__len__", &SpikeInputGroupView::size)
-        .def("__getitem__",
-             [](const SpikeInputGroupView& group, int index) {
-                 return group.get(normalize_py_index(index, group.source_ids.size(), "spike_input_group"));
-             })
-        .def_prop_ro("runtime_base", &SpikeInputGroupView::runtime_base)
-        .def("__repr__",
-             [](const SpikeInputGroupView& group) {
-                 return "<mind_sim.spike_input_group count=" + std::to_string(group.source_ids.size()) + ">";
-             });
-
     nb::class_<NetworkView>(m, "network")
         .def("register_gid_source",
              &NetworkView::register_gid_source,
@@ -349,14 +374,6 @@ void bind_micro(nb::module_& m) {
                 double delay) {
                  return network.event_connect(source, post, weight, delay);
              },
-             nb::arg("source"),
-             nb::arg("post"),
-             nb::arg("weight"),
-             nb::arg("delay"))
-        .def("spike_input", &NetworkView::spike_input)
-        .def("spike_inputs", &NetworkView::spike_inputs, nb::arg("count"))
-        .def("spike_connect",
-             &NetworkView::spike_connect,
              nb::arg("source"),
              nb::arg("post"),
              nb::arg("weight"),
@@ -400,10 +417,10 @@ void bind_micro(nb::module_& m) {
         .def("get_dt", &Sim::get_dt)
         .def("set_num_threads", &Sim::set_num_threads)
         .def("get_num_threads", &Sim::get_num_threads)
-        .def("load_mech_metadata", &Sim::load_mech_metadata)
+        .def("load_mech", &Sim::load_mech)
         .def("ion_register", &Sim::ion_register, nb::arg("ion"), nb::arg("charge"))
         .def("ion_charge", &Sim::ion_charge, nb::arg("ion_mechanism"))
-        .def("get_loaded_mech_metadata_paths", &Sim::get_loaded_mech_metadata_paths)
+        .def("get_loaded_mech_paths", &Sim::get_loaded_mech_paths)
         .def("__getattr__",
              [](const Sim& sim, const std::string& key) {
                  if (key == "name") {
@@ -430,6 +447,7 @@ void bind_micro(nb::module_& m) {
         .def("build_morphology", &Sim::build_morphology, nb::arg("morph_templates"), nb::rv_policy::reference_internal)
         .def("__len__", [](const Sim& sim) { return sim.model.population_count(); })
         .def("population", &sim_population, nb::arg("name"), nb::keep_alive<0, 1>())
+        .def("populations", &sim_populations)
         .def("network", &sim_network, nb::keep_alive<0, 1>())
         .def("build_microcircuit", &Sim::build_microcircuit)
         .def("finitialize", &Sim::finitialize, nb::arg("v_init"))

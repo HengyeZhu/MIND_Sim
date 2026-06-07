@@ -28,11 +28,13 @@ env/
 # Simulation outputs and analysis products
 /result/
 /results/
+/examples/HCP_1200/
 *.h5
 *.hdf5
 *.npz
 *.npy
 *.csv
+!examples/ca3_epilepsy_cosim/data/synthetic_hybrid_ca3_connectivity.csv
 
 # CoreNEURON / NEURON generated runtime data
 /corenrn_data/

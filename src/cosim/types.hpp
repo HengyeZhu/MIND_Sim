@@ -9,8 +9,7 @@ namespace mind_sim::cosim {
 
 struct SimulationResult {
     std::vector<double> times{};
-    mind_sim::macro::sim::ExposureRecord exposures{};
-    std::vector<mind_sim::micro::sim::MicroSpikeTable> micro_spikes_by_roi{};
+    mind_sim::macro::sim::RecordTable records{};
 };
 
 }  // namespace mind_sim::cosim

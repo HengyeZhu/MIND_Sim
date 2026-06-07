@@ -1,16 +1,7 @@
 from . import _native
-from ._codegen import (
-    Connectivity,
-    LocalConnectivity,
-    MacroSimulator,
-    MicroCircuit,
-    Network,
-    NeuralField,
-    NodeToRoiMap,
-    ROI,
+from ._network import (
     Simulator,
 )
-from ._io import load_connectivity, load_network
 
 Sim = _native.Sim
 Vector = _native.Vector
@@ -23,25 +14,9 @@ load_swc_section_list = _native.load_swc_section_list
 load_asc_section_list = _native.load_asc_section_list
 build_section_distance_layout = _native.build_section_distance_layout
 
-ScalarBuffer = _native.ScalarBuffer
-MicroSpikeTable = _native.MicroSpikeTable
-ExposureRecord = _native.ExposureRecord
-MacroSimulationResult = _native.MacroSimulationResult
 SimulationResult = _native.SimulationResult
 
 __all__ = [
-    "Connectivity",
-    "ExposureRecord",
-    "LocalConnectivity",
-    "MacroSimulator",
-    "MacroSimulationResult",
-    "MicroCircuit",
-    "MicroSpikeTable",
-    "Network",
-    "NeuralField",
-    "NodeToRoiMap",
-    "ROI",
-    "ScalarBuffer",
     "Sim",
     "SimulationResult",
     "Simulator",
@@ -49,11 +24,13 @@ __all__ = [
     "build_section_distance_layout",
     "load_asc_section_list",
     "load_asc_sections",
-    "load_connectivity",
-    "load_network",
     "load_swc_section_list",
     "load_swc_sections",
     "section",
     "section_list",
     "segment_values",
 ]
+
+from . import macro  # noqa: E402
+
+__all__.append("macro")

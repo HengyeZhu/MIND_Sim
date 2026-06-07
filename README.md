@@ -11,46 +11,64 @@
 </h3>
 
 <p align="center">
+  <a href="#installation">Installation</a> •
   <a href="#overview">Overview</a> •
   <a href="#architecture">Architecture</a> •
   <a href="#performance">Performance</a> •
+  <a href="#examples">Examples</a> •
   <a href="#acknowledgements">Acknowledgements</a>
 </p>
 
 <br>
 
+## Installation
+
+MIND_Sim is currently distributed from source. pip install support is coming soon.
+
 ## Overview
 
 Currently, it is intended for personal research use, with features added as needed.
 
-The central modeling semantics are ROI-first. In this view, an ROI is the public coupling interface of the network, not a fixed commitment to one internal scale of description. Users can choose the scale that is meaningful for each ROI, such as a neural mass model, a neural field model, a detailed microcircuit. Coupling between ROIs is expressed through ROI-level exposures, while the values of those exposures are produced entirely by the internal dynamics owned by each ROI. This keeps the network-level interface simple and explicit, while allowing high freedom in how each ROI is modeled internally. Bridge rules then translate ROI-level exposures into the concrete values required by each downstream dynamical simulation.
+MIND_Sim is an extension simulator based on the [NEURON Simulator](https://github.com/neuronsimulator/nrn) for studying Multiscale-Integrative Neuronal Dynamics. It is organized around three main ideas:
 
-This is my first public release of a simulator project. Its main motivation is the lack of a unified framework for multiscale simulation. While learning from the existing ecosystem, I tried to formulate my own frontend modeling approach. For backend computation, I reused established workflows wherever possible: the micro-scale execution is built on CoreNEURON, and the macro-scale layer was informed by TVB-style computation. I have made efforts to comply with the licenses of the open-source projects on which this work depends, but I may still have overlooked some details. If you notice any issue or believe any attribution or reuse requirement has not been handled correctly, please contact me at [gluciferd@gmail.com](mailto:gluciferd@gmail.com).
+1. It rewrites the frontend network-modeling layer of NEURON in C++, while preserving a NEURON-style API, and improves network construction speed by more than 10x.
+2. It extends the MOD DSL to describe neural population dynamics and micro2macro transformations, providing a flexible way to build hybrid models and addressing the current limitation that [the TVB platform does not yet support hybrid models](https://github.com/the-virtual-brain/tvb-root/pull/771).
+3. It treats regions of interest (ROIs) as first-class modeling objects, so users can freely choose the brain regions and scales they want to simulate.
+
+This is my first public release of a simulator. I have made efforts to comply with the licenses of the open-source projects on which this work depends, but I may still have overlooked some details. If you notice that any reuse requirement has not been handled correctly, please contact me at [gluciferd@gmail.com](mailto:gluciferd@gmail.com).
 
 ## Architecture
 
-### Frontend modeling
+### Execution model
 
-At the micro scale, the frontend follows the style of the NEURON simulator. In contrast to a general-purpose interactive simulator frontend, this layer is intentionally focused on the computational objects required for execution.
+MIND_Sim is designed for multiscale modeling, but it also supports micro-only and macro-only simulations. The micro-scale backend is built on CoreNEURON, so detailed neuron simulations can use CPU multi-threading and CoreNEURON GPU execution. The macro-scale backend is designed around an overlap pipeline: while the micro simulation advances one exchange window, the CPU-side macro and bridge work can be prepared or executed around that window. The macro layer is currently single-threaded; for the neural mass models used so far, this is sufficient because macro computation is small enough to be hidden behind micro execution.
 
-At the macro scale, brain regions are represented as first-class region-of-interest (ROI) objects, and inter-regional interactions are created explicitly as connections between ROI objects. Neural mass models specify the intrinsic dynamics of each ROI using a code-generation style similar in spirit to GeNN: equations are provided at the frontend and compiled into backend kernels. Coupling rules between ROIs, as well as bridge rules between macro-scale and micro-scale components, are supplied by `.mod` files and processed by a dedicated MIND_Sim translator.
+### ROI-centered modeling
 
-This separation between intrinsic ROI dynamics, inter-ROI coupling, and cross-scale exchange makes the modeling interface more flexible, particularly in a field that is still evolving and does not yet have fully settled modeling conventions.
+At the macro scale, users load a labelled connectivity matrix, and MIND_Sim automatically creates one ROI object for each label. Each ROI can then choose the scale that is meaningful for the model: a detailed microcircuit, a neural field model, or a neural mass model. Different ROIs may use different equations, different exposed variables, and different coupling rules.
 
-### Backend
+### MOD-based model definitions
 
-The backend currently supports CPU execution on a single core, as well as a GPU mode. Because the dominant computational cost lies in the micro-scale simulation, GPU acceleration is applied only to the micro component. The remaining backend pipeline runs on the CPU, and in the examples tested so far its throughput is sufficient to overlap the macro-scale computation. Micro computation is handled by CoreNEURON, while the macro layer currently supports only discrete-node ROIs.
+MIND_Sim extends the MOD language used by the NEURON Simulator from micro-scale mechanisms to neural mass models and cross-scale transform modules. This keeps the modeling style aligned with NEURON/NMODL, so users who are already familiar with micro-scale mechanisms can move to micro2macro transforms without learning a completely separate model-description language. It also keeps the flexibility of modular mechanism definitions: equations and transform rules can be written independently, combined with different ROI models, and replaced without changing the rest of the simulation.
+
+Based on the same idea, macro-scale network construction also follows a NEURON-like syntax.
+
+The current micro-macro transformation is event based. This follows the same general direction as recent Arbor-TVB and TVB-NEST co-simulation work, where spiking activity and whole-brain variables are exchanged through explicit transformation modules: [Hater, Courson, Lu, Diaz-Pier, and Manos (2026), Arbor-TVB: a novel multi-scale co-simulation framework with a case study on neural-level seizure generation and whole-brain propagation](https://doi.org/10.3389/fncom.2025.1731161), and [Kusch, Diaz-Pier, Klijn, Sontheimer, Bernard, Morrison, and Jirsa (2024), Multiscale co-simulation design pattern for neuroscience applications](https://doi.org/10.3389/fninf.2024.1156683). From a NEURON Simulator perspective, micro2macro transformation is similar to synaptic event handling: each spike is delivered as an event and contributes to a macro exposure or state variable. Macro2micro transformation is NetStim-like: macro variables are converted into generated spike events that feed back into selected micro synapses.
+
+### Mapping microcircuits to ROIs
+
+A single microcircuit can own or contribute to any number of ROIs. This matters in connectome-based modeling because every ROI has its own exposures and inputs, even when several ROIs are represented by different parts or projections of the same detailed micro model. Instead of forcing one micro model to collapse into one macro node, MIND_Sim lets each ROI declare its own exposed variables and accepted inputs. Different subsets of the same micro simulation can therefore transform their spikes or states into different ROI-level values, and different ROI inputs can be routed back to different micro targets.
 
 ## Performance
 
-By rewriting the NEURON simulator frontend in C++, MIND_Sim can speed up model construction by more than 10x while still using CoreNEURON as the backend. This keeps backend performance and numerical results aligned with CoreNEURON.
+By rewriting the NEURON simulator frontend in C++, MIND_Sim improves micro-network construction speed by more than 10x. This has been observed across multiple models while still keeping CoreNEURON as the execution backend.
 
-The macro and bridge components are also implemented in C++, so for small-scale micro simulations the total runtime is significantly faster than TVB-Multiscale. A GPU backend, also based on CoreNEURON, is planned and is expected to provide substantial acceleration for large-scale micro simulations.
+For full cosimulation, runtime is usually dominated by the micro-scale simulation itself, so the total simulation speedup is more limited than the construction speedup. In small-network cosimulation cases, MIND_Sim has shown about 7x faster total runtime. The main sources of this gain are C++ implementations of the transform path and the overlap pipeline design. A broader benchmark is still needed, because there is not yet a standard benchmark suite that cleanly covers this kind of hybrid micro-macro workload.
 
-The current examples and tests are still incomplete, and the macro and bridge APIs remain under active development.
+## Examples
+
+Coming soon.
 
 ## Acknowledgements
 
-I acknowledge the contributions of simulators such as **[NEURON](https://github.com/neuronsimulator/nrn)**, **[Arbor](https://github.com/arbor-sim/arbor/)**, **[GeNN](https://github.com/genn-team/genn)** and **[TVB](https://github.com/the-virtual-brain/tvb-root)** to computational neuroscience.
-
-This is a project developed during my learning process, and it draws on many existing ideas and implementations. In the future, I plan to redevelop the entire framework based on my own understanding.
+I sincerely acknowledge the contributions of simulators such as [NEURON](https://github.com/neuronsimulator/nrn), [Arbor](https://github.com/arbor-sim/arbor/), [GeNN](https://github.com/genn-team/genn), and [TVB](https://github.com/the-virtual-brain/tvb-root) to computational neuroscience.

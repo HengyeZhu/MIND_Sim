@@ -484,6 +484,14 @@ MicroWindowToken MicroRuntime::submit_window(double start_time, double stop_time
 void MicroRuntime::run_prepared_window(double stop_time) {
     ensure_core_globals_bound();
     const double half_dt = 0.5 * core_data_->dt;
+    const double start_time = coreneuron::nrn_threads->_t;
+    const int step_count = static_cast<int>(
+        std::llround(std::max(0.0, stop_time - start_time) / core_data_->dt));
+    if (step_count <= 0) {
+        core_data_->sync_threads_from_runtime();
+        return;
+    }
+    const double target_stop_time = start_time + static_cast<double>(step_count) * core_data_->dt;
     const auto integrate_to = [&](double target_time, bool catch_up) {
         coreneuron::ncs2nrn_integrate(target_time);
         if (!catch_up) {
@@ -502,24 +510,23 @@ void MicroRuntime::run_prepared_window(double stop_time) {
             }
         }
     };
-    const double start_time = coreneuron::nrn_threads->_t;
-    if (stop_time - start_time > half_dt) {
+    if (target_stop_time - start_time > half_dt) {
         const double mindelay = core_data_->threads.size() > 1
                                      ? core_data_->effective_mindelay
                                      : std::numeric_limits<double>::infinity();
-        const double remaining = stop_time - start_time;
+        const double remaining = target_stop_time - start_time;
         bool chunked = false;
         if (std::isfinite(mindelay) && mindelay > 0.0 && mindelay < remaining) {
             chunked = true;
             const int chunk_steps = chunk_steps_for_mindelay(mindelay, core_data_->dt);
             const double chunk_dt = static_cast<double>(chunk_steps) * core_data_->dt;
             for (double chunk_stop = start_time + chunk_dt;
-                 chunk_stop < stop_time - half_dt;
+                 chunk_stop < target_stop_time - half_dt;
                  chunk_stop += chunk_dt) {
                 integrate_to(chunk_stop, true);
             }
         }
-        integrate_to(stop_time, chunked);
+        integrate_to(target_stop_time, chunked);
     }
     core_data_->sync_threads_from_runtime();
 }
