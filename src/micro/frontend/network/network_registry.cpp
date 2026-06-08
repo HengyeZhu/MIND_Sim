@@ -849,13 +849,13 @@ RealNetConSourceKey NetworkRegistry::get_real_netcon_source_key(int connection_i
     return source.real_source;
 }
 
-int NetworkRegistry::register_gid_source(int gid,
-                                         int source_gid,
-                                         int source_section_index,
-                                         double source_loc,
-                                         std::optional<double> threshold) {
-    if (gid < 0) {
-        throw std::runtime_error("gid source id must be non-negative");
+int NetworkRegistry::register_spike_source(int sid,
+                                           int source_gid,
+                                           int source_section_index,
+                                           double source_loc,
+                                           std::optional<double> threshold) {
+    if (sid < 0) {
+        throw std::runtime_error("spike source sid must be non-negative");
     }
     if (source_section_index < 0) {
         throw std::runtime_error("gid source section index must be non-negative");
@@ -871,27 +871,27 @@ int NetworkRegistry::register_gid_source(int gid,
         .loc = source_loc,
     };
     const int source_slot = intern_real_event_source_slot_(source_key, threshold, false);
-    const auto gid_index = static_cast<std::size_t>(gid);
-    if (gid_source_slot_by_gid_.size() <= gid_index) {
-        gid_source_slot_by_gid_.resize(gid_index + 1, -1);
+    const auto sid_index = static_cast<std::size_t>(sid);
+    if (source_slot_by_sid_.size() <= sid_index) {
+        source_slot_by_sid_.resize(sid_index + 1, -1);
     }
-    if (gid_source_slot_by_gid_[gid_index] >= 0) {
-        throw std::runtime_error("gid source gid=" + std::to_string(gid) + " is already registered");
+    if (source_slot_by_sid_[sid_index] >= 0) {
+        throw std::runtime_error("spike source sid=" + std::to_string(sid) + " is already registered");
     }
-    gid_source_slot_by_gid_[gid_index] = source_slot;
+    source_slot_by_sid_[sid_index] = source_slot;
     return 0;
 }
 
-int NetworkRegistry::register_gid_connect(int gid,
+int NetworkRegistry::register_sid_connect(int sid,
                                           int target_event_target_id,
                                           double weight,
                                           double delay) {
     validate_weight_delay(weight, delay);
-    if (gid < 0 || static_cast<std::size_t>(gid) >= gid_source_slot_by_gid_.size() ||
-        gid_source_slot_by_gid_[static_cast<std::size_t>(gid)] < 0) {
-        throw std::runtime_error("gid source gid=" + std::to_string(gid) + " is not registered");
+    if (sid < 0 || static_cast<std::size_t>(sid) >= source_slot_by_sid_.size() ||
+        source_slot_by_sid_[static_cast<std::size_t>(sid)] < 0) {
+        throw std::runtime_error("spike source sid=" + std::to_string(sid) + " is not registered");
     }
-    const int source_slot = gid_source_slot_by_gid_[static_cast<std::size_t>(gid)];
+    const int source_slot = source_slot_by_sid_[static_cast<std::size_t>(sid)];
     const int target_slot = append_existing_event_target_target_(target_event_target_id);
     const int weight_count =
         target_event_target_id >= 0 ? require_netcon_weight_count(*this, target_event_target_id) : 1;

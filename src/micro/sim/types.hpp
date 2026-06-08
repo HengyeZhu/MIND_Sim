@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
+#include <numeric>
 #include <vector>
 
 namespace mind_sim::micro::sim {
@@ -55,6 +57,27 @@ struct MicroSpikeTable {
     void append(double spike_time, int spike_gid) {
         time.push_back(spike_time);
         gid.push_back(spike_gid);
+    }
+
+    void sort_by_time_gid() {
+        std::vector<std::size_t> order(time.size());
+        std::iota(order.begin(), order.end(), std::size_t{0});
+        std::stable_sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
+            if (time[lhs] == time[rhs]) {
+                return gid[lhs] < gid[rhs];
+            }
+            return time[lhs] < time[rhs];
+        });
+        std::vector<double> sorted_time;
+        std::vector<int> sorted_gid;
+        sorted_time.reserve(time.size());
+        sorted_gid.reserve(gid.size());
+        for (std::size_t index: order) {
+            sorted_time.push_back(time[index]);
+            sorted_gid.push_back(gid[index]);
+        }
+        time.swap(sorted_time);
+        gid.swap(sorted_gid);
     }
 
     [[nodiscard]] MicroSpikeTableView view(std::size_t offset, std::size_t count) const noexcept {

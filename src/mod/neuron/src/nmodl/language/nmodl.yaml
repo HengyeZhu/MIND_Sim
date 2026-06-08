@@ -592,9 +592,17 @@
                         - MindBlock:
                             nmodl: "MIND "
                             members:
-                              - block:
-                                  brief: "MIND Sim extension block"
+                              - role:
+                                  brief: "MIND Sim rule role"
                                   type: String
+                              - target_inputs:
+                                  brief: "MIND Sim target input names"
+                                  type: String
+                                  vector: true
+                              - source_exposures:
+                                  brief: "MIND Sim source exposure names"
+                                  type: String
+                                  vector: true
                             brief: "Represents a MIND Sim extension block"
                             description: |
                                   MIND Sim uses this block to describe macro, micro2macro,

@@ -68,7 +68,7 @@ section_id append_stylized_section(Morph& morph,
 // Append a NEURON-compatible "n3d==0" cylinder section:
 //  - no pt3d points (Section::pt3d_count stays 0)
 //  - length stored in Section::L_um
-//  - diameter stored on the dummy SWC head point (for debugging only)
+//  - diameter stored on the dummy SWC head point
 section_id append_cylindrical_section_no_pt3d(Morph& morph,
                                              const std::string& name,
                                              section_id parent_section_id,

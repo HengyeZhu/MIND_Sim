@@ -88,6 +88,12 @@ struct dparam_field_info {
 void register_data_fields(int mech_type,
                           std::vector<data_field_info> const& param_info,
                           std::vector<dparam_field_info> const& dparam_info);
+void register_data_fields(int mech_type,
+                          std::vector<std::pair<const char*, int>> const& param_info,
+                          std::vector<std::pair<const char*, const char*>> const& dparam_info);
+void register_data_fields(int mech_type,
+                          std::vector<std::pair<std::string, int>> const& param_info,
+                          std::vector<std::pair<std::string, std::string>> const& dparam_info);
 }  // namespace detail
 
 template <typename... Fields>

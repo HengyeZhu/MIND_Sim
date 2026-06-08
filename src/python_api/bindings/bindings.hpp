@@ -1,7 +1,7 @@
 #pragma once
 
 #include "micro/frontend/model.hpp"
-#include "cosim/bridge/interfaces.hpp"
+#include "cosim/transform/interfaces.hpp"
 #include "coreneuron/io/output_spikes.hpp"
 #include "cosim/hybrid_simulator.hpp"
 #include "macro/frontend/local_connectivity.hpp"
@@ -457,11 +457,6 @@ struct Sim {
         return 0;
     }
 
-    int set_spike_output_enabled(bool enabled) {
-        model.set_spike_output_enabled(enabled);
-        return 0;
-    }
-    bool is_spike_output_enabled() const { return model.spike_output_enabled(); }
     int set_device(const std::string& device) {
         model.set_device(device);
         return 0;
@@ -518,91 +513,6 @@ struct Sim {
         return 0;
     }
     double get_t() const { return model.time(); }
-    nb::dict debug_core_thread() const {
-        const auto& core = model.core_neuron_data();
-        const auto& nt = core.threads.front();
-        nb::dict out;
-        auto to_list = [](const auto& values) {
-            nb::list list;
-            for (const auto& value : values) {
-                list.append(value);
-            }
-            return list;
-        };
-        out["ncell"] = nt.ncell;
-        out["end"] = nt.end;
-        out["node_permutation"] = to_list(nt.node_permutation);
-        out["parent"] = to_list(nt.v_parent_index);
-        out["a"] = to_list(nt.actual_a());
-        out["b"] = to_list(nt.actual_b());
-        out["rhs"] = to_list(nt.actual_rhs());
-        out["d"] = to_list(nt.actual_d());
-        out["v"] = to_list(nt.actual_v());
-        out["area"] = to_list(nt.actual_area());
-        out["t"] = nt._t;
-        out["dt"] = nt._dt;
-        nb::list memb_lists;
-        for (const auto& ml : nt.memb_lists) {
-            nb::dict item;
-            item["name"] = ml.name;
-            item["type"] = ml.type;
-            item["nodeindices"] = to_list(ml.nodeindices);
-            item["data"] = to_list(std::span<const double>(
-                ml.ml.data,
-                static_cast<std::size_t>(coreneuron::corenrn.get_prop_param_size()[static_cast<std::size_t>(ml.type)]) *
-                    static_cast<std::size_t>(ml.ml._nodecount_padded)));
-            item["pdata"] = to_list(ml.pdata);
-            memb_lists.append(item);
-        }
-        out["memb_lists"] = memb_lists;
-        nb::list tml;
-        for (const auto& item : nt.tml_storage) {
-            tml.append(coreneuron::nrn_get_mechname(item.index));
-        }
-        out["tml"] = tml;
-        nb::list pnts;
-        for (const auto& pnt : nt.pntproc_storage) {
-            nb::dict item;
-            item["type"] = pnt._type;
-            item["i_instance"] = pnt._i_instance;
-            item["tid"] = pnt._tid;
-            pnts.append(item);
-        }
-        out["pntprocs"] = pnts;
-        nb::list presyns;
-        for (const auto& presyn : nt.presyn_storage) {
-            nb::dict item;
-            item["gid"] = presyn.gid_;
-            item["threshold"] = presyn.threshold_;
-            item["thvar_index"] = presyn.thvar_index_;
-            item["nc_index"] = presyn.nc_index_;
-            item["nc_cnt"] = presyn.nc_cnt_;
-            presyns.append(item);
-        }
-        out["presyns"] = presyns;
-        nb::list netcons;
-        for (const auto& netcon : nt.netcon_storage) {
-            nb::dict item;
-            item["active"] = netcon.active_;
-            item["delay"] = netcon.delay_;
-            item["weight_index"] = netcon.u.weight_index_;
-            item["target_type"] = netcon.target_ ? netcon.target_->_type : -1;
-            item["target_instance"] = netcon.target_ ? netcon.target_->_i_instance : -1;
-            netcons.append(item);
-        }
-        out["netcons"] = netcons;
-        out["weights"] = to_list(nt.weight_storage);
-        return out;
-    }
-    std::vector<double> get_spk_by_gid(int gid) const {
-        std::vector<double> out;
-        for (std::size_t i = 0; i < coreneuron::spikevec_gid.size(); ++i) {
-            if (coreneuron::spikevec_gid[i] == gid) {
-                out.push_back(coreneuron::spikevec_time[i]);
-            }
-        }
-        return out;
-    }
     void set_celsius(double celsius) { model.set_celsius(celsius); }
     double get_celsius() const { return model.celsius(); }
 };
@@ -833,20 +743,26 @@ struct NetConView {
 
 struct SpikeInputView {
     Sim* sim{};
-    int source_id{-1};
+    int macro2micro_id{-1};
 
-    int id() const { return source_id; }
-    int runtime_index() const { return sim->model.spike_input_runtime_index(source_id); }
+    int id() const { return macro2micro_id; }
+    int runtime_index() const { return sim->model.spike_input_runtime_index(macro2micro_id); }
 };
 
 struct NetworkView {
     Sim* sim{};
 
-    int register_gid_source(int gid, const VariableRefView& source, std::optional<double> threshold) const {
-        return sim->model.register_gid_source(gid, source.ref, threshold);
+    // Python modeling API uses sid = spike-source id. A sid may equal cell.gid in
+    // a one-spike-source-per-cell model, but multiple source locations from one
+    // cell should use distinct sid values.
+    void register_spike_source(int sid,
+                               const VariableRefView& source,
+                               std::optional<double> threshold) const {
+        const int registration_id = sim->model.register_spike_source(sid, source.ref, threshold);
+        static_cast<void>(registration_id);
     }
-    NetConView gid_connect(int gid, const PointProcessView& post, double weight, double delay) const {
-        const int id = sim->model.gid_connect(gid, post.insert_id, weight, delay);
+    NetConView sid_connect(int sid, const PointProcessView& post, double weight, double delay) const {
+        const int id = sim->model.sid_connect(sid, post.insert_id, weight, delay);
         return NetConView{sim, id};
     }
     NetConView event_connect(const ArtificialCellView& source,
@@ -867,11 +783,11 @@ struct NetworkView {
         const int id = sim->model.register_spike_input_source();
         return SpikeInputView{sim, id};
     }
-    NetConView macro_connect(const SpikeInputView& source,
+    NetConView macro_connect(const SpikeInputView& macro2micro,
                              const PointProcessView& post,
                              double weight,
                              double delay) const {
-        const int id = sim->model.spike_input_connect(source.source_id, post.insert_id, weight, delay);
+        const int id = sim->model.spike_input_connect(macro2micro.macro2micro_id, post.insert_id, weight, delay);
         return NetConView{sim, id};
     }
 };

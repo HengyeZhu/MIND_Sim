@@ -4,14 +4,10 @@
 
 namespace mind_sim::python_api::bindings {
 
-namespace {
-
 std::vector<Sim*>& default_micro_registry() {
     static std::vector<Sim*> registry;
     return registry;
 }
-
-}  // namespace
 
 Sim::Sim() {
     register_default_micro(this);
@@ -343,14 +339,14 @@ void bind_micro(nb::module_& m) {
              });
 
     nb::class_<NetworkView>(m, "network")
-        .def("register_gid_source",
-             &NetworkView::register_gid_source,
-             nb::arg("gid"),
+        .def("register_spike_source",
+             &NetworkView::register_spike_source,
+             nb::arg("sid"),
              nb::arg("source"),
              nb::arg("threshold") = nb::none())
-        .def("gid_connect",
-             &NetworkView::gid_connect,
-             nb::arg("gid"),
+        .def("sid_connect",
+             &NetworkView::sid_connect,
+             nb::arg("sid"),
              nb::arg("post"),
              nb::arg("weight"),
              nb::arg("delay"))
@@ -410,8 +406,6 @@ void bind_micro(nb::module_& m) {
     nb::class_<Sim>(m, "Sim")
         .def(nb::init<>())
         .def_rw("name", &Sim::name)
-        .def("set_spike_output_enabled", &Sim::set_spike_output_enabled)
-        .def("is_spike_output_enabled", &Sim::is_spike_output_enabled)
         .def("set_device", &Sim::set_device)
         .def("set_dt", &Sim::set_dt)
         .def("get_dt", &Sim::get_dt)
@@ -458,8 +452,6 @@ void bind_micro(nb::module_& m) {
              nb::call_guard<nb::gil_scoped_release>())
         .def("fadvance", &Sim::fadvance, nb::call_guard<nb::gil_scoped_release>())
         .def("get_t", &Sim::get_t)
-        .def("_debug_core_thread", &Sim::debug_core_thread)
-        .def("get_spk_by_gid", &Sim::get_spk_by_gid, nb::arg("gid"))
         .def_prop_rw("celsius", &Sim::get_celsius, &Sim::set_celsius)
         .def_prop_ro("_ref_t", &sim_time_ref);
 

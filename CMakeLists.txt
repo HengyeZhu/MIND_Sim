@@ -376,8 +376,8 @@ list(
   "${PROJECT_SOURCE_DIR}/src/micro/sim/coreneuron/mpi/lib/nrnmpi.cpp"
 )
 
-set(MIND_SIM_COSIM_BRIDGE_SOURCES
-  src/cosim/bridge/interfaces.cpp
+set(MIND_SIM_COSIM_TRANSFORM_SOURCES
+  src/cosim/transform/interfaces.cpp
 )
 
 set(MIND_SIM_MACRO_SOURCES
@@ -423,7 +423,7 @@ set(MIND_SIM_COSIM_SOURCES
 )
 
 set(MIND_SIM_NATIVE_CORE_SOURCES
-  ${MIND_SIM_COSIM_BRIDGE_SOURCES}
+  ${MIND_SIM_COSIM_TRANSFORM_SOURCES}
   ${MIND_SIM_MACRO_SOURCES}
   ${MIND_SIM_MICRO_SOURCES}
   ${MIND_SIM_IO_SOURCES}
@@ -460,7 +460,6 @@ add_custom_command(
   COMMAND "${CMAKE_COMMAND}" -E rm -rf
           "${MIND_SIM_BUILD_PYTHON_API_DIR}/default_mechanisms"
           "${MIND_SIM_BUILD_PYTHON_API_DIR}/__pycache__"
-          "${MIND_SIM_BUILD_PYTHON_API_DIR}/bridge/__pycache__"
           "${MIND_SIM_BUILD_PYTHON_API_DIR}/cosim/__pycache__"
           "${MIND_SIM_BUILD_PYTHON_API_DIR}/macro/__pycache__"
           "${MIND_SIM_BUILD_PYTHON_API_DIR}/micro/__pycache__"

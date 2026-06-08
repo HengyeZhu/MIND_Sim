@@ -11,7 +11,10 @@
 #include <chrono>
 #include <cmath>
 #include <ctime>
+#include <map>
+#include <optional>
 #include <regex>
+#include <sstream>
 
 #include "ast/all.hpp"
 #include "codegen/codegen_cpp_visitor.hpp"
@@ -45,6 +48,388 @@ using symtab::syminfo::NmodlType;
 
 extern const std::regex regex_special_chars;
 
+namespace {
+
+struct MindSpec {
+    std::string role;
+    std::vector<std::string> target_inputs;
+    std::vector<std::string> source_exposures;
+};
+
+struct MindVariable {
+    std::string name;
+    double default_value = 0.0;
+};
+
+struct MindRenderData {
+    std::string model;
+    std::string safe;
+    MindSpec spec;
+    std::vector<MindVariable> states;
+    std::vector<MindVariable> params;
+    std::map<std::string, int> data_offsets;
+    std::map<std::string, int> datum_semantic_offsets;
+    int field_count = 0;
+    int datum_count = 0;
+};
+
+std::string mind_cpp_identifier(const std::string& value) {
+    std::string out;
+    out.reserve(value.size());
+    for (char c: value) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '_') {
+            out.push_back(c);
+        } else {
+            out.push_back('_');
+        }
+    }
+    if (out.empty() || (out.front() >= '0' && out.front() <= '9')) {
+        out.insert(out.begin(), '_');
+    }
+    return out;
+}
+
+std::string mind_cpp_string(const std::string& value) {
+    std::ostringstream out;
+    out << '"';
+    for (char c: value) {
+        if (c == '\\' || c == '"') {
+            out << '\\';
+        }
+        out << c;
+    }
+    out << '"';
+    return out.str();
+}
+
+std::vector<std::string> mind_string_values(const ast::StringVector& values) {
+    std::vector<std::string> out;
+    out.reserve(values.size());
+    for (const auto& value: values) {
+        out.push_back(value->eval());
+    }
+    return out;
+}
+
+std::optional<MindSpec> mind_spec_from_ast(const ast::Program& node) {
+    const auto blocks = collect_nodes(node, {ast::AstNodeType::MIND_BLOCK});
+    if (blocks.empty()) {
+        return std::nullopt;
+    }
+    if (blocks.size() != 1) {
+        throw std::runtime_error("MOD file must contain at most one MIND block");
+    }
+    const auto* block = dynamic_cast<const ast::MindBlock*>(blocks.front().get());
+    if (block == nullptr) {
+        throw std::runtime_error("MIND block AST node has unexpected type");
+    }
+    MindSpec spec{
+        .role = block->get_role()->eval(),
+        .target_inputs = mind_string_values(block->get_target_inputs()),
+        .source_exposures = mind_string_values(block->get_source_exposures()),
+    };
+    if (spec.role != "REGION" && spec.role != "MACRO2MACRO" && spec.role != "MACRO2MICRO" &&
+        spec.role != "MICRO2MACRO") {
+        throw std::runtime_error("unsupported MIND ROLE " + spec.role);
+    }
+    return spec;
+}
+
+std::vector<std::string> mind_names_of(const std::vector<MindVariable>& values) {
+    std::vector<std::string> out;
+    out.reserve(values.size());
+    for (const auto& value: values) {
+        out.push_back(value.name);
+    }
+    return out;
+}
+
+void mind_require_offsets(const std::map<std::string, int>& offsets,
+                          const std::vector<std::string>& names,
+                          const std::string& what) {
+    std::vector<std::string> missing;
+    for (const auto& name: names) {
+        if (offsets.find(name) == offsets.end()) {
+            missing.push_back(name);
+        }
+    }
+    if (!missing.empty()) {
+        std::ostringstream out;
+        out << what << " variables are not mechanism data fields:";
+        for (const auto& name: missing) {
+            out << ' ' << name;
+        }
+        throw std::runtime_error(out.str());
+    }
+}
+
+std::string mind_name_array(const std::string& symbol, const std::vector<std::string>& values) {
+    if (values.empty()) {
+        return {};
+    }
+    std::ostringstream out;
+    out << "constexpr const char* " << symbol << "[] = {";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            out << ", ";
+        }
+        out << mind_cpp_string(values[i]);
+    }
+    out << "};\n";
+    return out.str();
+}
+
+std::string mind_default_array(const std::string& symbol,
+                               const std::vector<MindVariable>& values) {
+    if (values.empty()) {
+        return {};
+    }
+    std::ostringstream out;
+    out << "constexpr double " << symbol << "[] = {";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            out << ", ";
+        }
+        out << values[i].default_value;
+    }
+    out << "};\n";
+    return out.str();
+}
+
+template <typename T>
+const char* mind_array_ref(const std::vector<T>& values, const char* symbol) {
+    return values.empty() ? "nullptr" : symbol;
+}
+
+std::string mind_offset_map(const std::string& symbol,
+                            const std::vector<std::string>& names,
+                            const std::map<std::string, int>& offsets) {
+    std::ostringstream out;
+    out << "constexpr int " << symbol << "[] = {";
+    if (names.empty()) {
+        out << "0";
+    } else {
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            if (i != 0) {
+                out << ", ";
+            }
+            out << offsets.at(names[i]);
+        }
+    }
+    out << "};\n";
+    return out.str();
+}
+
+std::string mind_role_kind(const std::string& role) {
+    if (role == "REGION") {
+        return "Region";
+    }
+    if (role == "MACRO2MACRO") {
+        return "MacroToMacro";
+    }
+    if (role == "MACRO2MICRO") {
+        return "MicroInput";
+    }
+    if (role == "MICRO2MACRO") {
+        return "MicroOutput";
+    }
+    throw std::runtime_error("unsupported MIND ROLE " + role);
+}
+
+const char* mind_apply_context_type(const std::string& role) {
+    if (role == "REGION") {
+        return "mind_sim::mod::AbiRegionContext";
+    }
+    if (role == "MACRO2MACRO") {
+        return "mind_sim::mod::AbiMacroToMacroContext";
+    }
+    if (role == "MACRO2MICRO") {
+        return "mind_sim::mod::AbiMicroInputContext";
+    }
+    if (role == "MICRO2MACRO") {
+        return "mind_sim::mod::AbiMicroOutputContext";
+    }
+    throw std::runtime_error("unsupported MIND ROLE " + role);
+}
+
+std::string mind_render_descriptor(const MindRenderData& data) {
+    const auto state_names = mind_names_of(data.states);
+    const auto param_names = mind_names_of(data.params);
+    const auto kind = mind_role_kind(data.spec.role);
+    std::ostringstream out;
+    out << mind_name_array("kTargetInputNames", data.spec.target_inputs);
+    out << mind_name_array("kSourceExposureNames", data.spec.source_exposures);
+    out << mind_name_array("kParamNames", param_names);
+    out << mind_name_array("kStateNames", state_names);
+    out << mind_default_array("kParamDefaults", data.params);
+    out << mind_default_array("kStateDefaults", data.states);
+    out << "\nconstexpr mind_sim::mod::AbiRuleDescriptor kDescriptor{\n";
+    out << "    .abi_version = mind_sim::mod::kModAbiVersion,\n";
+    out << "    .kind = static_cast<int>(mind_sim::mod::AbiRuleKind::" << kind << "),\n";
+    out << "    .name = " << mind_cpp_string(data.model) << ",\n";
+    out << "    .target_input_count = " << data.spec.target_inputs.size() << ",\n";
+    out << "    .target_input_names = " << mind_array_ref(data.spec.target_inputs, "kTargetInputNames") << ",\n";
+    out << "    .source_exposure_count = " << data.spec.source_exposures.size() << ",\n";
+    out << "    .source_exposure_names = " << mind_array_ref(data.spec.source_exposures, "kSourceExposureNames") << ",\n";
+    out << "    .param_count = " << param_names.size() << ",\n";
+    out << "    .param_names = " << mind_array_ref(param_names, "kParamNames") << ",\n";
+    out << "    .param_defaults = " << mind_array_ref(data.params, "kParamDefaults") << ",\n";
+    out << "    .state_count = " << state_names.size() << ",\n";
+    out << "    .state_names = " << mind_array_ref(state_names, "kStateNames") << ",\n";
+    out << "    .state_defaults = " << mind_array_ref(data.states, "kStateDefaults") << ",\n";
+    out << "    .local_state_count = 0,\n";
+    out << "    .local_state_names = nullptr,\n";
+    out << "};\n";
+    return out.str();
+}
+
+std::string mind_render_common(const MindRenderData& data) {
+    const int pntproc_datum_offset =
+        data.datum_semantic_offsets.find(naming::POINT_PROCESS_SEMANTIC) != data.datum_semantic_offsets.end()
+            ? data.datum_semantic_offsets.at(naming::POINT_PROCESS_SEMANTIC)
+            : -1;
+    const int netsend_datum_offset =
+        data.datum_semantic_offsets.find(naming::NET_SEND_SEMANTIC) != data.datum_semantic_offsets.end()
+            ? data.datum_semantic_offsets.at(naming::NET_SEND_SEMANTIC)
+            : -1;
+    const int random_datum_offset =
+        data.datum_semantic_offsets.find(naming::RANDOM_SEMANTIC) != data.datum_semantic_offsets.end()
+            ? data.datum_semantic_offsets.at(naming::RANDOM_SEMANTIC)
+            : -1;
+
+    std::ostringstream out;
+    out << R"(
+struct CoreScratch {
+    int capacity{0};
+    std::vector<int> nodeindices;
+    std::vector<coreneuron::Datum> pdata;
+    std::vector<void*> vdata;
+    std::vector<double> data;
+    std::vector<double> voltage;
+    std::vector<double> area;
+    std::vector<coreneuron::Point_process> pntprocs;
+    std::vector<double> weights;
+    std::vector<coreneuron::nrnran123_State*> random_states;
+    std::vector<coreneuron::Memb_list*> ml_list;
+    coreneuron::NrnThread nt{};
+    coreneuron::Memb_list ml{};
+
+    ~CoreScratch() {
+        for (auto* state: random_states) {
+            coreneuron::nrnran123_deletestream(state, false);
+        }
+    }
+
+    void resize(int count) {
+        count = std::max(count, 1);
+        if (capacity != count) {
+            for (auto* state: random_states) {
+                coreneuron::nrnran123_deletestream(state, false);
+            }
+            random_states.clear();
+            capacity = count;
+            nodeindices.resize(static_cast<std::size_t>(count));
+            pdata.resize(static_cast<std::size_t>()"
+        << data.datum_count << R"() * static_cast<std::size_t>(count));
+            vdata.resize(static_cast<std::size_t>()"
+        << data.datum_count << R"() * static_cast<std::size_t>(count));
+            data.resize(static_cast<std::size_t>()"
+        << data.field_count << R"() * static_cast<std::size_t>(count));
+            voltage.resize(static_cast<std::size_t>(count));
+            area.assign(static_cast<std::size_t>(count), 1.0);
+            pntprocs.resize(static_cast<std::size_t>(count));
+            weights.resize(2);
+            ml_list.resize(1);
+)";
+    if (random_datum_offset >= 0) {
+        out << R"(            random_states.resize(static_cast<std::size_t>(count));
+            for (int i = 0; i < count; ++i) {
+                random_states[static_cast<std::size_t>(i)] =
+                    coreneuron::nrnran123_newstream3(0, 0, 0, false);
+            }
+)";
+    }
+    out << R"(            for (int i = 0; i < count; ++i) {
+                nodeindices[static_cast<std::size_t>(i)] = i;
+            }
+        }
+        std::fill(data.begin(), data.end(), 0.0);
+        std::fill(voltage.begin(), voltage.end(), 0.0);
+        std::fill(vdata.begin(), vdata.end(), nullptr);
+        ml.nodecount = count;
+        ml._nodecount_padded = count;
+        ml.nodeindices = nodeindices.data();
+        ml.data = data.data();
+        ml.pdata = pdata.empty() ? nullptr : pdata.data();
+        nt._actual_v = voltage.data();
+        nt._data = area.data();
+        nt._vdata = vdata.empty() ? nullptr : vdata.data();
+        nt.pntprocs = pntprocs.data();
+        nt.weights = weights.data();
+        nt.n_pntproc = count;
+        nt.n_weight = static_cast<int>(weights.size());
+        nt.id = 0;
+        nt._dt = 0.0;
+        nt._t = 0.0;
+        ml_list[0] = &ml;
+        nt._ml_list = ml_list.data();
+        for (int i = 0; i < count; ++i) {
+            pntprocs[static_cast<std::size_t>(i)]._i_instance = i;
+            pntprocs[static_cast<std::size_t>(i)]._type = 0;
+            pntprocs[static_cast<std::size_t>(i)]._tid = 0;
+        }
+)";
+    if (pntproc_datum_offset >= 0) {
+        out << "        for (int i = 0; i < count; ++i) {\n";
+        out << "            const auto index = static_cast<std::size_t>(" << pntproc_datum_offset
+            << ") * static_cast<std::size_t>(count) + static_cast<std::size_t>(i);\n";
+        out << "            pdata[index] = static_cast<coreneuron::Datum>(index);\n";
+        out << "            vdata[index] = &pntprocs[static_cast<std::size_t>(i)];\n";
+        out << "        }\n";
+    }
+    if (netsend_datum_offset >= 0) {
+        out << "        for (int i = 0; i < count; ++i) {\n";
+        out << "            const auto index = static_cast<std::size_t>(" << netsend_datum_offset
+            << ") * static_cast<std::size_t>(count) + static_cast<std::size_t>(i);\n";
+        out << "            pdata[index] = static_cast<coreneuron::Datum>(index);\n";
+        out << "            vdata[index] = nullptr;\n";
+        out << "        }\n";
+    }
+    if (random_datum_offset >= 0) {
+        out << "        for (int i = 0; i < count; ++i) {\n";
+        out << "            const auto index = static_cast<std::size_t>(" << random_datum_offset
+            << ") * static_cast<std::size_t>(count) + static_cast<std::size_t>(i);\n";
+        out << "            pdata[index] = static_cast<coreneuron::Datum>(index);\n";
+        out << "            vdata[index] = random_states[static_cast<std::size_t>(i)];\n";
+        out << "        }\n";
+    }
+    out << R"(
+        if (ml.instance == nullptr) {
+            coreneuron::nrn_private_constructor_)"
+        << data.model << R"((&nt, &ml, 0);
+        }
+        coreneuron::setup_instance(&nt, &ml);
+    }
+};
+
+thread_local CoreScratch kScratch;
+
+inline double get_field(const CoreScratch& scratch, int offset, int count, int index) {
+    return scratch.data[static_cast<std::size_t>(offset) * static_cast<std::size_t>(count) +
+                        static_cast<std::size_t>(index)];
+}
+
+inline void set_field(CoreScratch& scratch, int offset, int count, int index, double value) {
+    scratch.data[static_cast<std::size_t>(offset) * static_cast<std::size_t>(count) +
+                 static_cast<std::size_t>(index)] = value;
+}
+)";
+    return out.str();
+}
+
+}  // namespace
+
 /****************************************************************************************/
 /*                              Generic information getters                             */
 /****************************************************************************************/
@@ -61,6 +446,21 @@ std::string CodegenCoreneuronCppVisitor::simulator_name() {
 
 bool CodegenCoreneuronCppVisitor::needs_v_unused() const {
     return info.vectorize;
+}
+
+void CodegenCoreneuronCppVisitor::setup(const ast::Program& node) {
+    CodegenCppVisitor::setup(node);
+    const auto spec = mind_spec_from_ast(node);
+    has_mind_rule = spec.has_value();
+    if (!has_mind_rule) {
+        mind_rule_role.clear();
+        mind_rule_target_inputs.clear();
+        mind_rule_source_exposures.clear();
+        return;
+    }
+    mind_rule_role = spec->role;
+    mind_rule_target_inputs = spec->target_inputs;
+    mind_rule_source_exposures = spec->source_exposures;
 }
 
 /****************************************************************************************/
@@ -886,10 +1286,15 @@ std::string CodegenCoreneuronCppVisitor::get_variable_name(const std::string& na
 void CodegenCoreneuronCppVisitor::print_standard_includes() {
     printer->add_newline();
     printer->add_multi_line(R"CODE(
+        #include "mod/abi.hpp"
+        #include <algorithm>
+        #include <cstdint>
         #include <math.h>
         #include <stdio.h>
         #include <stdlib.h>
         #include <string.h>
+        #include <stdexcept>
+        #include <vector>
     )CODE");
 }
 
@@ -899,6 +1304,7 @@ void CodegenCoreneuronCppVisitor::print_coreneuron_includes() {
     printer->add_multi_line(R"CODE(
         #include <coreneuron/gpu/nrn_acc_manager.hpp>
         #include <coreneuron/mechanism/mech/mod2c_core_thread.hpp>
+        #include <coreneuron/mechanism/neuron_registration.hpp>
         #include <coreneuron/mechanism/register_mech.hpp>
         #include <coreneuron/nrnconf.h>
         #include <coreneuron/nrniv/nrniv_decl.h>
@@ -1292,6 +1698,64 @@ void CodegenCoreneuronCppVisitor::print_mechanism_register() {
                               method_name(naming::NRN_CONSTRUCTOR_METHOD));
         }
     }
+
+    printer->push_block("static const std::vector<double> _parameter_defaults =");
+    std::vector<std::string> defaults;
+    for (const auto& p: info.range_parameter_vars) {
+        double value = p->get_value() == nullptr ? 0.0 : *p->get_value();
+        defaults.push_back(fmt::format("{:g} /* {} */", value, p->get_name()));
+    }
+    printer->add_multi_line(fmt::format("{}", fmt::join(defaults, ",\n")));
+    printer->pop_block(";");
+    printer->add_line("hoc_register_parm_default(mech_type, &_parameter_defaults);");
+
+    printer->add_line("neuron::mechanism::register_data_fields(mech_type,");
+    printer->increase_indent();
+    std::vector<std::string> data_field_args;
+    for (int i = 0; i < static_cast<int>(codegen_float_variables.size()); ++i) {
+        const auto& float_var = codegen_float_variables[i];
+        if (float_var->is_array()) {
+            data_field_args.push_back(fmt::format(
+                "neuron::mechanism::field<double>{{\"{}\", {}}} /* {} */",
+                float_var->get_name(),
+                float_var->get_length(),
+                i));
+        } else {
+            data_field_args.push_back(fmt::format(
+                "neuron::mechanism::field<double>{{\"{}\"}} /* {} */",
+                float_var->get_name(),
+                i));
+        }
+    }
+    for (int i = 0; i < static_cast<int>(codegen_int_variables.size()); ++i) {
+        const auto& int_var = codegen_int_variables[i];
+        const auto& name = int_var.symbol->get_name();
+        if (i != info.semantics[i].index) {
+            throw std::runtime_error("Broken logic.");
+        }
+        const auto& semantic = info.semantics[i].name;
+        auto type = "double*";
+        if (name == naming::POINT_PROCESS_VARIABLE) {
+            type = "Point_process*";
+        } else if (name == naming::TQITEM_VARIABLE) {
+            type = "void*";
+        } else if (stringutils::starts_with(name, "style_") &&
+                   stringutils::starts_with(semantic, "#") &&
+                   stringutils::ends_with(semantic, "_ion")) {
+            type = "int*";
+        } else if (semantic == naming::FOR_NETCON_SEMANTIC) {
+            type = "void*";
+        }
+        data_field_args.push_back(fmt::format(
+            "neuron::mechanism::field<{}>{{\"{}\", \"{}\"}} /* {} */",
+            type,
+            name,
+            semantic,
+            i));
+    }
+    printer->add_multi_line(fmt::format("{}", fmt::join(data_field_args, ",\n")));
+    printer->decrease_indent();
+    printer->add_line(");");
 
     // types for ion
     for (const auto& ion: info.ions) {
@@ -2100,6 +2564,14 @@ void CodegenCoreneuronCppVisitor::print_watch_check() {
 }
 
 
+std::string CodegenCoreneuronCppVisitor::active_nrn_threads_symbol() const {
+    if (printing_mind_macro2micro_net_receive) {
+        return "nrn_threads_for_mind_macro2micro_" + mind_macro2micro_symbol_suffix;
+    }
+    return "nrn_threads";
+}
+
+
 void CodegenCoreneuronCppVisitor::print_net_receive_common_code(const Block& node,
                                                                 bool need_mech_inst) {
     printer->add_multi_line(R"CODE(
@@ -2109,7 +2581,7 @@ void CodegenCoreneuronCppVisitor::print_net_receive_common_code(const Block& nod
     )CODE");
 
     if (info.artificial_cell || node.is_initial_block()) {
-        printer->add_line("NrnThread* nt = nrn_threads + tid;");
+        printer->fmt_line("NrnThread* nt = {} + tid;", active_nrn_threads_symbol());
         printer->add_line("Memb_list* ml = nt->_ml_list[pnt->_type];");
     }
     if (node.is_initial_block()) {
@@ -2170,7 +2642,15 @@ void CodegenCoreneuronCppVisitor::print_net_send_call(const FunctionCall& node) 
     // artificial cells don't use spike buffering
     // clang-format off
     if (info.artificial_cell) {
-        printer->fmt_text("artcell_net_send(&{}, {}, {}, nt->_t+", tqitem, weight_index, pnt);
+        if (printing_mind_macro2micro_net_receive) {
+            printer->fmt_text("mind_macro2micro_artcell_net_send_{}(&{}, {}, {}, nt->_t+",
+                              mind_macro2micro_symbol_suffix,
+                              tqitem,
+                              weight_index,
+                              pnt);
+        } else {
+            printer->fmt_text("artcell_net_send(&{}, {}, {}, nt->_t+", tqitem, weight_index, pnt);
+        }
     } else {
         const auto& point_process = get_variable_name("point_process");
         const auto& t = get_variable_name("t");
@@ -2213,7 +2693,12 @@ void CodegenCoreneuronCppVisitor::print_net_move_call(const FunctionCall& node) 
 void CodegenCoreneuronCppVisitor::print_net_event_call(const FunctionCall& node) {
     const auto& arguments = node.get_arguments();
     if (info.artificial_cell) {
-        printer->add_text("net_event(pnt, ");
+        if (printing_mind_macro2micro_net_receive) {
+            printer->fmt_text("mind_macro2micro_net_event_{}(pnt, ",
+                              mind_macro2micro_symbol_suffix);
+        } else {
+            printer->add_text("net_event(pnt, ");
+        }
         print_vector_elements(arguments, ", ");
     } else {
         const auto& point_process = get_variable_name("point_process");
@@ -2446,7 +2931,8 @@ void CodegenCoreneuronCppVisitor::print_net_receive_kernel() {
     }
 
     printing_net_receive = true;
-    const auto node = info.net_receive_node;
+    const auto node = std::unique_ptr<ast::NetReceiveBlock>(
+        dynamic_cast<ast::NetReceiveBlock*>(info.net_receive_node->clone()));
 
     // rename net_receive arguments used in the block itself
     rename_net_receive_arguments(*info.net_receive_node, *node);
@@ -2472,7 +2958,7 @@ void CodegenCoreneuronCppVisitor::print_net_receive_kernel() {
 
     printer->add_newline(2);
     printer->fmt_push_block("static inline void {}({})", name, get_parameter_str(params));
-    print_net_receive_common_code(*node, info.artificial_cell);
+        print_net_receive_common_code(*node, info.artificial_cell);
     if (info.artificial_cell) {
         printer->add_line("double t = nt->_t;");
     }
@@ -2930,6 +3416,595 @@ void CodegenCoreneuronCppVisitor::print_g_unused() const {
     )CODE");
 }
 
+namespace {
+
+std::string mind_render_region(const MindRenderData& data) {
+    const auto state_names = mind_names_of(data.states);
+    const auto param_names = mind_names_of(data.params);
+    auto required = data.spec.target_inputs;
+    required.insert(required.end(), data.spec.source_exposures.begin(), data.spec.source_exposures.end());
+    required.insert(required.end(), state_names.begin(), state_names.end());
+    required.insert(required.end(), param_names.begin(), param_names.end());
+    mind_require_offsets(data.data_offsets, required, "macro");
+
+    std::ostringstream out;
+    out << mind_offset_map("kTargetInputFieldOffsets", data.spec.target_inputs, data.data_offsets);
+    out << mind_offset_map("kSourceExposureFieldOffsets", data.spec.source_exposures, data.data_offsets);
+    out << mind_offset_map("kStateFieldOffsets", state_names, data.data_offsets);
+    out << mind_offset_map("kParamFieldOffsets", param_names, data.data_offsets);
+    out << "\nvoid apply(const mind_sim::mod::AbiRegionContext* ctx) {\n";
+    out << "    const int count = ctx->owner_count;\n";
+    out << "    kScratch.resize(count);\n";
+    out << "    kScratch.nt._dt = ctx->dt;\n";
+    out << "    kScratch.nt._t = ctx->t;\n";
+    out << "    for (int unit = 0; unit < count; ++unit) {\n";
+    out << "        const int roi = ctx->roi_indices[unit];\n";
+    out << "        for (int i = 0; i < " << data.spec.target_inputs.size() << "; ++i) {\n";
+    out << "            set_field(kScratch, kTargetInputFieldOffsets[i], count, unit,\n";
+    out << "                      ctx->input_soa[ctx->target_input_offsets[i] + roi]);\n";
+    out << "        }\n";
+    out << "        for (int i = 0; i < " << state_names.size() << "; ++i) {\n";
+    out << "            set_field(kScratch, kStateFieldOffsets[i], count, unit,\n";
+    out << "                      ctx->state_soa[(i * count) + unit]);\n";
+    out << "        }\n";
+    out << "        for (int i = 0; i < " << param_names.size() << "; ++i) {\n";
+    out << "            set_field(kScratch, kParamFieldOffsets[i], count, unit,\n";
+    out << "                      ctx->params_soa[(i * count) + unit]);\n";
+    out << "        }\n";
+    out << "    }\n";
+    out << "    coreneuron::nrn_state_" << data.model << "(&kScratch.nt, &kScratch.ml, 0);\n";
+    out << "    for (int unit = 0; unit < count; ++unit) {\n";
+    out << "        const int roi = ctx->roi_indices[unit];\n";
+    out << "        for (int i = 0; i < " << state_names.size() << "; ++i) {\n";
+    out << "            ctx->state_soa[(i * count) + unit] = get_field(kScratch, kStateFieldOffsets[i], count, unit);\n";
+    out << "        }\n";
+    out << "        for (int i = 0; i < " << data.spec.source_exposures.size() << "; ++i) {\n";
+    out << "            ctx->exposure_soa[ctx->source_exposure_offsets[i] + roi] =\n";
+    out << "                get_field(kScratch, kSourceExposureFieldOffsets[i], count, unit);\n";
+    out << "        }\n";
+    out << "    }\n";
+    out << "}\n";
+    return out.str();
+}
+
+std::string mind_render_macro_to_macro(const MindRenderData& data) {
+    const auto param_names = mind_names_of(data.params);
+    auto required = data.spec.source_exposures;
+    required.insert(required.end(), data.spec.target_inputs.begin(), data.spec.target_inputs.end());
+    required.insert(required.end(), param_names.begin(), param_names.end());
+    mind_require_offsets(data.data_offsets, required, "macro-to-macro");
+
+    std::ostringstream out;
+    out << mind_offset_map("kSourceExposureFieldOffsets", data.spec.source_exposures, data.data_offsets);
+    out << mind_offset_map("kTargetInputFieldOffsets", data.spec.target_inputs, data.data_offsets);
+    out << mind_offset_map("kParamFieldOffsets", param_names, data.data_offsets);
+    out << "\nvoid apply(const mind_sim::mod::AbiMacroToMacroContext* ctx) {\n";
+    out << R"(    std::vector<int> edge_indices;
+    std::vector<int> target_indices;
+    for (int target_pos = 0; target_pos < ctx->target_count; ++target_pos) {
+        const int target_roi = ctx->target_indices[target_pos];
+        for (int edge = ctx->target_edge_offsets[target_roi]; edge < ctx->target_edge_offsets[target_roi + 1]; ++edge) {
+            edge_indices.push_back(edge);
+            target_indices.push_back(target_roi);
+        }
+    }
+    const int count = static_cast<int>(edge_indices.size());
+    if (count == 0) {
+        return;
+    }
+    kScratch.resize(count);
+    const int roi_count = ctx->roi_count;
+    const int history_stride = ctx->exposure_count * roi_count;
+    const int history_size = ctx->history_capacity * history_stride;
+    const int current_history_offset = (ctx->step % ctx->history_capacity) * history_stride;
+    for (int unit = 0; unit < count; ++unit) {
+        const int edge = edge_indices[static_cast<std::size_t>(unit)];
+        const int target_roi = target_indices[static_cast<std::size_t>(unit)];
+        const int source_roi = ctx->edge_sources[edge];
+        int history_offset = current_history_offset + ctx->edge_delay_offsets[edge];
+        while (history_offset >= history_size) {
+            history_offset -= history_size;
+        }
+)";
+    out << "        for (int i = 0; i < " << data.spec.source_exposures.size() << "; ++i) {\n";
+    out << "            set_field(kScratch, kSourceExposureFieldOffsets[i], count, unit,\n";
+    out << "                      ctx->history[history_offset + ctx->source_exposure_offsets[i] + source_roi]);\n";
+    out << "        }\n";
+    out << "        for (int i = 0; i < " << data.spec.target_inputs.size() << "; ++i) {\n";
+    out << "            set_field(kScratch, kTargetInputFieldOffsets[i], count, unit, 0.0);\n";
+    out << "        }\n";
+    out << "        for (int i = 0; i < " << param_names.size() << "; ++i) {\n";
+    out << "            set_field(kScratch, kParamFieldOffsets[i], count, unit, ctx->params[i]);\n";
+    out << "        }\n";
+    const std::map<std::string, std::string> edge_values{
+        {"weight", "ctx->edge_weights[edge]"},
+        {"delay", "static_cast<double>(ctx->edge_delay_steps[edge])"},
+        {"delay_steps", "static_cast<double>(ctx->edge_delay_steps[edge])"},
+        {"source_roi", "static_cast<double>(source_roi)"},
+        {"target_roi", "static_cast<double>(target_roi)"},
+    };
+    for (const auto& [name, expression]: edge_values) {
+        if (data.data_offsets.find(name) != data.data_offsets.end()) {
+            out << "        set_field(kScratch, " << data.data_offsets.at(name)
+                << ", count, unit, " << expression << ");\n";
+        }
+    }
+    out << "    }\n";
+    out << "    coreneuron::nrn_state_" << data.model << "(&kScratch.nt, &kScratch.ml, 0);\n";
+    out << "    for (int unit = 0; unit < count; ++unit) {\n";
+    out << "        const int target_roi = target_indices[static_cast<std::size_t>(unit)];\n";
+    out << "        for (int i = 0; i < " << data.spec.target_inputs.size() << "; ++i) {\n";
+    out << "            ctx->inputs[ctx->target_input_offsets[i] + target_roi] +=\n";
+    out << "                get_field(kScratch, kTargetInputFieldOffsets[i], count, unit);\n";
+    out << "        }\n";
+    out << "    }\n";
+    out << "}\n";
+    return out.str();
+}
+
+std::string mind_render_micro_output(const MindRenderData& data) {
+    const auto state_names = mind_names_of(data.states);
+    const auto param_names = mind_names_of(data.params);
+    auto required = data.spec.source_exposures;
+    required.insert(required.end(), state_names.begin(), state_names.end());
+    required.insert(required.end(), param_names.begin(), param_names.end());
+    mind_require_offsets(data.data_offsets, required, "micro output");
+
+    std::ostringstream out;
+    out << mind_offset_map("kSourceExposureFieldOffsets", data.spec.source_exposures, data.data_offsets);
+    out << mind_offset_map("kStateFieldOffsets", state_names, data.data_offsets);
+    out << mind_offset_map("kParamFieldOffsets", param_names, data.data_offsets);
+    out << "\nvoid apply(const mind_sim::mod::AbiMicroOutputContext* ctx) {\n";
+    out << R"(    constexpr int count = 1;
+    kScratch.resize(count);
+    kScratch.nt._dt = ctx->stop_time - ctx->start_time;
+    kScratch.nt._t = ctx->start_time;
+)";
+    out << "    for (int i = 0; i < " << state_names.size() << "; ++i) {\n";
+    out << "        set_field(kScratch, kStateFieldOffsets[i], count, 0, ctx->state[i]);\n";
+    out << "    }\n";
+    out << "    for (int i = 0; i < " << param_names.size() << "; ++i) {\n";
+    out << "        set_field(kScratch, kParamFieldOffsets[i], count, 0, ctx->params[i]);\n";
+    out << "    }\n";
+    out << "    auto* const inst = static_cast<coreneuron::" << data.model << "_Instance*>(kScratch.ml.instance);\n";
+    out << R"(    constexpr double kSampleTimeEps = 1.0e-12;
+    const int sample_count = ctx->sample_count;
+    if (sample_count <= 0) {
+        return;
+    }
+    double current_time = ctx->start_time;
+    const auto advance_state = [&](double next_time) {
+        if (next_time < current_time) {
+            next_time = current_time;
+        }
+        kScratch.nt._t = current_time;
+        kScratch.nt._dt = next_time - current_time;
+)";
+    out << "        coreneuron::nrn_state_" << data.model << "(&kScratch.nt, &kScratch.ml, 0);\n";
+    out << R"(        current_time = next_time;
+    };
+    const int roi = ctx->target_roi;
+    const int exposure_stride = ctx->roi_count * ctx->exposure_count;
+    int spike = 0;
+    for (int sample = 0; sample < sample_count; ++sample) {
+        double sample_time = ctx->start_time + (static_cast<double>(sample) + 1.0) * ctx->sample_dt;
+        if (sample_time > ctx->stop_time) {
+            sample_time = ctx->stop_time;
+        }
+        while (spike < ctx->spikes->size && ctx->spikes->time[spike] <= sample_time + kSampleTimeEps) {
+            double event_time = ctx->spikes->time[spike];
+            if (event_time > sample_time) {
+                event_time = sample_time;
+            }
+            if (event_time < current_time - kSampleTimeEps) {
+                ++spike;
+                continue;
+            }
+            advance_state(event_time);
+            kScratch.nt._t = current_time;
+            kScratch.weights[0] = 1.0;
+)";
+    out << "            coreneuron::net_receive_kernel_" << data.model
+        << "(current_time, &kScratch.pntprocs[0], inst, &kScratch.nt, &kScratch.ml, 0, 0.0);\n";
+    out << R"(            ++spike;
+        }
+        advance_state(sample_time);
+)";
+    out << "        for (int i = 0; i < " << data.spec.source_exposures.size() << "; ++i) {\n";
+    out << "            ctx->exposure_trace_soa[(sample * exposure_stride) + ctx->source_exposure_offsets[i] + roi] +=\n";
+    out << "                get_field(kScratch, kSourceExposureFieldOffsets[i], count, 0);\n";
+    out << "        }\n";
+    out << "    }\n";
+    out << "    for (int i = 0; i < " << state_names.size() << "; ++i) {\n";
+    out << "        ctx->state[i] = get_field(kScratch, kStateFieldOffsets[i], count, 0);\n";
+    out << "    }\n";
+    out << "    for (int i = 0; i < " << data.spec.source_exposures.size() << "; ++i) {\n";
+    out << "        ctx->exposure_soa[ctx->source_exposure_offsets[i] + roi] +=\n";
+    out << "            get_field(kScratch, kSourceExposureFieldOffsets[i], count, 0);\n";
+    out << "    }\n";
+    out << "}\n";
+    return out.str();
+}
+
+std::string mind_render_micro_input(const MindRenderData& data) {
+    const auto state_names = mind_names_of(data.states);
+    const auto param_names = mind_names_of(data.params);
+    auto required = data.spec.target_inputs;
+    required.insert(required.end(), data.spec.source_exposures.begin(), data.spec.source_exposures.end());
+    required.insert(required.end(), state_names.begin(), state_names.end());
+    required.insert(required.end(), param_names.begin(), param_names.end());
+    mind_require_offsets(data.data_offsets, required, "micro input");
+    const int random_datum_offset =
+        data.datum_semantic_offsets.find(naming::RANDOM_SEMANTIC) != data.datum_semantic_offsets.end()
+            ? data.datum_semantic_offsets.at(naming::RANDOM_SEMANTIC)
+            : -1;
+
+    const auto nrn_threads_symbol = "nrn_threads_for_mind_macro2micro_" + data.safe;
+    const auto runtime_namespace = "coreneuron::mind_macro2micro_runtime_" + data.safe;
+    std::ostringstream out;
+    out << mind_offset_map("kTargetInputFieldOffsets", data.spec.target_inputs, data.data_offsets);
+    out << mind_offset_map("kSourceExposureFieldOffsets", data.spec.source_exposures, data.data_offsets);
+    out << mind_offset_map("kStateFieldOffsets", state_names, data.data_offsets);
+    out << mind_offset_map("kParamFieldOffsets", param_names, data.data_offsets);
+    out << "\nvoid apply(const mind_sim::mod::AbiMicroInputContext* ctx) {\n";
+    out << R"(    const int count = ctx->source_count;
+    if (count <= 0) {
+        return;
+    }
+    if (ctx->emit_event == nullptr) {
+        throw std::runtime_error("macro2micro event sink is null");
+    }
+    if (ctx->sample_count <= 0 || ctx->sample_dt <= 0.0) {
+        return;
+    }
+    kScratch.resize(count);
+    kScratch.nt._dt = ctx->sample_dt;
+    kScratch.nt._t = ctx->start_time;
+    const int roi = ctx->target_roi;
+    const int input_stride = ctx->input_count * ctx->roi_count;
+    const int exposure_stride = ctx->exposure_count * ctx->roi_count;
+)";
+    if (random_datum_offset >= 0) {
+        out << R"(    const auto seed_low = static_cast<std::uint32_t>(ctx->rng_seed & 0xffffffffULL);
+    const auto seed_high = static_cast<std::uint32_t>((ctx->rng_seed >> 32) & 0xffffffffULL);
+    const auto roi_id = static_cast<std::uint32_t>(ctx->target_roi);
+    if (ctx->source_ids == nullptr) {
+        throw std::runtime_error("macro2micro source id mapping is null");
+    }
+    for (int source = 0; source < count; ++source) {
+        auto* const rng = kScratch.random_states[static_cast<std::size_t>(source)];
+        rng->c.v[1] = seed_high ^ roi_id;
+        rng->c.v[2] = seed_low;
+        rng->c.v[3] = static_cast<std::uint32_t>(ctx->source_ids[source]);
+    }
+)";
+    }
+    out << "    for (int i = 0; i < " << state_names.size() << "; ++i) {\n";
+    out << "        for (int source = 0; source < count; ++source) {\n";
+    out << "            set_field(kScratch, kStateFieldOffsets[i], count, source, ctx->state[(i * count) + source]);\n";
+    out << "        }\n";
+    out << "    }\n";
+    out << "    for (int i = 0; i < " << param_names.size() << "; ++i) {\n";
+    out << "        for (int source = 0; source < count; ++source) {\n";
+    out << "            set_field(kScratch, kParamFieldOffsets[i], count, source, ctx->params[i]);\n";
+    out << "        }\n";
+    out << "    }\n";
+    out << "    auto& queue = " << runtime_namespace << "::gScratchQueue;\n";
+    out << R"(    queue.clear();
+)";
+    out << "    " << runtime_namespace << "::gContext = ctx;\n";
+    out << "    " << runtime_namespace << "::gQueue = &queue;\n";
+    out << "    auto* const saved_nrn_threads = coreneuron::" << nrn_threads_symbol << ";\n";
+    out << "    coreneuron::" << nrn_threads_symbol << " = &kScratch.nt;\n";
+    out << R"(    constexpr int max_events = 10000000;
+    int event_count = 0;
+    try {
+        for (int sample = 0; sample < ctx->sample_count; ++sample) {
+            const double sample_start = ctx->start_time + static_cast<double>(sample) * ctx->sample_dt;
+            const double sample_stop =
+                sample + 1 == ctx->sample_count ? ctx->stop_time : sample_start + ctx->sample_dt;
+            kScratch.nt._dt = sample_stop - sample_start;
+)";
+    if (random_datum_offset >= 0) {
+        out << R"(            const auto seq = static_cast<double>(std::max(ctx->exchange_start_step + sample, 0));
+            for (int source = 0; source < count; ++source) {
+                auto* const rng = kScratch.random_states[static_cast<std::size_t>(source)];
+                coreneuron::nrnran123_setseq(rng, seq);
+            }
+)";
+    }
+    out << "            for (int i = 0; i < " << data.spec.target_inputs.size() << "; ++i) {\n";
+    out << "                const double value = ctx->input_trace_soa[(static_cast<std::size_t>(sample) * input_stride) + ctx->target_input_offsets[i] + roi];\n";
+    out << "                for (int source = 0; source < count; ++source) {\n";
+    out << "                    set_field(kScratch, kTargetInputFieldOffsets[i], count, source, value);\n";
+    out << "                }\n";
+    out << "            }\n";
+    out << "            for (int i = 0; i < " << data.spec.source_exposures.size() << "; ++i) {\n";
+    out << "                const double value = ctx->exposure_trace_soa[(static_cast<std::size_t>(sample) * exposure_stride) + ctx->source_exposure_offsets[i] + roi];\n";
+    out << "                for (int source = 0; source < count; ++source) {\n";
+    out << "                    set_field(kScratch, kSourceExposureFieldOffsets[i], count, source, value);\n";
+    out << "                }\n";
+    out << "            }\n";
+    if (data.data_offsets.find("start_time") != data.data_offsets.end()) {
+        out << "            for (int source = 0; source < count; ++source) {\n";
+        out << "                set_field(kScratch, " << data.data_offsets.at("start_time") << ", count, source, sample_start);\n";
+        out << "            }\n";
+    }
+    if (data.data_offsets.find("stop_time") != data.data_offsets.end()) {
+        out << "            for (int source = 0; source < count; ++source) {\n";
+        out << "                set_field(kScratch, " << data.data_offsets.at("stop_time") << ", count, source, sample_stop);\n";
+        out << "            }\n";
+    }
+    out << R"(            for (int source = 0; source < count; ++source) {
+                kScratch.nt._t = sample_start;
+                kScratch.weights[0] = 1.0;
+)";
+    out << "                coreneuron::mind_macro2micro_receive_" << data.safe
+        << "(&kScratch.pntprocs[source], 0, 0.0);\n";
+    out << R"(            }
+            while (!queue.empty()) {
+                const auto next = queue.front();
+                if (next.time >= sample_stop) {
+                    break;
+                }
+)";
+    out << "                std::pop_heap(queue.begin(), queue.end(), " << runtime_namespace
+        << "::LaterSelfEvent{});\n";
+    out << R"(                const auto event = queue.back();
+                queue.pop_back();
+                if (event.time < ctx->start_time || event.time >= ctx->stop_time) {
+                    continue;
+                }
+                if (++event_count > max_events) {
+                    throw std::runtime_error("macro2micro generated too many self events in one exchange window");
+                }
+                kScratch.nt._t = event.time;
+                kScratch.weights[0] = 1.0;
+)";
+    out << "                coreneuron::mind_macro2micro_receive_" << data.safe
+        << "(&kScratch.pntprocs[event.source], event.weight_index, event.flag);\n";
+    out << R"(            }
+        }
+    } catch (...) {
+)";
+    out << "        " << runtime_namespace << "::gContext = nullptr;\n";
+    out << "        " << runtime_namespace << "::gQueue = nullptr;\n";
+    out << "        coreneuron::" << nrn_threads_symbol << " = saved_nrn_threads;\n";
+    out << R"(        throw;
+    }
+)";
+    out << "    " << runtime_namespace << "::gContext = nullptr;\n";
+    out << "    " << runtime_namespace << "::gQueue = nullptr;\n";
+    out << "    coreneuron::" << nrn_threads_symbol << " = saved_nrn_threads;\n";
+    out << "    for (int i = 0; i < " << state_names.size() << "; ++i) {\n";
+    out << "        for (int source = 0; source < count; ++source) {\n";
+    out << "            ctx->state[(i * count) + source] = get_field(kScratch, kStateFieldOffsets[i], count, source);\n";
+    out << "        }\n";
+    out << "    }\n";
+    out << "}\n";
+    return out.str();
+}
+
+std::string mind_render_exports(const MindRenderData& data) {
+    const auto rule_namespace = "mind_rule_" + data.safe;
+    const auto descriptor_symbol = "mind_rule_descriptor_" + data.safe;
+    const auto apply_symbol = "mind_rule_apply_" + data.safe;
+    std::ostringstream out;
+    out << "#if defined(_WIN32)\n";
+    out << "#define MIND_RULE_EXPORT __declspec(dllexport)\n";
+    out << "#else\n";
+    out << "#define MIND_RULE_EXPORT __attribute__((visibility(\"default\")))\n";
+    out << "#endif\n\n";
+    out << "namespace " << rule_namespace << " {\n";
+    out << mind_render_descriptor(data);
+    out << mind_render_common(data);
+    if (data.spec.role == "REGION") {
+        out << mind_render_region(data);
+    } else if (data.spec.role == "MACRO2MACRO") {
+        out << mind_render_macro_to_macro(data);
+    } else if (data.spec.role == "MICRO2MACRO") {
+        out << mind_render_micro_output(data);
+    } else if (data.spec.role == "MACRO2MICRO") {
+        out << mind_render_micro_input(data);
+    }
+    out << "}  // namespace " << rule_namespace << "\n\n";
+    out << "extern \"C\" MIND_RULE_EXPORT const mind_sim::mod::AbiRuleDescriptor* "
+        << descriptor_symbol << "() {\n";
+    out << "    return &" << rule_namespace << "::kDescriptor;\n";
+    out << "}\n\n";
+    out << "extern \"C\" MIND_RULE_EXPORT void " << apply_symbol << "(const "
+        << mind_apply_context_type(data.spec.role) << "* ctx) {\n";
+    out << "    " << rule_namespace << "::apply(ctx);\n";
+    out << "}\n";
+    return out.str();
+}
+
+}  // namespace
+
+MindRenderData CodegenCoreneuronCppVisitor_mind_render_data(
+    const std::string& model,
+    const std::string& role,
+    const std::vector<std::string>& target_inputs,
+    const std::vector<std::string>& source_exposures,
+    const std::vector<std::shared_ptr<symtab::Symbol>>& float_variables,
+    const std::vector<IndexVariableInfo>& int_variables,
+    const CodegenInfo& info) {
+    MindRenderData data;
+    data.model = model;
+    data.safe = mind_cpp_identifier(model);
+    data.spec = MindSpec{
+        .role = role,
+        .target_inputs = target_inputs,
+        .source_exposures = source_exposures,
+    };
+    for (const auto& symbol: info.state_vars) {
+        data.states.push_back(MindVariable{.name = symbol->get_name(), .default_value = 0.0});
+    }
+    auto params = info.range_parameter_vars;
+    std::sort(params.begin(), params.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs->get_definition_order() < rhs->get_definition_order();
+    });
+    for (const auto& symbol: params) {
+        const auto& value = symbol->get_value();
+        data.params.push_back(MindVariable{
+            .name = symbol->get_name(),
+            .default_value = value ? *value : 0.0,
+        });
+    }
+    int field_offset = 0;
+    for (const auto& symbol: float_variables) {
+        data.data_offsets.emplace(symbol->get_name(), field_offset);
+        field_offset += symbol->get_length();
+    }
+    data.field_count = field_offset;
+    int datum_count = 0;
+    for (const auto& variable: int_variables) {
+        datum_count += variable.symbol->get_length();
+    }
+    data.datum_count = datum_count;
+    for (const auto& semantic: info.semantics) {
+        if (data.datum_semantic_offsets.find(semantic.name) == data.datum_semantic_offsets.end()) {
+            data.datum_semantic_offsets.emplace(semantic.name, semantic.index);
+        }
+    }
+    return data;
+}
+
+void CodegenCoreneuronCppVisitor::print_mind_rule_codegen_in_namespace() {
+    if (!has_mind_rule || mind_rule_role != "MACRO2MICRO") {
+        return;
+    }
+    if (!info.artificial_cell) {
+        throw std::runtime_error("MIND MACRO2MICRO rule must be an ARTIFICIAL_CELL");
+    }
+    if (info.net_receive_node == nullptr) {
+        throw std::runtime_error("MIND MACRO2MICRO rule requires NET_RECEIVE");
+    }
+    const auto safe = mind_cpp_identifier(info.mod_suffix);
+    printer->add_newline(2);
+    printer->fmt_line("NrnThread* nrn_threads_for_mind_macro2micro_{} = nullptr;", safe);
+    printer->fmt_line("void mind_macro2micro_net_event_{}(Point_process* pnt, double time);", safe);
+    printer->fmt_line(
+        "void mind_macro2micro_net_send_{}(void**, int weight_index, Point_process* pnt, double time, double flag);",
+        safe);
+    printer->fmt_line(
+        "void mind_macro2micro_artcell_net_send_{}(void**, int weight_index, Point_process* pnt, double time, double flag);",
+        safe);
+    printer->fmt_push_block("namespace mind_macro2micro_runtime_{}", safe);
+    printer->add_multi_line(R"CODE(
+        struct ScheduledSelfEvent {
+            double time{0.0};
+            int source{0};
+            double flag{0.0};
+            int weight_index{0};
+        };
+
+        struct LaterSelfEvent {
+            bool operator()(const ScheduledSelfEvent& lhs, const ScheduledSelfEvent& rhs) const noexcept {
+                return lhs.time > rhs.time;
+            }
+        };
+
+        thread_local const mind_sim::mod::AbiMicroInputContext* gContext = nullptr;
+        thread_local std::vector<ScheduledSelfEvent>* gQueue = nullptr;
+        thread_local std::vector<ScheduledSelfEvent> gScratchQueue;
+
+        void schedule_self_event(Point_process* pnt, double time, double flag, int weight_index) {
+            if (gContext == nullptr || gQueue == nullptr) {
+                throw std::runtime_error("macro2micro net_send called outside an active event-source window");
+            }
+            if (pnt == nullptr) {
+                throw std::runtime_error("macro2micro net_send received a null Point_process");
+            }
+            if (time < gContext->start_time) {
+                throw std::runtime_error("macro2micro net_send scheduled an event before the current window");
+            }
+            if (time >= gContext->stop_time) {
+                return;
+            }
+            gQueue->push_back(ScheduledSelfEvent{time, pnt->_i_instance, flag, weight_index});
+            std::push_heap(gQueue->begin(), gQueue->end(), LaterSelfEvent{});
+        }
+    )CODE");
+    printer->pop_block();
+    printer->fmt_push_block("void mind_macro2micro_net_event_{}(Point_process* pnt, double time)",
+                            safe);
+    printer->fmt_line("auto* const ctx = mind_macro2micro_runtime_{}::gContext;", safe);
+    printer->add_multi_line(R"CODE(
+        if (ctx == nullptr || ctx->emit_event == nullptr) {
+            throw std::runtime_error("macro2micro net_event called outside an active event-source window");
+        }
+        if (pnt == nullptr) {
+            throw std::runtime_error("macro2micro net_event received a null Point_process");
+        }
+        if (time < ctx->start_time || time >= ctx->stop_time) {
+            return;
+        }
+        const int source = pnt->_i_instance;
+        if (source < 0 || source >= ctx->source_count || ctx->source_indices == nullptr) {
+            throw std::runtime_error("macro2micro net_event source index is out of range");
+        }
+        ctx->emit_event(ctx->event_user_data, time, ctx->source_indices[source]);
+    )CODE");
+    printer->pop_block();
+    printer->fmt_push_block(
+        "void mind_macro2micro_net_send_{}(void** tqitem, int weight_index, Point_process* pnt, double time, double flag)",
+        safe);
+    printer->add_line("(void) tqitem;");
+    printer->fmt_line("mind_macro2micro_runtime_{}::schedule_self_event(pnt, time, flag, weight_index);",
+                      safe);
+    printer->pop_block();
+    printer->fmt_push_block(
+        "void mind_macro2micro_artcell_net_send_{}(void** tqitem, int weight_index, Point_process* pnt, double time, double flag)",
+        safe);
+    printer->add_line("(void) tqitem;");
+    printer->fmt_line("mind_macro2micro_runtime_{}::schedule_self_event(pnt, time, flag, weight_index);",
+                      safe);
+    printer->pop_block();
+
+    auto node = std::unique_ptr<ast::NetReceiveBlock>(
+        dynamic_cast<ast::NetReceiveBlock*>(info.net_receive_node->clone()));
+    rename_net_receive_arguments(*info.net_receive_node, *node);
+
+    mind_macro2micro_symbol_suffix = safe;
+    printing_mind_macro2micro_net_receive = true;
+    printing_net_receive = true;
+    printer->add_newline(2);
+    printer->fmt_push_block(
+        "static inline void mind_macro2micro_receive_{}(Point_process* pnt, int weight_index, double flag)",
+        safe);
+    print_net_receive_common_code(*node, info.artificial_cell);
+    printer->add_line("double t = nt->_t;");
+    auto v_used = VarUsageVisitor().variable_used(*node->get_statement_block(), "v");
+    if (v_used) {
+        printer->add_line("int node_id = ml->nodeindices[id];");
+        printer->add_line("v = nt->_actual_v[node_id];");
+    }
+    printer->fmt_line("{} = t;", get_variable_name("tsave"));
+    printer->add_indent();
+    node->get_statement_block()->accept(*this);
+    printer->add_newline();
+    printer->pop_block();
+    printing_net_receive = false;
+    printing_mind_macro2micro_net_receive = false;
+    mind_macro2micro_symbol_suffix.clear();
+}
+
+void CodegenCoreneuronCppVisitor::print_mind_rule_codegen_exports() {
+    if (!has_mind_rule) {
+        return;
+    }
+    const auto data = CodegenCoreneuronCppVisitor_mind_render_data(info.mod_suffix,
+                                                                   mind_rule_role,
+                                                                   mind_rule_target_inputs,
+                                                                   mind_rule_source_exposures,
+                                                                   codegen_float_variables,
+                                                                   codegen_int_variables,
+                                                                   info);
+    printer->add_newline(2);
+    printer->add_multi_line(mind_render_exports(data));
+}
+
 
 void CodegenCoreneuronCppVisitor::print_compute_functions() {
     print_top_verbatim_blocks();
@@ -2982,9 +4057,11 @@ void CodegenCoreneuronCppVisitor::print_codegen_routines() {
     print_function_prototypes();
     print_functors_definitions();
     print_compute_functions();
+    print_mind_rule_codegen_in_namespace();
     print_check_table_thread_function();
     print_mechanism_register();
     print_namespace_stop();
+    print_mind_rule_codegen_exports();
 }
 
 

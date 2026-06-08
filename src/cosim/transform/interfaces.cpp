@@ -1,19 +1,15 @@
-#include "cosim/bridge/interfaces.hpp"
+#include "cosim/transform/interfaces.hpp"
 
-#include <cmath>
+#include "mod/rule_registry.hpp"
+
 #include <cstddef>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
-namespace mind_sim::cosim::bridge {
+namespace mind_sim::cosim::transform {
 
 namespace {
-
-void validate_count(int count, const char* what) {
-    if (count < 0) {
-        throw std::runtime_error(std::string(what) + " must be non-negative");
-    }
-}
 
 template <typename T>
 void validate_params_size(const std::vector<T>& params,
@@ -31,28 +27,6 @@ void validate_state_size(const std::vector<T>& state,
     if (state.size() != static_cast<std::size_t>(expected)) {
         throw std::runtime_error(std::string(what) + " state size mismatch");
     }
-}
-
-const mind_sim::mod::AbiRuleDescriptor& descriptor_of(
-    const mind_sim::utils::DynamicLibrary& library,
-    mind_sim::mod::AbiRuleKind expected,
-    const char* what) {
-    const auto descriptor_fn =
-        reinterpret_cast<mind_sim::mod::DescriptorFn>(library.symbol("mind_rule_descriptor"));
-    const auto* descriptor = descriptor_fn();
-    if (!descriptor) {
-        throw std::runtime_error(std::string(what) + " has null descriptor");
-    }
-    if (descriptor->abi_version != mind_sim::mod::kModAbiVersion) {
-        throw std::runtime_error(std::string(what) + " ABI version mismatch");
-    }
-    if (descriptor->kind != static_cast<int>(expected)) {
-        throw std::runtime_error(std::string(what) + " rule kind mismatch");
-    }
-    if (!descriptor->name || descriptor->name[0] == '\0') {
-        throw std::runtime_error(std::string(what) + " descriptor has empty name");
-    }
-    return *descriptor;
 }
 
 std::vector<std::string> descriptor_names(int count, const char* const* names) {
@@ -84,36 +58,23 @@ void append_micro_event(void* user_data, double time, int source_index) {
 
 }  // namespace
 
-MicroInputRule::MicroInputRule(std::string name,
-                               std::string library_path,
-                               int input_count,
-                               int state_count,
-                               int param_count)
-    : name_(std::move(name)),
-      library_(mind_sim::utils::load_dynamic_library(std::move(library_path))),
-      apply_(reinterpret_cast<decltype(apply_)>(library_->symbol("mind_micro_input_rule_apply"))),
-      input_count_(input_count),
-      state_count_(state_count),
-      param_count_(param_count) {
-    if (name_.empty()) {
-        throw std::runtime_error("MicroInputRule name must be non-empty");
+MicroInputRule::MicroInputRule(std::string library_path, std::string rule_name)
+    : library_(mind_sim::utils::load_dynamic_library(std::move(library_path))) {
+    const auto& entry = mind_sim::mod::find_rule_entry(
+        *library_, mind_sim::mod::AbiRuleKind::MicroInput, rule_name, "MicroInputRule");
+    if (entry.micro_input_apply == nullptr) {
+        throw std::runtime_error("MicroInputRule registry entry has null apply function");
     }
-    validate_count(input_count_, "MicroInputRule input_count");
-    validate_count(state_count_, "MicroInputRule state_count");
-    validate_count(param_count_, "MicroInputRule param_count");
-}
-
-MicroInputRule::MicroInputRule(std::string library_path)
-    : library_(mind_sim::utils::load_dynamic_library(std::move(library_path))),
-      apply_(reinterpret_cast<mind_sim::mod::MicroInputApplyFn>(
-          library_->symbol("mind_micro_input_rule_apply"))) {
-    const auto& descriptor =
-        descriptor_of(*library_, mind_sim::mod::AbiRuleKind::MicroInput, "MicroInputRule");
+    apply_ = entry.micro_input_apply;
+    const auto& descriptor = *entry.descriptor;
     name_ = descriptor.name;
     input_count_ = descriptor.target_input_count;
+    source_exposure_count_ = descriptor.source_exposure_count;
     state_count_ = descriptor.state_count;
     param_count_ = descriptor.param_count;
     target_input_names_ = descriptor_names(descriptor.target_input_count, descriptor.target_input_names);
+    source_exposure_names_ =
+        descriptor_names(descriptor.source_exposure_count, descriptor.source_exposure_names);
     state_names_ = descriptor_names(descriptor.state_count, descriptor.state_names);
     state_defaults_ = descriptor_defaults(descriptor.state_count, descriptor.state_defaults);
     param_names_ = descriptor_names(descriptor.param_count, descriptor.param_names);
@@ -126,6 +87,10 @@ const std::string& MicroInputRule::name() const noexcept {
 
 int MicroInputRule::input_count() const noexcept {
     return input_count_;
+}
+
+int MicroInputRule::source_exposure_count() const noexcept {
+    return source_exposure_count_;
 }
 
 int MicroInputRule::state_count() const noexcept {
@@ -142,6 +107,10 @@ const std::string& MicroInputRule::library_path() const noexcept {
 
 const std::vector<std::string>& MicroInputRule::target_input_names() const noexcept {
     return target_input_names_;
+}
+
+const std::vector<std::string>& MicroInputRule::source_exposure_names() const noexcept {
+    return source_exposure_names_;
 }
 
 const std::vector<std::string>& MicroInputRule::state_names() const noexcept {
@@ -172,9 +141,11 @@ void MicroInputRule::validate_params(const std::vector<double>& params) const {
 }
 
 void MicroInputRule::apply(const std::vector<double>& input_trace_soa,
+                           const std::vector<double>& exposure_trace_soa,
                            int sample_count,
                            double sample_dt,
                            int network_input_count,
+                           int network_exposure_count,
                            int roi_count,
                            int roi,
                            std::vector<double>& state,
@@ -184,8 +155,10 @@ void MicroInputRule::apply(const std::vector<double>& input_trace_soa,
                            std::uint64_t rng_seed,
                            int exchange_start_step,
                            const std::vector<int>& source_indices,
+                           const std::vector<int>& source_ids,
                            mind_sim::micro::sim::MicroEventTable& events,
-                           const std::vector<int>& target_input_offsets) const {
+                           const std::vector<int>& target_input_offsets,
+                           const std::vector<int>& source_exposure_offsets) const {
     const int source_count = static_cast<int>(source_indices.size());
     if (sample_count <= 0) {
         throw std::runtime_error("MicroInputRule sample_count must be positive");
@@ -196,6 +169,9 @@ void MicroInputRule::apply(const std::vector<double>& input_trace_soa,
     if (network_input_count <= 0) {
         throw std::runtime_error("MicroInputRule network_input_count must be positive");
     }
+    if (network_exposure_count <= 0) {
+        throw std::runtime_error("MicroInputRule network_exposure_count must be positive");
+    }
     const auto expected_trace_size =
         static_cast<std::size_t>(sample_count) *
         static_cast<std::size_t>(network_input_count) *
@@ -203,23 +179,41 @@ void MicroInputRule::apply(const std::vector<double>& input_trace_soa,
     if (input_trace_soa.size() != expected_trace_size) {
         throw std::runtime_error("MicroInputRule input trace size mismatch");
     }
+    const auto expected_exposure_trace_size =
+        static_cast<std::size_t>(sample_count) *
+        static_cast<std::size_t>(network_exposure_count) *
+        static_cast<std::size_t>(roi_count);
+    if (exposure_trace_soa.size() != expected_exposure_trace_size) {
+        throw std::runtime_error("MicroInputRule exposure trace size mismatch");
+    }
     if (source_count < 0) {
         throw std::runtime_error("MicroInputRule source_count must be non-negative");
+    }
+    if (source_ids.size() != source_indices.size()) {
+        throw std::runtime_error("MicroInputRule source id count must match source index count");
     }
     for (int index: source_indices) {
         if (index < 0) {
             throw std::runtime_error("MicroInputRule source indices must be non-negative");
         }
     }
+    for (int source_id: source_ids) {
+        if (source_id < 0) {
+            throw std::runtime_error("MicroInputRule source ids must be non-negative");
+        }
+    }
     mind_sim::mod::AbiMicroInputContext context{
         .input_count = network_input_count,
+        .exposure_count = network_exposure_count,
         .roi_count = roi_count,
         .target_roi = roi,
         .input_trace_soa = input_trace_soa.data(),
+        .exposure_trace_soa = exposure_trace_soa.data(),
         .sample_count = sample_count,
         .sample_dt = sample_dt,
         .source_count = source_count,
         .source_indices = source_indices.data(),
+        .source_ids = source_ids.data(),
         .state_count = state_count_,
         .state = state.data(),
         .param_count = param_count_,
@@ -229,40 +223,22 @@ void MicroInputRule::apply(const std::vector<double>& input_trace_soa,
         .rng_seed = rng_seed,
         .exchange_start_step = exchange_start_step,
         .target_input_offsets = target_input_offsets.data(),
+        .source_exposure_offsets = source_exposure_offsets.data(),
         .event_user_data = &events,
         .emit_event = append_micro_event,
     };
     apply_(&context);
 }
 
-MicroOutputRule::MicroOutputRule(std::string name,
-                                 std::string library_path,
-                                 int output_count,
-                                 int state_count,
-                                 int param_count)
-    : name_(std::move(name)),
-      library_(mind_sim::utils::load_dynamic_library(std::move(library_path))),
-      apply_(reinterpret_cast<decltype(apply_)>(library_->symbol("mind_micro_output_rule_apply"))),
-      output_count_(output_count),
-      state_count_(state_count),
-      param_count_(param_count) {
-    if (name_.empty()) {
-        throw std::runtime_error("MicroOutputRule name must be non-empty");
+MicroOutputRule::MicroOutputRule(std::string library_path, std::string rule_name)
+    : library_(mind_sim::utils::load_dynamic_library(std::move(library_path))) {
+    const auto& entry = mind_sim::mod::find_rule_entry(
+        *library_, mind_sim::mod::AbiRuleKind::MicroOutput, rule_name, "MicroOutputRule");
+    if (entry.micro_output_apply == nullptr) {
+        throw std::runtime_error("MicroOutputRule registry entry has null apply function");
     }
-    validate_count(output_count_, "MicroOutputRule output_count");
-    validate_count(state_count_, "MicroOutputRule state_count");
-    validate_count(param_count_, "MicroOutputRule param_count");
-    if (output_count_ == 0) {
-        throw std::runtime_error("MicroOutputRule output_count must be positive");
-    }
-}
-
-MicroOutputRule::MicroOutputRule(std::string library_path)
-    : library_(mind_sim::utils::load_dynamic_library(std::move(library_path))),
-      apply_(reinterpret_cast<mind_sim::mod::MicroOutputApplyFn>(
-          library_->symbol("mind_micro_output_rule_apply"))) {
-    const auto& descriptor =
-        descriptor_of(*library_, mind_sim::mod::AbiRuleKind::MicroOutput, "MicroOutputRule");
+    apply_ = entry.micro_output_apply;
+    const auto& descriptor = *entry.descriptor;
     name_ = descriptor.name;
     output_count_ = descriptor.source_exposure_count;
     state_count_ = descriptor.state_count;
@@ -338,7 +314,6 @@ void MicroOutputRule::apply(const mind_sim::micro::sim::MicroSpikeTableView& spi
                             const std::vector<int>& source_exposure_offsets) const {
     mind_sim::mod::AbiSpikeTable spike_table{
         .time = spikes.time,
-        .gid = spikes.gid,
         .size = static_cast<int>(spikes.size()),
     };
     mind_sim::mod::AbiMicroOutputContext context{
@@ -361,4 +336,4 @@ void MicroOutputRule::apply(const mind_sim::micro::sim::MicroSpikeTableView& spi
     apply_(&context);
 }
 
-}  // namespace mind_sim::cosim::bridge
+}  // namespace mind_sim::cosim::transform

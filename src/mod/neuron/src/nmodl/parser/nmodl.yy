@@ -362,6 +362,7 @@
 
     /// forward declaration for the function which handles interface with other parsers
     std::string parse_with_verbatim_parser(std::string);
+    nmodl::ast::MindBlock* parse_mind_block(std::string);
 %}
 
 /** start symbol */
@@ -446,7 +447,7 @@ all             :   {
                     }
                 |   all MIND_BLOCK
                     {
-                        auto statement = new ast::MindBlock(new ast::String($2));
+                        auto statement = parse_mind_block($2);
                         $1->emplace_back_node(statement);
                         $$ = $1;
                     }
@@ -2291,6 +2292,85 @@ std::string parse_with_verbatim_parser(std::string str) {
     std::string ss(*(extcontext.result));
 
     return ss;
+}
+
+nmodl::ast::MindBlock* parse_mind_block(std::string str) {
+    auto trim = [](std::string value) {
+        const auto first = value.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) {
+            return std::string{};
+        }
+        const auto last = value.find_last_not_of(" \t\r\n");
+        return value.substr(first, last - first + 1);
+    };
+
+    auto split_names = [&trim](std::string value) {
+        nmodl::ast::StringVector result;
+        std::size_t start = 0;
+        while (start <= value.size()) {
+            const auto comma = value.find(',', start);
+            const auto end = comma == std::string::npos ? value.size() : comma;
+            auto item = trim(value.substr(start, end - start));
+            if (!item.empty()) {
+                result.emplace_back(std::make_shared<nmodl::ast::String>(item));
+            }
+            if (comma == std::string::npos) {
+                break;
+            }
+            start = comma + 1;
+        }
+        return result;
+    };
+
+    str = trim(std::move(str));
+    if (str.rfind("MIND", 0) == 0) {
+        str = trim(str.substr(4));
+    }
+    if (!str.empty() && str.front() == '{') {
+        str.erase(str.begin());
+    }
+    if (!str.empty() && str.back() == '}') {
+        str.pop_back();
+    }
+
+    std::string role;
+    nmodl::ast::StringVector target_inputs;
+    nmodl::ast::StringVector source_exposures;
+
+    std::istringstream input(str);
+    std::string line;
+    while (std::getline(input, line)) {
+        line = trim(std::move(line));
+        if (line.empty()) {
+            continue;
+        }
+        std::istringstream fields(line);
+        std::string key;
+        fields >> key;
+        std::string rest;
+        std::getline(fields, rest);
+        rest = trim(std::move(rest));
+        if (key == "ROLE") {
+            if (rest.empty()) {
+                throw std::runtime_error("MIND ROLE is empty");
+            }
+            role = rest;
+        } else if (key == "TARGET_INPUT") {
+            auto names = split_names(rest);
+            target_inputs.insert(target_inputs.end(), names.begin(), names.end());
+        } else if (key == "SOURCE_EXPOSURE") {
+            auto names = split_names(rest);
+            source_exposures.insert(source_exposures.end(), names.begin(), names.end());
+        } else {
+            throw std::runtime_error("unknown MIND key: " + key);
+        }
+    }
+
+    if (role.empty()) {
+        throw std::runtime_error("MIND block is missing ROLE");
+    }
+    return new nmodl::ast::MindBlock(
+        new nmodl::ast::String(role), target_inputs, source_exposures);
 }
 
 /** Bison expects error handler for parser.

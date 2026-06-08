@@ -1,5 +1,6 @@
 #include "python_api/bindings/bindings.hpp"
 #include "python_api/bindings/network_builder.hpp"
+#include "mod/rule_registry.hpp"
 #include "utils/dynamic_library.hpp"
 
 #include <algorithm>
@@ -16,47 +17,21 @@ namespace mind_sim::python_api::bindings {
 
 namespace {
 
-bool is_shared_library_suffix(const std::filesystem::path& path) {
-    const auto suffix = path.extension().string();
-    return suffix == ".so" || suffix == ".dylib" || suffix == ".dll";
-}
-
-std::vector<std::string> library_names_for_mod(const std::string& name) {
-    return {
-        name + ".so",
-        "lib" + name + ".so",
-        "libmind_sim_mod_" + name + ".so",
-    };
-}
-
-std::vector<std::filesystem::path> library_dirs_for_source(const std::filesystem::path& source_dir) {
-    std::vector<std::filesystem::path> out;
-    const auto x86_dir = source_dir / "x86_64";
-    if (std::filesystem::exists(x86_dir)) {
-        out.push_back(x86_dir);
-    }
-    if (source_dir.filename() == "x86_64" && std::filesystem::exists(source_dir)) {
-        out.push_back(source_dir);
-    }
-    return out;
-}
-
 std::string canonical_string(const std::filesystem::path& path) {
     return std::filesystem::canonical(path).string();
 }
 
-const mind_sim::mod::AbiRuleDescriptor& descriptor_for_library(
-    const mind_sim::utils::DynamicLibrary& library) {
-    const auto descriptor_fn =
-        reinterpret_cast<mind_sim::mod::DescriptorFn>(library.symbol("mind_rule_descriptor"));
-    const auto* descriptor = descriptor_fn();
-    if (descriptor == nullptr) {
-        throw std::runtime_error("MOD library has a null descriptor");
+std::filesystem::path unified_mod_library_for(const std::filesystem::path& source_dir) {
+    const auto direct = source_dir / "libcorenrnmech.so";
+    if (std::filesystem::is_regular_file(direct)) {
+        return direct;
     }
-    if (descriptor->abi_version != mind_sim::mod::kModAbiVersion) {
-        throw std::runtime_error("MOD library ABI version mismatch");
+    const auto x86 = source_dir / "x86_64" / "libcorenrnmech.so";
+    if (std::filesystem::is_regular_file(x86)) {
+        return x86;
     }
-    return *descriptor;
+    throw std::runtime_error("could not find libcorenrnmech.so under " + source_dir.string() +
+                             "; run mind_nrnivmodl " + source_dir.string() + " first");
 }
 
 template <typename Rule>
@@ -120,13 +95,13 @@ std::vector<double> macro_to_macro_param_values(
 }
 
 std::vector<double> micro_input_state_values(
-    const mind_sim::cosim::bridge::MicroInputRule& rule,
+    const mind_sim::cosim::transform::MicroInputRule& rule,
     const std::unordered_map<std::string, double>& overrides,
     int source_count) {
     if (source_count < 0) {
         throw std::runtime_error(rule.name() + " source count must be non-negative");
     }
-    const auto base = values_with_defaults<mind_sim::cosim::bridge::MicroInputRule>(
+    const auto base = values_with_defaults<mind_sim::cosim::transform::MicroInputRule>(
         rule.state_names(),
         rule.state_defaults(),
         overrides,
@@ -142,9 +117,9 @@ std::vector<double> micro_input_state_values(
 }
 
 std::vector<double> micro_input_param_values(
-    const mind_sim::cosim::bridge::MicroInputRule& rule,
+    const mind_sim::cosim::transform::MicroInputRule& rule,
     const std::unordered_map<std::string, double>& overrides) {
-    return values_with_defaults<mind_sim::cosim::bridge::MicroInputRule>(
+    return values_with_defaults<mind_sim::cosim::transform::MicroInputRule>(
         rule.param_names(),
         rule.param_defaults(),
         overrides,
@@ -152,9 +127,9 @@ std::vector<double> micro_input_param_values(
 }
 
 std::vector<double> micro_output_state_values(
-    const mind_sim::cosim::bridge::MicroOutputRule& rule,
+    const mind_sim::cosim::transform::MicroOutputRule& rule,
     const std::unordered_map<std::string, double>& overrides) {
-    return values_with_defaults<mind_sim::cosim::bridge::MicroOutputRule>(
+    return values_with_defaults<mind_sim::cosim::transform::MicroOutputRule>(
         rule.state_names(),
         rule.state_defaults(),
         overrides,
@@ -162,9 +137,9 @@ std::vector<double> micro_output_state_values(
 }
 
 std::vector<double> micro_output_param_values(
-    const mind_sim::cosim::bridge::MicroOutputRule& rule,
+    const mind_sim::cosim::transform::MicroOutputRule& rule,
     const std::unordered_map<std::string, double>& overrides) {
-    return values_with_defaults<mind_sim::cosim::bridge::MicroOutputRule>(
+    return values_with_defaults<mind_sim::cosim::transform::MicroOutputRule>(
         rule.param_names(),
         rule.param_defaults(),
         overrides,
@@ -183,6 +158,14 @@ std::vector<double> field_param_values(
 
 std::vector<double> node_values(double value, int node_count) {
     return std::vector<double>(static_cast<std::size_t>(node_count), value);
+}
+
+mind_sim::macro::frontend::LocalConnectivity empty_local_connectivity(int node_count) {
+    return mind_sim::macro::frontend::LocalConnectivity(
+        node_count,
+        std::vector<int>(static_cast<std::size_t>(node_count + 1), 0),
+        {},
+        {});
 }
 
 std::vector<double> field_state_values(const mind_sim::macro::sim::NeuralFieldRule& rule,
@@ -255,33 +238,20 @@ std::vector<int> output_indices(const std::vector<std::string>& outputs,
     return out;
 }
 
-void validate_runtime_rule_path(const std::string& library_path) {
-    if (library_path.size() >= 4 &&
-        library_path.substr(library_path.size() - 4) == ".mod") {
-        throw std::runtime_error(
-            "rule .mod files must be compiled to a shared library before runtime loading");
-    }
-}
-
-bool looks_like_library_path(const std::string& value) {
-    const std::filesystem::path path(value);
-    return path.has_parent_path() || is_shared_library_suffix(path);
-}
-
 void require_positive_finite(double value, const char* what) {
     if (value <= 0.0 || !std::isfinite(value)) {
         throw std::runtime_error(std::string(what) + " must be positive and finite");
     }
 }
 
-std::vector<int> spike_input_runtime_indices(Sim& micro, const std::vector<int>& source_ids) {
-    if (source_ids.empty()) {
+std::vector<int> spike_input_runtime_indices(Sim& micro, const std::vector<int>& macro2micro_ids) {
+    if (macro2micro_ids.empty()) {
         throw std::runtime_error("macro2micro requires at least one source");
     }
     std::vector<int> indices;
-    indices.reserve(source_ids.size());
-    for (std::size_t i = 0; i < source_ids.size(); ++i) {
-        const int runtime_index = micro.model.spike_input_runtime_index(source_ids[i]);
+    indices.reserve(macro2micro_ids.size());
+    for (std::size_t i = 0; i < macro2micro_ids.size(); ++i) {
+        const int runtime_index = micro.model.spike_input_runtime_index(macro2micro_ids[i]);
         if (runtime_index < 0) {
             throw std::runtime_error("macro2micro source has no runtime index");
         }
@@ -335,6 +305,25 @@ double NetworkBuilder::min_positive_delay() const {
     return connectivity_.min_positive_delay();
 }
 
+void NetworkBuilder::record(int roi_index_value, std::string output_name) {
+    validate_roi_index(roi_index_value, "record ROI");
+    if (output_name.empty()) {
+        throw std::runtime_error("record output name must be non-empty");
+    }
+    if (!recorded_rois_.has_value()) {
+        recorded_rois_ = std::vector<int>{};
+    }
+    if (std::find(recorded_rois_->begin(), recorded_rois_->end(), roi_index_value) == recorded_rois_->end()) {
+        recorded_rois_->push_back(roi_index_value);
+    }
+    if (!recorded_outputs_.has_value()) {
+        recorded_outputs_ = std::vector<std::string>{};
+    }
+    if (std::find(recorded_outputs_->begin(), recorded_outputs_->end(), output_name) == recorded_outputs_->end()) {
+        recorded_outputs_->push_back(std::move(output_name));
+    }
+}
+
 void NetworkBuilder::record_rois(std::vector<int> roi_indices) {
     for (int roi_value: roi_indices) {
         validate_roi_index(roi_value, "record ROI");
@@ -372,63 +361,7 @@ void NetworkBuilder::load_mech(std::string directory) {
     if (!std::filesystem::is_directory(source_dir)) {
         throw std::runtime_error("MOD path is not a directory: " + source_dir.string());
     }
-
-    std::vector<std::string> mod_names;
-    for (const auto& entry: std::filesystem::directory_iterator(source_dir)) {
-        if (entry.is_regular_file() && entry.path().extension() == ".mod") {
-            mod_names.push_back(entry.path().stem().string());
-        }
-    }
-    std::sort(mod_names.begin(), mod_names.end());
-    mod_names.erase(std::unique(mod_names.begin(), mod_names.end()), mod_names.end());
-
-    if (mod_names.empty()) {
-        std::vector<std::filesystem::path> libraries;
-        for (const auto& entry: std::filesystem::directory_iterator(source_dir)) {
-            if (entry.is_regular_file() && is_shared_library_suffix(entry.path())) {
-                libraries.push_back(entry.path());
-            }
-        }
-        if (libraries.empty()) {
-            throw std::runtime_error("no .mod or MOD shared libraries found in " + source_dir.string());
-        }
-        std::sort(libraries.begin(), libraries.end());
-        for (const auto& library: libraries) {
-            register_mod_library(library.string());
-        }
-        return;
-    }
-
-    const auto library_dirs = library_dirs_for_source(source_dir);
-    std::vector<std::string> missing;
-    for (const auto& name: mod_names) {
-        std::optional<std::filesystem::path> library;
-        for (const auto& dir: library_dirs) {
-            for (const auto& filename: library_names_for_mod(name)) {
-                const auto candidate = dir / filename;
-                if (std::filesystem::exists(candidate)) {
-                    library = candidate;
-                    break;
-                }
-            }
-            if (library.has_value()) {
-                break;
-            }
-        }
-        if (!library.has_value()) {
-            missing.push_back(name);
-            continue;
-        }
-        register_mod_library(library->string(), name);
-    }
-    if (!missing.empty()) {
-        std::string message = "MOD libraries are missing for:";
-        for (const auto& name: missing) {
-            message += " " + name;
-        }
-        message += ". Run mind_nrnivmodl " + source_dir.string() + " first.";
-        throw std::runtime_error(message);
-    }
+    register_mod_library(unified_mod_library_for(source_dir).string());
 }
 
 void NetworkBuilder::set_dc_input(int roi_index_value,
@@ -442,11 +375,11 @@ void NetworkBuilder::use_region(int roi_index_value,
                                 std::unordered_map<std::string, double> initial_state,
                                 std::unordered_map<std::string, double> params) {
     validate_roi_index(roi_index_value, "region ROI");
-    library_path = resolve_rule_path(library_path);
-    validate_runtime_rule_path(library_path);
+    const RuleRef rule_ref = resolve_rule_ref(library_path);
     regions_.push_back(RegionConfig{
         .roi = roi_index_value,
-        .rule = std::make_shared<mind_sim::macro::sim::RegionRule>(std::move(library_path)),
+        .rule = std::make_shared<mind_sim::macro::sim::RegionRule>(rule_ref.library_path,
+                                                                    rule_ref.rule_name),
         .state = std::move(initial_state),
         .params = std::move(params),
     });
@@ -458,16 +391,30 @@ void NetworkBuilder::use_neural_field(std::string name,
                                       mind_sim::macro::frontend::LocalConnectivity local,
                                       std::unordered_map<std::string, double> initial_state,
                                       std::unordered_map<std::string, double> params) {
-    library_path = resolve_rule_path(library_path);
-    validate_runtime_rule_path(library_path);
+    const RuleRef rule_ref = resolve_rule_ref(library_path);
     fields_.push_back(FieldConfig{
         .name = std::move(name),
-        .rule = std::make_shared<mind_sim::macro::sim::NeuralFieldRule>(std::move(library_path)),
+        .rule = std::make_shared<mind_sim::macro::sim::NeuralFieldRule>(rule_ref.library_path,
+                                                                        rule_ref.rule_name),
         .node_map = std::move(node_map),
         .local = std::move(local),
         .state = std::move(initial_state),
         .params = std::move(params),
     });
+}
+
+void NetworkBuilder::use_neural_field(std::string name,
+                                      std::string library_path,
+                                      mind_sim::macro::frontend::NodeToRoiMap node_map,
+                                      std::unordered_map<std::string, double> initial_state,
+                                      std::unordered_map<std::string, double> params) {
+    const int node_count = node_map.node_count();
+    use_neural_field(std::move(name),
+                     std::move(library_path),
+                     std::move(node_map),
+                     empty_local_connectivity(node_count),
+                     std::move(initial_state),
+                     std::move(params));
 }
 
 void NetworkBuilder::macro2macro(int source_roi,
@@ -476,12 +423,12 @@ void NetworkBuilder::macro2macro(int source_roi,
                                  std::unordered_map<std::string, double> params) {
     validate_roi_index(source_roi, "macro-to-macro source ROI");
     validate_roi_index(target_roi, "macro-to-macro target ROI");
-    library_path = resolve_rule_path(library_path);
-    validate_runtime_rule_path(library_path);
+    const RuleRef rule_ref = resolve_rule_ref(library_path);
     macro_to_macro_.push_back(MacroToMacroConfig{
         .source = source_roi,
         .target = target_roi,
-        .rule = std::make_shared<mind_sim::macro::sim::MacroToMacroRule>(std::move(library_path)),
+        .rule = std::make_shared<mind_sim::macro::sim::MacroToMacroRule>(rule_ref.library_path,
+                                                                         rule_ref.rule_name),
         .params = std::move(params),
     });
 }
@@ -511,18 +458,13 @@ void NetworkBuilder::use_micro(int roi_index_value) {
 
 void NetworkBuilder::macro2micro(int roi_index_value,
                                  std::string library_path,
-                                 int gid,
                                  const PointProcessView& target,
                                  double weight,
                                  double delay,
                                  std::unordered_map<std::string, double> state,
                                  std::unordered_map<std::string, double> params) {
     validate_roi_index(roi_index_value, "micro input ROI");
-    library_path = resolve_rule_path(library_path);
-    validate_runtime_rule_path(library_path);
-    if (gid < 0) {
-        throw std::runtime_error("macro2micro gid must be non-negative");
-    }
+    const RuleRef rule_ref = resolve_rule_ref(library_path);
 
     Sim* micro = nullptr;
     for (const auto& binding: micro_bindings_) {
@@ -538,25 +480,26 @@ void NetworkBuilder::macro2micro(int roi_index_value,
         throw std::runtime_error("macro2micro target point process belongs to a different micro Sim");
     }
 
-    const int source_id = micro->model.register_spike_input_source();
-    const int connection_id = micro->model.spike_input_connect(source_id, target.insert_id, weight, delay);
+    const int macro2micro_id = micro->model.register_spike_input_source();
+    const int connection_id = micro->model.spike_input_connect(macro2micro_id, target.insert_id, weight, delay);
     static_cast<void>(connection_id);
 
-    std::shared_ptr<mind_sim::cosim::bridge::MicroInputRule> rule;
+    std::shared_ptr<mind_sim::cosim::transform::MicroInputRule> rule;
     for (const auto& config: micro_inputs_) {
-        if (config.rule && config.rule->library_path() == library_path) {
+        if (config.rule && config.rule->library_path() == rule_ref.library_path &&
+            config.rule->name() == rule_ref.rule_name) {
             rule = config.rule;
             break;
         }
     }
     if (!rule) {
-        rule = std::make_shared<mind_sim::cosim::bridge::MicroInputRule>(std::move(library_path));
+        rule = std::make_shared<mind_sim::cosim::transform::MicroInputRule>(rule_ref.library_path,
+                                                                            rule_ref.rule_name);
     }
     micro_inputs_.push_back(MicroInputConfig{
         .roi = roi_index_value,
         .rule = std::move(rule),
-        .gid = gid,
-        .source_id = source_id,
+        .macro2micro_id = macro2micro_id,
         .state = std::move(state),
         .params = std::move(params),
     });
@@ -564,14 +507,19 @@ void NetworkBuilder::macro2micro(int roi_index_value,
 
 void NetworkBuilder::micro2macro(int roi_index_value,
                                  std::string library_path,
+                                 int sid,
                                  std::unordered_map<std::string, double> state,
                                  std::unordered_map<std::string, double> params) {
     validate_roi_index(roi_index_value, "micro output ROI");
-    library_path = resolve_rule_path(library_path);
-    validate_runtime_rule_path(library_path);
+    const RuleRef rule_ref = resolve_rule_ref(library_path);
+    if (sid < 0) {
+        throw std::runtime_error("micro2macro source sid must be non-negative");
+    }
     micro_outputs_.push_back(MicroOutputConfig{
         .roi = roi_index_value,
-        .rule = std::make_shared<mind_sim::cosim::bridge::MicroOutputRule>(std::move(library_path)),
+        .rule = std::make_shared<mind_sim::cosim::transform::MicroOutputRule>(rule_ref.library_path,
+                                                                              rule_ref.rule_name),
+        .sid = sid,
         .state = std::move(state),
         .params = std::move(params),
     });
@@ -644,6 +592,13 @@ mind_sim::macro::frontend::Network NetworkBuilder::build() const {
                           " target input",
                       config.rule->target_input_names(),
                       accepted_by_roi[static_cast<std::size_t>(config.target)]);
+    }
+
+    for (const auto& config: micro_inputs_) {
+        require_names(connectivity_.rois()[static_cast<std::size_t>(config.roi)].label +
+                          " macro2micro source exposure",
+                      config.rule->source_exposure_names(),
+                      outputs_by_roi[static_cast<std::size_t>(config.roi)]);
     }
 
     for (int roi_value = 0; roi_value < roi_count(); ++roi_value) {
@@ -755,8 +710,8 @@ mind_sim::macro::frontend::Network NetworkBuilder::build() const {
 
     struct MicroInputBatch {
         int roi{-1};
-        std::shared_ptr<mind_sim::cosim::bridge::MicroInputRule> rule{};
-        std::vector<std::pair<int, int>> entries{};
+        std::shared_ptr<mind_sim::cosim::transform::MicroInputRule> rule{};
+        std::vector<int> macro2micro_ids{};
         std::unordered_map<std::string, double> state{};
         std::unordered_map<std::string, double> params{};
     };
@@ -769,7 +724,7 @@ mind_sim::macro::frontend::Network NetworkBuilder::build() const {
                 batch.rule->library_path() == config.rule->library_path() &&
                 batch.state == config.state &&
                 batch.params == config.params) {
-                batch.entries.emplace_back(config.gid, config.source_id);
+                batch.macro2micro_ids.push_back(config.macro2micro_id);
                 merged = true;
                 break;
             }
@@ -778,7 +733,7 @@ mind_sim::macro::frontend::Network NetworkBuilder::build() const {
             micro_input_batches.push_back(MicroInputBatch{
                 .roi = config.roi,
                 .rule = config.rule,
-                .entries = {{config.gid, config.source_id}},
+                .macro2micro_ids = {config.macro2micro_id},
                 .state = config.state,
                 .params = config.params,
             });
@@ -786,40 +741,63 @@ mind_sim::macro::frontend::Network NetworkBuilder::build() const {
     }
 
     for (auto& batch: micro_input_batches) {
-        std::stable_sort(
-            batch.entries.begin(),
-            batch.entries.end(),
-            [](const auto& left, const auto& right) {
-                if (left.first != right.first) {
-                    return left.first < right.first;
-                }
-                return left.second < right.second;
-            });
-        std::vector<int> source_ids;
-        source_ids.reserve(batch.entries.size());
-        for (const auto& [_, source_id]: batch.entries) {
-            source_ids.push_back(source_id);
-        }
         auto* micro = micro_by_roi[static_cast<std::size_t>(batch.roi)];
         if (!micro) {
             throw std::runtime_error("micro input rule requires Network.use_micro for the ROI");
         }
-        const int source_count = static_cast<int>(source_ids.size());
-        auto source_indices = spike_input_runtime_indices(*micro, source_ids);
+        const int source_count = static_cast<int>(batch.macro2micro_ids.size());
+        auto macro2micro_indices = spike_input_runtime_indices(*micro, batch.macro2micro_ids);
         network.configure_macro_to_micro_rule(network.roi(batch.roi),
                                               batch.rule,
                                               micro_input_state_values(*batch.rule, batch.state, source_count),
                                               micro_input_param_values(*batch.rule, batch.params),
-                                              std::move(source_indices),
-                                              offset_map(inputs, batch.rule->target_input_names(), roi_width));
+                                              std::move(macro2micro_indices),
+                                              batch.macro2micro_ids,
+                                              offset_map(inputs, batch.rule->target_input_names(), roi_width),
+                                              offset_map(outputs, batch.rule->source_exposure_names(), roi_width));
     }
 
+    struct MicroOutputBatch {
+        int roi{-1};
+        std::shared_ptr<mind_sim::cosim::transform::MicroOutputRule> rule{};
+        std::vector<int> sids{};
+        std::unordered_map<std::string, double> state{};
+        std::unordered_map<std::string, double> params{};
+    };
+
+    std::vector<MicroOutputBatch> micro_output_batches;
     for (const auto& config: micro_outputs_) {
-        network.configure_micro_output_rule(network.roi(config.roi),
-                                            config.rule,
-                                            micro_output_state_values(*config.rule, config.state),
-                                            micro_output_param_values(*config.rule, config.params),
-                                            offset_map(outputs, config.rule->source_exposure_names(), roi_width));
+        bool merged = false;
+        for (auto& batch: micro_output_batches) {
+            if (batch.roi == config.roi &&
+                batch.rule->library_path() == config.rule->library_path() &&
+                batch.state == config.state &&
+                batch.params == config.params) {
+                batch.sids.push_back(config.sid);
+                merged = true;
+                break;
+            }
+        }
+        if (!merged) {
+            micro_output_batches.push_back(MicroOutputBatch{
+                .roi = config.roi,
+                .rule = config.rule,
+                .sids = {config.sid},
+                .state = config.state,
+                .params = config.params,
+            });
+        }
+    }
+
+    for (auto& batch: micro_output_batches) {
+        std::sort(batch.sids.begin(), batch.sids.end());
+        batch.sids.erase(std::unique(batch.sids.begin(), batch.sids.end()), batch.sids.end());
+        network.configure_micro_output_rule(network.roi(batch.roi),
+                                            batch.rule,
+                                            micro_output_state_values(*batch.rule, batch.state),
+                                            micro_output_param_values(*batch.rule, batch.params),
+                                            std::move(batch.sids),
+                                            offset_map(outputs, batch.rule->source_exposure_names(), roi_width));
     }
 
     for (const auto& config: macro_to_macro_) {
@@ -837,16 +815,13 @@ int NetworkBuilder::roi_index(const std::string& label) const {
     return connectivity_.roi_index(label);
 }
 
-std::string NetworkBuilder::resolve_rule_path(const std::string& mechanism) const {
-    const auto found = mod_libraries_.find(mechanism);
-    if (found != mod_libraries_.end()) {
+NetworkBuilder::RuleRef NetworkBuilder::resolve_rule_ref(const std::string& mechanism) const {
+    const auto found = mod_rules_.find(mechanism);
+    if (found != mod_rules_.end()) {
         return found->second;
     }
-    if (looks_like_library_path(mechanism)) {
-        return mechanism;
-    }
     std::string known;
-    for (const auto& [name, _]: mod_libraries_) {
+    for (const auto& [name, _]: mod_rules_) {
         if (!known.empty()) {
             known += ", ";
         }
@@ -860,23 +835,24 @@ std::string NetworkBuilder::resolve_rule_path(const std::string& mechanism) cons
                              known);
 }
 
-void NetworkBuilder::register_mod_library(const std::string& library_path,
-                                          const std::string& expected_name) {
+void NetworkBuilder::register_mod_library(const std::string& library_path) {
     const auto canonical_path = canonical_string(library_path);
     auto library = mind_sim::utils::load_dynamic_library(canonical_path);
-    const auto& descriptor = descriptor_for_library(*library);
-    std::vector<std::string> names{descriptor.name};
-    if (!expected_name.empty() &&
-        std::find(names.begin(), names.end(), expected_name) == names.end()) {
-        names.push_back(expected_name);
+    const auto descriptors = mind_sim::mod::rule_descriptors(*library, "MOD library");
+    if (descriptors.empty()) {
+        throw std::runtime_error("MOD library has no MIND rules: " + canonical_path);
     }
-    for (const auto& name: names) {
-        const auto found = mod_libraries_.find(name);
-        if (found != mod_libraries_.end() && found->second != canonical_path) {
+    for (const auto* descriptor: descriptors) {
+        const std::string name = descriptor->name;
+        const auto found = mod_rules_.find(name);
+        if (found != mod_rules_.end() && found->second.library_path != canonical_path) {
             throw std::runtime_error("duplicate MOD mechanism '" + name + "': " +
-                                     found->second + " and " + canonical_path);
+                                     found->second.library_path + " and " + canonical_path);
         }
-        mod_libraries_[name] = canonical_path;
+        mod_rules_[name] = RuleRef{
+            .library_path = canonical_path,
+            .rule_name = name,
+        };
     }
 }
 

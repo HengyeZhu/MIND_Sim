@@ -1201,27 +1201,27 @@ void MicroFrontendModel::set_mechanism_scalar(int insert_id, const std::string& 
     core_initialized_ = false;
 }
 
-int MicroFrontendModel::register_gid_source(int gid,
-                                            const VariableRef& source,
-                                            std::optional<double> threshold) {
+int MicroFrontendModel::register_spike_source(int sid,
+                                              const VariableRef& source,
+                                              std::optional<double> threshold) {
     if (source.kind != VariableRef::Kind::LocationVoltage && source.kind != VariableRef::Kind::Location) {
-        throw std::runtime_error("register_gid_source requires a section location variable reference");
+        throw std::runtime_error("register_spike_source requires a section location variable reference");
     }
-    return network_registry_.register_gid_source(
-        gid,
+    return network_registry_.register_spike_source(
+        sid,
         source.gid,
         source.section_index,
         source.x,
         threshold);
 }
 
-int MicroFrontendModel::gid_connect(int gid, int post_insert_id, double weight, double delay) {
+int MicroFrontendModel::sid_connect(int sid, int post_insert_id, double weight, double delay) {
     const auto idx = require_insert_index(post_insert_id);
     const int target_id = core_mechanism_builder_.inserts[idx].target_id;
     if (target_id < 0) {
-        throw std::runtime_error("gid_connect target must be a located mechanism insert");
+        throw std::runtime_error("sid_connect target must be a located mechanism insert");
     }
-    return network_registry_.register_gid_connect(gid, target_id, weight, delay);
+    return network_registry_.register_sid_connect(sid, target_id, weight, delay);
 }
 
 int MicroFrontendModel::event_target_connect(int source_insert_id,

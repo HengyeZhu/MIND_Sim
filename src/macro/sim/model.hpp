@@ -12,7 +12,7 @@ namespace mind_sim::macro::sim {
 
 class RegionRule {
   public:
-    explicit RegionRule(std::string library_path);
+    RegionRule(std::string library_path, std::string rule_name);
 
     [[nodiscard]] const std::string& name() const noexcept;
     [[nodiscard]] int input_count() const noexcept;
@@ -58,7 +58,7 @@ class RegionRule {
 
 class NeuralFieldRule {
   public:
-    explicit NeuralFieldRule(std::string library_path);
+    NeuralFieldRule(std::string library_path, std::string rule_name);
 
     [[nodiscard]] const std::string& name() const noexcept;
     [[nodiscard]] int input_count() const noexcept;
@@ -108,12 +108,7 @@ class NeuralFieldRule {
 
 class MacroToMacroRule {
   public:
-    MacroToMacroRule(std::string name,
-                 std::string library_path,
-                 int input_count,
-                 int output_count,
-                 int param_count);
-    explicit MacroToMacroRule(std::string library_path);
+    MacroToMacroRule(std::string library_path, std::string rule_name);
 
     [[nodiscard]] const std::string& name() const noexcept;
     [[nodiscard]] int input_count() const noexcept;

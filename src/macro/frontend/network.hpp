@@ -1,6 +1,6 @@
 #pragma once
 
-#include "cosim/bridge/interfaces.hpp"
+#include "cosim/transform/interfaces.hpp"
 #include "macro/frontend/connectivity.hpp"
 #include "macro/frontend/local_connectivity.hpp"
 #include "macro/frontend/node_to_roi_map.hpp"
@@ -59,18 +59,25 @@ struct GidRange {
     int end{0};
 };
 
+struct MicroOutputTransform {
+    std::shared_ptr<mind_sim::cosim::transform::MicroOutputRule> rule{};
+    std::vector<double> state{};
+    std::vector<double> params{};
+    std::vector<int> source_sids{};
+    std::vector<int> source_exposure_offsets{};
+};
+
 struct MicroRoiBinding {
     int roi_index{-1};
     std::vector<GidRange> gid_ranges{};
-    std::shared_ptr<mind_sim::cosim::bridge::MicroInputRule> input_rule{};
+    std::shared_ptr<mind_sim::cosim::transform::MicroInputRule> input_rule{};
     std::vector<double> input_state{};
     std::vector<double> input_params{};
-    std::vector<int> input_source_indices{};
+    std::vector<int> macro2micro_indices{};
+    std::vector<int> macro2micro_source_ids{};
     std::vector<int> target_input_offsets{};
-    std::shared_ptr<mind_sim::cosim::bridge::MicroOutputRule> output_rule{};
-    std::vector<double> output_state{};
-    std::vector<double> output_params{};
     std::vector<int> source_exposure_offsets{};
+    std::vector<MicroOutputTransform> output_transforms{};
 };
 
 struct MicroCircuitOwner {
@@ -161,15 +168,18 @@ class Network {
                         const ROI& roi,
                         std::vector<GidRange> gid_ranges);
     void configure_macro_to_micro_rule(const ROI& roi,
-                                       std::shared_ptr<mind_sim::cosim::bridge::MicroInputRule> input_rule,
+                                       std::shared_ptr<mind_sim::cosim::transform::MicroInputRule> input_rule,
                                        std::vector<double> input_state,
                                        std::vector<double> input_params,
-                                       std::vector<int> input_source_indices,
-                                       std::vector<int> target_input_offsets);
+                                       std::vector<int> macro2micro_indices,
+                                       std::vector<int> macro2micro_source_ids,
+                                       std::vector<int> target_input_offsets,
+                                       std::vector<int> source_exposure_offsets);
     void configure_micro_output_rule(const ROI& roi,
-                                     std::shared_ptr<mind_sim::cosim::bridge::MicroOutputRule> output_rule,
+                                     std::shared_ptr<mind_sim::cosim::transform::MicroOutputRule> output_rule,
                                      std::vector<double> output_state,
                                      std::vector<double> output_params,
+                                     std::vector<int> output_source_sids,
                                      std::vector<int> source_exposure_offsets);
 
     [[nodiscard]] const std::vector<MacroToMacroProjection>& macro_to_macro_projections() const noexcept;

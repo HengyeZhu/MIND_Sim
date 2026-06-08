@@ -325,7 +325,7 @@ section_id append_section_with_pt3d(Morph& morph,
     }
 
     const auto head_id = static_cast<swcdata_id>(morph.swc.size());
-    // Store the first point coordinates in SWC for debugging; node build uses pt3d directly.
+    // Store the first point coordinates in SWC; node build uses pt3d directly.
     morph.swc.push_back(SwcData{
         .xyz = {points[0].x_um, points[0].y_um, points[0].z_um},
         .d_um = points[0].diam_um,

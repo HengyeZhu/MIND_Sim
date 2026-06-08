@@ -464,11 +464,14 @@ void pad_registered_data_fields_to_prop_size(const std::string& mechanism, int p
 
 [[nodiscard]] std::string infer_ion_target_from_dparam_field(const std::string& field,
                                                             const std::string& ion) {
-    const std::string prefix = "_ion_";
-    if (!field.starts_with(prefix)) {
+    std::string suffix;
+    if (field.starts_with("_ion_")) {
+        suffix = field.substr(std::string("_ion_").size());
+    } else if (field.starts_with("ion_")) {
+        suffix = field.substr(std::string("ion_").size());
+    } else {
         return {};
     }
-    const std::string suffix = field.substr(prefix.size());
     if (suffix == "i" + ion) {
         return "i" + ion;
     }
@@ -857,6 +860,70 @@ void register_data_fields(
     apply_registered_data_fields(g_registered_mechanisms[static_cast<std::size_t>(type)]);
     rebuild_dparam_bindings_for(g_registered_mechanisms[static_cast<std::size_t>(type)]);
     mark_dparam_binding_cache_dirty();
+}
+
+void register_data_fields(
+    int type,
+    const std::vector<std::pair<const char*, int>>& param_info,
+    const std::vector<std::pair<const char*, const char*>>& dparam_info) {
+    std::vector<data_field_info> fields;
+    fields.reserve(param_info.size());
+    for (const auto& field : param_info) {
+        if (field.first == nullptr || field.first[0] == '\0') {
+            continue;
+        }
+        fields.push_back(data_field_info{
+            .name = field.first,
+            .array_size = field.second,
+            .role = field_role::range,
+        });
+    }
+
+    std::vector<dparam_field_info> dparam_fields;
+    dparam_fields.reserve(dparam_info.size());
+    for (const auto& field : dparam_info) {
+        if (field.first == nullptr || field.first[0] == '\0') {
+            continue;
+        }
+        dparam_fields.push_back(dparam_field_info{
+            .name = field.first,
+            .semantic = field.second == nullptr ? "" : field.second,
+        });
+    }
+
+    register_data_fields(type, fields, dparam_fields);
+}
+
+void register_data_fields(
+    int type,
+    const std::vector<std::pair<std::string, int>>& param_info,
+    const std::vector<std::pair<std::string, std::string>>& dparam_info) {
+    std::vector<data_field_info> fields;
+    fields.reserve(param_info.size());
+    for (const auto& field : param_info) {
+        if (field.first.empty()) {
+            continue;
+        }
+        fields.push_back(data_field_info{
+            .name = field.first,
+            .array_size = field.second,
+            .role = field_role::range,
+        });
+    }
+
+    std::vector<dparam_field_info> dparam_fields;
+    dparam_fields.reserve(dparam_info.size());
+    for (const auto& field : dparam_info) {
+        if (field.first.empty()) {
+            continue;
+        }
+        dparam_fields.push_back(dparam_field_info{
+            .name = field.first,
+            .semantic = field.second,
+        });
+    }
+
+    register_data_fields(type, fields, dparam_fields);
 }
 
 }  // namespace neuron::mechanism::detail

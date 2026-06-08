@@ -4,7 +4,7 @@
 
 namespace mind_sim::mod {
 
-constexpr int kModAbiVersion = 10;
+constexpr int kModAbiVersion = 14;
 
 enum class AbiRuleKind : int {
     MacroToMacro = 0,
@@ -34,7 +34,6 @@ struct AbiRuleDescriptor {
 
 struct AbiSpikeTable {
     const double* time;
-    const int* gid;
     int size;
 };
 
@@ -61,13 +60,16 @@ struct AbiMacroToMacroContext {
 
 struct AbiMicroInputContext {
     int input_count;
+    int exposure_count;
     int roi_count;
     int target_roi;
     const double* input_trace_soa;
+    const double* exposure_trace_soa;
     int sample_count;
     double sample_dt;
     int source_count;
     const int* source_indices;
+    const int* source_ids;
     int state_count;
     double* state;
     int param_count;
@@ -77,6 +79,7 @@ struct AbiMicroInputContext {
     std::uint64_t rng_seed;
     int exchange_start_step;
     const int* target_input_offsets;
+    const int* source_exposure_offsets;
     void* event_user_data;
     void (*emit_event)(void* user_data, double time, int source_index);
 };
@@ -136,11 +139,27 @@ struct AbiNeuralFieldContext {
     double dt;
 };
 
-using DescriptorFn = const AbiRuleDescriptor* (*)();
 using MacroToMacroApplyFn = void (*)(const AbiMacroToMacroContext*);
 using MicroInputApplyFn = void (*)(const AbiMicroInputContext*);
 using MicroOutputApplyFn = void (*)(const AbiMicroOutputContext*);
 using RegionApplyFn = void (*)(const AbiRegionContext*);
 using NeuralFieldApplyFn = void (*)(const AbiNeuralFieldContext*);
+
+struct AbiRuleEntry {
+    const AbiRuleDescriptor* descriptor;
+    MacroToMacroApplyFn macro_to_macro_apply;
+    MicroInputApplyFn micro_input_apply;
+    MicroOutputApplyFn micro_output_apply;
+    RegionApplyFn region_apply;
+    NeuralFieldApplyFn neural_field_apply;
+};
+
+struct AbiRuleRegistry {
+    int abi_version;
+    int rule_count;
+    const AbiRuleEntry* rules;
+};
+
+using RuleRegistryFn = const AbiRuleRegistry* (*)();
 
 }  // namespace mind_sim::mod

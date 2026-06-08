@@ -155,7 +155,7 @@ RoiOwnerPartition collect_roi_owners(
 
     for (const auto& circuit: micro_circuits) {
         for (const auto& binding: circuit.bindings) {
-            if (require_micro_output_rule && !binding.output_rule) {
+            if (require_micro_output_rule && binding.output_transforms.empty()) {
                 throw std::runtime_error("micro ROI is missing an output mod connection");
             }
             owners.detailed_microcircuit_rois.push_back(binding.roi_index);
@@ -318,9 +318,7 @@ void initialize_history(std::vector<double>& history,
     const auto slot_size = static_cast<std::size_t>(roi_count * output_count);
     for (int slot = 0; slot < history_capacity; ++slot) {
         const auto base = static_cast<std::size_t>(slot) * slot_size;
-        std::copy(output_soa.begin(),
-                  output_soa.end(),
-                  history.begin() + static_cast<std::ptrdiff_t>(base));
+        std::copy(output_soa.begin(), output_soa.end(), history.begin() + static_cast<std::ptrdiff_t>(base));
     }
 }
 
@@ -331,9 +329,7 @@ void write_history_slot(std::vector<double>& history,
                         const std::vector<double>& output_soa) {
     const auto slot_size = static_cast<std::size_t>(roi_count * output_count);
     const auto base = static_cast<std::size_t>(slot) * slot_size;
-    std::copy(output_soa.begin(),
-              output_soa.end(),
-              history.begin() + static_cast<std::ptrdiff_t>(base));
+    std::copy(output_soa.begin(), output_soa.end(), history.begin() + static_cast<std::ptrdiff_t>(base));
 }
 
 void append_record_table(mind_sim::macro::sim::RecordTable& record,

@@ -238,12 +238,12 @@ public:
     [[nodiscard]] int get_netcon_target_event_target_id(int connection_id) const;
     [[nodiscard]] int get_netcon_source_event_target_id(int connection_id) const;
     [[nodiscard]] RealNetConSourceKey get_real_netcon_source_key(int connection_id) const;
-    int register_gid_source(int gid,
-                            int source_gid,
-                            int source_section_index,
-                            double source_loc,
-                            std::optional<double> threshold = std::nullopt);
-    [[nodiscard]] int register_gid_connect(int gid,
+    int register_spike_source(int sid,
+                              int source_gid,
+                              int source_section_index,
+                              double source_loc,
+                              std::optional<double> threshold = std::nullopt);
+    [[nodiscard]] int register_sid_connect(int sid,
                                            int target_event_target_id,
                                            double weight,
                                            double delay);
@@ -297,7 +297,7 @@ private:
     std::vector<int> event_target_slot_by_event_target_id_{};
     std::vector<EventEdge> event_edges_{};
     std::vector<double> event_edge_weights_{};
-    std::vector<int> gid_source_slot_by_gid_{};
+    std::vector<int> source_slot_by_sid_{};
 
     std::vector<TransferSourceDecl> transfer_sources_{};
     std::unordered_map<int, int> transfer_source_index_by_sid_{};

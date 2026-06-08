@@ -1,5 +1,7 @@
 #include "macro/sim/model.hpp"
 
+#include "mod/rule_registry.hpp"
+
 #include <algorithm>
 #include <cstddef>
 #include <stdexcept>
@@ -9,38 +11,10 @@ namespace mind_sim::macro::sim {
 
 namespace {
 
-void validate_count(int count, const char* what) {
-    if (count < 0) {
-        throw std::runtime_error(std::string(what) + " must be non-negative");
-    }
-}
-
 void validate_vector_size(const std::vector<double>& values, int expected, const char* what) {
     if (values.size() != static_cast<std::size_t>(expected)) {
         throw std::runtime_error(std::string(what) + " size mismatch");
     }
-}
-
-const mind_sim::mod::AbiRuleDescriptor& descriptor_of(
-    const mind_sim::utils::DynamicLibrary& library,
-    mind_sim::mod::AbiRuleKind expected,
-    const char* what) {
-    const auto descriptor_fn =
-        reinterpret_cast<mind_sim::mod::DescriptorFn>(library.symbol("mind_rule_descriptor"));
-    const auto* descriptor = descriptor_fn();
-    if (!descriptor) {
-        throw std::runtime_error(std::string(what) + " has null descriptor");
-    }
-    if (descriptor->abi_version != mind_sim::mod::kModAbiVersion) {
-        throw std::runtime_error(std::string(what) + " ABI version mismatch");
-    }
-    if (descriptor->kind != static_cast<int>(expected)) {
-        throw std::runtime_error(std::string(what) + " rule kind mismatch");
-    }
-    if (!descriptor->name || descriptor->name[0] == '\0') {
-        throw std::runtime_error(std::string(what) + " descriptor has empty name");
-    }
-    return *descriptor;
 }
 
 int descriptor_name_index(int count, const char* const* names, const char* target) {
@@ -73,12 +47,15 @@ std::vector<double> descriptor_defaults(int count, const double* values) {
 
 }  // namespace
 
-RegionRule::RegionRule(std::string library_path)
-    : library_(mind_sim::utils::load_dynamic_library(std::move(library_path))),
-      step_(reinterpret_cast<mind_sim::mod::RegionApplyFn>(
-          library_->symbol("mind_region_rule_apply"))) {
-    const auto& descriptor =
-        descriptor_of(*library_, mind_sim::mod::AbiRuleKind::Region, "RegionRule");
+RegionRule::RegionRule(std::string library_path, std::string rule_name)
+    : library_(mind_sim::utils::load_dynamic_library(std::move(library_path))) {
+    const auto& entry = mind_sim::mod::find_rule_entry(
+        *library_, mind_sim::mod::AbiRuleKind::Region, rule_name, "RegionRule");
+    if (entry.region_apply == nullptr) {
+        throw std::runtime_error("RegionRule registry entry has null apply function");
+    }
+    step_ = entry.region_apply;
+    const auto& descriptor = *entry.descriptor;
     name_ = descriptor.name;
     input_count_ = descriptor.target_input_count;
     output_count_ = descriptor.source_exposure_count;
@@ -182,12 +159,15 @@ void RegionRule::step_group(const std::vector<int>& roi_indices,
     step_(&context);
 }
 
-NeuralFieldRule::NeuralFieldRule(std::string library_path)
-    : library_(mind_sim::utils::load_dynamic_library(std::move(library_path))),
-      step_(reinterpret_cast<mind_sim::mod::NeuralFieldApplyFn>(
-          library_->symbol("mind_neural_field_rule_apply"))) {
-    const auto& descriptor =
-        descriptor_of(*library_, mind_sim::mod::AbiRuleKind::NeuralField, "NeuralFieldRule");
+NeuralFieldRule::NeuralFieldRule(std::string library_path, std::string rule_name)
+    : library_(mind_sim::utils::load_dynamic_library(std::move(library_path))) {
+    const auto& entry = mind_sim::mod::find_rule_entry(
+        *library_, mind_sim::mod::AbiRuleKind::NeuralField, rule_name, "NeuralFieldRule");
+    if (entry.neural_field_apply == nullptr) {
+        throw std::runtime_error("NeuralFieldRule registry entry has null apply function");
+    }
+    step_ = entry.neural_field_apply;
+    const auto& descriptor = *entry.descriptor;
     name_ = descriptor.name;
     input_count_ = descriptor.target_input_count;
     state_count_ = descriptor.state_count;
@@ -311,34 +291,15 @@ void NeuralFieldRule::step(int node_count,
     step_(&context);
 }
 
-MacroToMacroRule::MacroToMacroRule(std::string name,
-                           std::string library_path,
-                           int input_count,
-                           int output_count,
-                           int param_count)
-    : name_(std::move(name)),
-      library_(mind_sim::utils::load_dynamic_library(std::move(library_path))),
-      apply_(reinterpret_cast<decltype(apply_)>(library_->symbol("mind_macro_to_macro_rule_apply"))),
-      input_count_(input_count),
-      output_count_(output_count),
-      param_count_(param_count) {
-    if (name_.empty()) {
-        throw std::runtime_error("MacroToMacroRule name must be non-empty");
+MacroToMacroRule::MacroToMacroRule(std::string library_path, std::string rule_name)
+    : library_(mind_sim::utils::load_dynamic_library(std::move(library_path))) {
+    const auto& entry = mind_sim::mod::find_rule_entry(
+        *library_, mind_sim::mod::AbiRuleKind::MacroToMacro, rule_name, "MacroToMacroRule");
+    if (entry.macro_to_macro_apply == nullptr) {
+        throw std::runtime_error("MacroToMacroRule registry entry has null apply function");
     }
-    validate_count(input_count_, "MacroToMacroRule input_count");
-    validate_count(output_count_, "MacroToMacroRule output_count");
-    validate_count(param_count_, "MacroToMacroRule param_count");
-    if (output_count_ == 0) {
-        throw std::runtime_error("MacroToMacroRule output_count must be positive");
-    }
-}
-
-MacroToMacroRule::MacroToMacroRule(std::string library_path)
-    : library_(mind_sim::utils::load_dynamic_library(std::move(library_path))),
-      apply_(reinterpret_cast<mind_sim::mod::MacroToMacroApplyFn>(
-          library_->symbol("mind_macro_to_macro_rule_apply"))) {
-    const auto& descriptor =
-        descriptor_of(*library_, mind_sim::mod::AbiRuleKind::MacroToMacro, "MacroToMacroRule");
+    apply_ = entry.macro_to_macro_apply;
+    const auto& descriptor = *entry.descriptor;
     name_ = descriptor.name;
     input_count_ = descriptor.target_input_count;
     output_count_ = descriptor.source_exposure_count;

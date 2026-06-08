@@ -49,40 +49,56 @@ void Network::bind_micro_roi(int micro_circuit_index,
 
 void Network::configure_macro_to_micro_rule(
     const ROI& roi_value,
-    std::shared_ptr<mind_sim::cosim::bridge::MicroInputRule> input_rule,
+    std::shared_ptr<mind_sim::cosim::transform::MicroInputRule> input_rule,
     std::vector<double> input_state,
     std::vector<double> input_params,
-    std::vector<int> input_source_indices,
-    std::vector<int> target_input_offsets) {
+    std::vector<int> macro2micro_indices,
+    std::vector<int> macro2micro_source_ids,
+    std::vector<int> target_input_offsets,
+    std::vector<int> source_exposure_offsets) {
     if (!input_rule) {
         throw std::runtime_error("micro input connection requires MicroInputRule");
     }
-    if (input_source_indices.empty()) {
-        throw std::runtime_error("micro input connection requires at least one source");
+    if (macro2micro_indices.empty()) {
+        throw std::runtime_error("micro input connection requires at least one macro2micro id");
     }
-    for (int index: input_source_indices) {
+    if (macro2micro_source_ids.size() != macro2micro_indices.size()) {
+        throw std::runtime_error("macro2micro source id count must match runtime index count");
+    }
+    for (int index: macro2micro_indices) {
         if (index < 0) {
-            throw std::runtime_error("micro input source indices must be non-negative");
+            throw std::runtime_error("macro2micro indices must be non-negative");
         }
     }
-    input_rule->validate_state(input_state, static_cast<int>(input_source_indices.size()));
+    for (int source_id: macro2micro_source_ids) {
+        if (source_id < 0) {
+            throw std::runtime_error("macro2micro source ids must be non-negative");
+        }
+    }
+    input_rule->validate_state(input_state, static_cast<int>(macro2micro_indices.size()));
     input_rule->validate_params(input_params);
     if (target_input_offsets.size() != static_cast<std::size_t>(input_rule->input_count())) {
         throw std::runtime_error("MicroInputRule target input offset count does not match rule");
+    }
+    if (source_exposure_offsets.size() != static_cast<std::size_t>(input_rule->source_exposure_count())) {
+        throw std::runtime_error("MicroInputRule source exposure offset count does not match rule");
     }
     auto& binding = require_micro_binding(roi_value.index);
     binding.input_rule = std::move(input_rule);
     binding.input_state = std::move(input_state);
     binding.input_params = std::move(input_params);
-    binding.input_source_indices = std::move(input_source_indices);
+    binding.macro2micro_indices = std::move(macro2micro_indices);
+    binding.macro2micro_source_ids = std::move(macro2micro_source_ids);
     binding.target_input_offsets = std::move(target_input_offsets);
+    binding.source_exposure_offsets = std::move(source_exposure_offsets);
 }
 
 void Network::configure_micro_output_rule(
     const ROI& roi_value,
-    std::shared_ptr<mind_sim::cosim::bridge::MicroOutputRule> output_rule,
+    std::shared_ptr<mind_sim::cosim::transform::MicroOutputRule> output_rule,
     std::vector<double> output_state,
     std::vector<double> output_params,
+    std::vector<int> output_source_sids,
     std::vector<int> source_exposure_offsets) {
     if (!output_rule) {
         throw std::runtime_error("micro output connection requires MicroOutputRule");
@@ -92,11 +108,22 @@ void Network::configure_micro_output_rule(
     if (source_exposure_offsets.size() != static_cast<std::size_t>(output_rule->output_count())) {
         throw std::runtime_error("MicroOutputRule source output offset count does not match rule");
     }
+    std::sort(output_source_sids.begin(), output_source_sids.end());
+    output_source_sids.erase(std::unique(output_source_sids.begin(), output_source_sids.end()),
+                             output_source_sids.end());
+    for (int sid: output_source_sids) {
+        if (sid < 0) {
+            throw std::runtime_error("micro output source sid must be non-negative");
+        }
+    }
     auto& binding = require_micro_binding(roi_value.index);
-    binding.output_rule = std::move(output_rule);
-    binding.output_state = std::move(output_state);
-    binding.output_params = std::move(output_params);
-    binding.source_exposure_offsets = std::move(source_exposure_offsets);
+    binding.output_transforms.push_back(MicroOutputTransform{
+        .rule = std::move(output_rule),
+        .state = std::move(output_state),
+        .params = std::move(output_params),
+        .source_sids = std::move(output_source_sids),
+        .source_exposure_offsets = std::move(source_exposure_offsets),
+    });
 }
 
 void Network::validate_gid_ranges(const std::vector<GidRange>& gid_ranges) const {

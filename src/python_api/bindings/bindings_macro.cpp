@@ -206,13 +206,6 @@ void bind_macro(nb::module_& m) {
              nb::arg("roi"),
              nb::arg("gid_range_begins"),
              nb::arg("gid_range_ends"))
-        .def("configure_micro_output_rule",
-             &Network::configure_micro_output_rule,
-             nb::arg("roi"),
-             nb::arg("output_rule"),
-             nb::arg("output_state"),
-             nb::arg("output_params"),
-             nb::arg("source_exposure_offsets"))
         .def("roi_index", &Network::roi_index, nb::arg("label"))
         .def("roi_count", &Network::roi_count);
 
@@ -228,6 +221,10 @@ void bind_macro(nb::module_& m) {
         .def("rois", &NetworkBuilder::rois)
         .def("roi_count", &NetworkBuilder::roi_count)
         .def("min_positive_delay", &NetworkBuilder::min_positive_delay)
+        .def("record",
+             &NetworkBuilder::record,
+             nb::arg("roi"),
+             nb::arg("output"))
         .def("record_rois", &NetworkBuilder::record_rois, nb::arg("roi_indices"))
         .def("record_all_rois", &NetworkBuilder::record_all_rois)
         .def("record_outputs", &NetworkBuilder::record_outputs, nb::arg("output_names"))
@@ -250,11 +247,27 @@ void bind_macro(nb::module_& m) {
              nb::arg("initial_state") = std::unordered_map<std::string, double>{},
              nb::arg("params") = std::unordered_map<std::string, double>{})
         .def("use_neural_field",
-             &NetworkBuilder::use_neural_field,
+             nb::overload_cast<std::string,
+                               std::string,
+                               NodeToRoiMap,
+                               LocalConnectivity,
+                               std::unordered_map<std::string, double>,
+                               std::unordered_map<std::string, double>>(&NetworkBuilder::use_neural_field),
              nb::arg("name"),
              nb::arg("library_path"),
              nb::arg("node_map"),
              nb::arg("local"),
+             nb::arg("initial_state") = std::unordered_map<std::string, double>{},
+             nb::arg("params") = std::unordered_map<std::string, double>{})
+        .def("use_neural_field",
+             nb::overload_cast<std::string,
+                               std::string,
+                               NodeToRoiMap,
+                               std::unordered_map<std::string, double>,
+                               std::unordered_map<std::string, double>>(&NetworkBuilder::use_neural_field),
+             nb::arg("name"),
+             nb::arg("library_path"),
+             nb::arg("node_map"),
              nb::arg("initial_state") = std::unordered_map<std::string, double>{},
              nb::arg("params") = std::unordered_map<std::string, double>{})
         .def("macro2macro",
@@ -270,7 +283,6 @@ void bind_macro(nb::module_& m) {
              &NetworkBuilder::macro2micro,
              nb::arg("roi"),
              nb::arg("library_path"),
-             nb::arg("gid"),
              nb::arg("target"),
              nb::arg("weight"),
              nb::arg("delay"),
@@ -280,6 +292,7 @@ void bind_macro(nb::module_& m) {
              &NetworkBuilder::micro2macro,
              nb::arg("roi"),
              nb::arg("library_path"),
+             nb::arg("sid"),
              nb::arg("state") = std::unordered_map<std::string, double>{},
              nb::arg("params") = std::unordered_map<std::string, double>{})
         .def("build", &NetworkBuilder::build);

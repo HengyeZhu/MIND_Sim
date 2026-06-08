@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 
 from . import _native
 
@@ -25,9 +25,7 @@ class ROI:
         return self
 
     def record(self, output: str, /) -> "ROI":
-        if not isinstance(output, str):
-            raise TypeError("ROI.record expects one output name")
-        self._network._record(self._index, output)
+        self._network._builder.record(self._index, output)
         return self
 
     def use_macro(
@@ -58,7 +56,6 @@ class ROI:
     def macro2micro(
         self,
         mechanism,
-        gid: int,
         *,
         target,
         weight: float,
@@ -66,10 +63,10 @@ class ROI:
         state: Mapping[str, float] | None = None,
         params: Mapping[str, float] | None = None,
     ) -> "ROI":
+        # target is the concrete micro point process that receives macro events.
         self._network._builder.macro2micro(
             self._index,
             str(mechanism),
-            int(gid),
             target,
             float(weight),
             float(delay),
@@ -81,13 +78,18 @@ class ROI:
     def micro2macro(
         self,
         mechanism,
+        sid: int,
         *,
         state: Mapping[str, float] | None = None,
         params: Mapping[str, float] | None = None,
     ) -> "ROI":
+        # sid is the explicit spike-source id registered by
+        # micro.network().register_spike_source(...). It may equal cell.gid when
+        # each cell has one spike source, but it is not inferred from the cell.
         self._network._builder.micro2macro(
             self._index,
             str(mechanism),
+            int(sid),
             _values(state),
             _values(params),
         )
@@ -151,8 +153,6 @@ class Network:
         self._builder = _native._NetworkBuilder(connectivity)
         _apply_macro_config(self._builder)
         self._rois = [ROI(self, roi.index, roi.label) for roi in self._builder.rois()]
-        self._recorded_rois: list[int] = []
-        self._recorded_outputs: list[str] = []
 
     @property
     def labels(self) -> list[str]:
@@ -182,26 +182,24 @@ class Network:
     def min_positive_delay(self) -> float:
         return float(self._builder.min_positive_delay())
 
-    def _record(self, roi_index: int, output: str) -> None:
-        if roi_index not in self._recorded_rois:
-            self._recorded_rois.append(roi_index)
-        if output not in self._recorded_outputs:
-            self._recorded_outputs.append(output)
-        self._builder.record_rois(list(self._recorded_rois))
-        self._builder.record_outputs(list(self._recorded_outputs))
-
     def use_neural_field(self, field: NeuralField, *, node_map) -> "Network":
-        local = field.local_data
-        if local is None:
-            local = _native.LocalConnectivity.from_arrays(int(node_map.node_count), [0] * (int(node_map.node_count) + 1), [], [])
-        self._builder.use_neural_field(
-            field.name,
-            str(field.rule),
-            node_map,
-            local,
-            _values(field.initial_state),
-            _values(field.params),
-        )
+        if field.local_data is None:
+            self._builder.use_neural_field(
+                field.name,
+                str(field.rule),
+                node_map,
+                _values(field.initial_state),
+                _values(field.params),
+            )
+        else:
+            self._builder.use_neural_field(
+                field.name,
+                str(field.rule),
+                node_map,
+                field.local_data,
+                _values(field.initial_state),
+                _values(field.params),
+            )
         return self
 
     def _build_native(self):

@@ -68,6 +68,20 @@ class CodegenCoreneuronCppVisitor: public CodegenCppVisitor {
     /*                                    Member variables                                  */
     /****************************************************************************************/
 
+    /**
+     * \c true if currently printing the MIND macro2micro NET_RECEIVE adapter.
+     */
+    bool printing_mind_macro2micro_net_receive = false;
+
+    /**
+     * Sanitized mechanism name used for MIND helper symbols while printing adapters.
+     */
+    std::string mind_macro2micro_symbol_suffix;
+
+    bool has_mind_rule = false;
+    std::string mind_rule_role;
+    std::vector<std::string> mind_rule_target_inputs;
+    std::vector<std::string> mind_rule_source_exposures;
 
     /****************************************************************************************/
     /*                              Generic information getters                             */
@@ -94,6 +108,8 @@ class CodegenCoreneuronCppVisitor: public CodegenCppVisitor {
     }
 
     bool needs_v_unused() const override;
+
+    void setup(const ast::Program& node) override;
 
     /****************************************************************************************/
     /*                     Common helper routines accross codegen functions                 */
@@ -696,6 +712,12 @@ class CodegenCoreneuronCppVisitor: public CodegenCppVisitor {
      */
     void print_net_receive_common_code(const ast::Block& node, bool need_mech_inst = true);
 
+    /**
+     * Return the active nrn_threads symbol. MIND macro2micro adapters use an isolated scratch
+     * NrnThread instead of CoreNEURON's global nrn_threads array.
+     */
+    std::string active_nrn_threads_symbol() const;
+
 
     /**
      * Print call to \c net\_send
@@ -801,6 +823,16 @@ class CodegenCoreneuronCppVisitor: public CodegenCppVisitor {
      * Print \c net\_receive function definition
      */
     void print_net_receive();
+
+    /**
+     * Print MIND_Sim code that must live inside the coreneuron namespace.
+     */
+    void print_mind_rule_codegen_in_namespace();
+
+    /**
+     * Print MIND_Sim exported descriptor/apply glue after the coreneuron namespace is closed.
+     */
+    void print_mind_rule_codegen_exports();
 
 
     /**

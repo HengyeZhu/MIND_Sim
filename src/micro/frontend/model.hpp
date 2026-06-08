@@ -149,9 +149,6 @@ class MicroFrontendModel {
     void set_celsius(double celsius);
     [[nodiscard]] double celsius() const noexcept { return section_properties_.celsius; }
 
-    void set_spike_output_enabled(bool enabled) noexcept { spike_output_enabled_ = enabled; }
-    [[nodiscard]] bool spike_output_enabled() const noexcept { return spike_output_enabled_; }
-
     void set_device(const std::string& device);
     void load_mech(std::string path);
     [[nodiscard]] const std::vector<std::string>& loaded_mech_paths() const noexcept {
@@ -215,10 +212,10 @@ class MicroFrontendModel {
     [[nodiscard]] double mechanism_scalar(int insert_id, const std::string& key) const;
     void set_mechanism_scalar(int insert_id, const std::string& key, double value);
 
-    [[nodiscard]] int register_gid_source(int gid,
-                                          const VariableRef& source,
-                                          std::optional<double> threshold);
-    [[nodiscard]] int gid_connect(int gid, int post_insert_id, double weight, double delay);
+    [[nodiscard]] int register_spike_source(int sid,
+                                            const VariableRef& source,
+                                            std::optional<double> threshold);
+    [[nodiscard]] int sid_connect(int sid, int post_insert_id, double weight, double delay);
     [[nodiscard]] int event_target_connect(int source_insert_id,
                                            int post_insert_id,
                                            double weight,
@@ -298,7 +295,6 @@ class MicroFrontendModel {
     double dt_{0.025};
     int requested_thread_count_{1};
     double t_{0.0};
-    bool spike_output_enabled_{false};
     bool has_morphology_{false};
     bool microcircuit_built_{false};
     bool core_initialized_{false};

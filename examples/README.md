@@ -34,25 +34,18 @@ The macro model is based on the TVB `Epileptor2D` neural mass model.
 
 ## Compile Mechanisms
 
-The example uses two mechanism directories:
+The example uses one mechanism directory:
 
 ```text
 ca3_epilepsy_cosim/mind_sim/mod/
-ca3_epilepsy_cosim/mind_sim/bridge/
 ```
 
 Run the following commands from `examples/`.
 
-`mod/` contains the standard NEURON/CoreNEURON mechanisms used by the CA3 microcircuit. Compile it with `nrnivmodl`:
+`mod/` contains the standard NEURON/CoreNEURON mechanisms used by the CA3 microcircuit and the MIND_Sim extended MOD modules for macro dynamics, macro coupling, micro2macro transforms, and macro2micro transforms. Compile it with the MIND_Sim compiler:
 
 ```bash
-nrnivmodl ca3_epilepsy_cosim/mind_sim/mod
-```
-
-`bridge/` contains MIND_Sim extended MOD modules for macro dynamics, macro coupling, micro2macro transforms, and macro2micro transforms. Compile it with the MIND_Sim compiler:
-
-```bash
-mind_nrnivmodl ca3_epilepsy_cosim/mind_sim/bridge
+mind_nrnivmodl ca3_epilepsy_cosim/mind_sim/mod
 ```
 
 ## MIND_Sim Workflow
@@ -63,7 +56,7 @@ The complete MIND_Sim modeling flow for this example is in:
 ca3_epilepsy_cosim/mind_sim/run_vep_ca3_cosim.py
 ```
 
-A detailed blog is coming soon.
+A detailed [blog](https://hengyezhu.github.io/mind-simulator-demo.html) is here.
 
 ## Validation
 

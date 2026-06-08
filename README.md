@@ -15,7 +15,6 @@
   <a href="#overview">Overview</a> •
   <a href="#architecture">Architecture</a> •
   <a href="#performance">Performance</a> •
-  <a href="#examples">Examples</a> •
   <a href="#acknowledgements">Acknowledgements</a>
 </p>
 
@@ -41,7 +40,7 @@ This is my first public release of a simulator. I have made efforts to comply wi
 
 ### Execution model
 
-MIND_Sim is designed for multiscale modeling, but it also supports micro-only and macro-only simulations. The micro-scale backend is built on CoreNEURON, so detailed neuron simulations can use CPU multi-threading and CoreNEURON GPU execution. The macro-scale backend is designed around an overlap pipeline: while the micro simulation advances one exchange window, the CPU-side macro and bridge work can be prepared or executed around that window. The macro layer is currently single-threaded; for the neural mass models used so far, this is sufficient because macro computation is small enough to be hidden behind micro execution.
+MIND_Sim is designed for multiscale modeling, but it also supports micro-only and macro-only simulations. The micro-scale backend is built on CoreNEURON, so detailed neuron simulations can use CPU multi-threading and CoreNEURON GPU execution. The macro-scale backend is designed around an overlap pipeline: while the micro simulation advances one exchange window, the CPU-side macro and transform work can be prepared or executed around that window. The macro layer is currently single-threaded; for the neural mass models used so far, this is sufficient because macro computation is small enough to be hidden behind micro execution.
 
 ### ROI-centered modeling
 
@@ -61,13 +60,18 @@ A single microcircuit can own or contribute to any number of ROIs. This matters 
 
 ## Performance
 
-By rewriting the NEURON simulator frontend in C++, MIND_Sim improves micro-network construction speed by more than 10x. This has been observed across multiple models while still keeping CoreNEURON as the execution backend.
+By rewriting the NEURON simulator frontend in C++, MIND_Sim improves micro-network construction speed by more than 10x. This has been observed across multiple models.
 
-For full cosimulation, runtime is usually dominated by the micro-scale simulation itself, so the total simulation speedup is more limited than the construction speedup. In small-network cosimulation cases, MIND_Sim has shown about 7x faster total runtime. The main sources of this gain are C++ implementations of the transform path and the overlap pipeline design. A broader benchmark is still needed, because there is not yet a standard benchmark suite that cleanly covers this kind of hybrid micro-macro workload.
+For full cosimulation, runtime is usually dominated by the micro-scale simulation itself. Therefore, although MIND_Sim provides an overlap pipeline, its benefit is limited in this example because macro simulation and transformation together take only a small fraction of the total runtime. The [CA3 epilepsy co-simulation example](https://github.com/HengyeZhu/MIND_Sim/tree/main/examples/ca3_epilepsy_cosim) gives the following timings (1s simulation time).
 
-## Examples
+| Workflow | Threads | Pre-run | Run | Speedup |
+| --- | ---: | ---: | ---: | ---: |
+| MIND_Sim async | 1 | 0.281s | 14.286s | 21.40x |
+| MIND_Sim async | 4 | 0.288s | 5.581s | 21.58x |
+| TVB-NetPyNE | 1 | 11.060s | 305.707s | 1.00x |
+| TVB-NetPyNE | 4 | 10.646s | 120.413s | 1.00x |
 
-Coming soon.
+This is an example-level comparison, not a standardized benchmark. A broader benchmark and full validation are coming soon.
 
 ## Acknowledgements
 
