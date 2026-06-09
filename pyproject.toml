@@ -1,0 +1,36 @@
+[build-system]
+requires = [
+  "cmake>=3.20",
+  "jinja2",
+  "nanobind>=2.0",
+  "ninja",
+  "pyyaml",
+  "scikit-build-core>=0.10",
+  "sympy",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "mind_sim"
+version = "0.1.0"
+description = "Multiscale Integrative Neuronal Dynamics simulator"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Hengye Zhu", email = "gluciferd@gmail.com" },
+]
+dependencies = [
+  "numpy",
+]
+
+[project.urls]
+Homepage = "https://github.com/HengyeZhu/MIND_Sim"
+Repository = "https://github.com/HengyeZhu/MIND_Sim"
+
+[project.scripts]
+mind-sim = "mind_sim.cli:main"
+mind_nrnivmodl = "mind_sim.cli:mind_nrnivmodl_main"
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+wheel.packages = []

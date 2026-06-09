@@ -6,9 +6,48 @@
 #include <string>
 #include <vector>
 
+#ifdef MIND_SIM_ENABLE_HDF5
 #include <hdf5.h>
+#endif
 
 namespace mind_sim::io {
+
+#ifndef MIND_SIM_ENABLE_HDF5
+
+namespace {
+
+[[noreturn]] void throw_hdf5_disabled() {
+    throw std::runtime_error(
+        "save_h5 requires HDF5 support; rebuild MIND_Sim with -DMIND_SIM_ENABLE_HDF5=ON");
+}
+
+}  // namespace
+
+void save_macro_result_h5(const mind_sim::macro::sim::MacroSimulationResult&,
+                          const std::string&,
+                          const std::vector<std::string>&,
+                          const std::vector<std::string>&,
+                          const std::vector<double>&,
+                          const std::vector<double>&) {
+    throw_hdf5_disabled();
+}
+
+void save_cosim_result_h5(const mind_sim::cosim::SimulationResult&,
+                          const std::string&,
+                          const std::vector<std::string>&,
+                          const std::vector<std::string>&,
+                          const std::vector<double>&,
+                          const std::vector<double>&) {
+    throw_hdf5_disabled();
+}
+
+void save_vector_h5(const std::vector<double>&,
+                    const std::string&,
+                    const std::string&) {
+    throw_hdf5_disabled();
+}
+
+#else
 
 namespace {
 
@@ -244,5 +283,7 @@ void save_vector_h5(const std::vector<double>& values,
     H5File file(path);
     write_double_dataset(file.id, dataset_name, {values.size()}, values.data());
 }
+
+#endif
 
 }  // namespace mind_sim::io

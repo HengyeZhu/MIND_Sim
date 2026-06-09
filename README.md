@@ -22,7 +22,21 @@
 
 ## Installation
 
-MIND_Sim is currently distributed from source. pip install support is coming soon.
+After cloning the repository, install MIND_Sim from the source tree with pip:
+
+```bash
+cd MIND_Sim
+pip install .
+```
+
+This installs the CPU backend by default (GPU backend coming soon).
+
+Before running the pip command, make sure the current environment already provides the native build tools:
+
+- C++20 compiler
+- Bison and Flex
+- OpenMP runtime/development files
+
 
 ## Overview
 
@@ -62,16 +76,16 @@ A single microcircuit can own or contribute to any number of ROIs. This matters 
 
 By rewriting the NEURON simulator frontend in C++, MIND_Sim improves micro-network construction speed by more than 10x. This has been observed across multiple models.
 
-For full cosimulation, runtime is usually dominated by the micro-scale simulation itself. Therefore, although MIND_Sim provides an overlap pipeline, its benefit is limited in this example because macro simulation and transformation together take only a small fraction of the total runtime. The [CA3 epilepsy co-simulation example](https://github.com/HengyeZhu/MIND_Sim/tree/main/examples/ca3_epilepsy_cosim) gives the following timings (1s simulation time).
+For full cosimulation, runtime is usually dominated by the micro-scale simulation itself. Therefore, although MIND_Sim provides an overlap pipeline, its benefit is limited in this example because macro simulation and transformation together take only a small fraction of the total runtime. The [CA3 epilepsy co-simulation example](https://github.com/HengyeZhu/MIND_Sim/tree/main/examples/ca3_epilepsy_cosim) compares MIND_Sim with a TVB+NEURON. The following timings are for 1s simulation time.
 
 | Workflow | Threads | Pre-run | Run | Speedup |
 | --- | ---: | ---: | ---: | ---: |
-| MIND_Sim async | 1 | 0.281s | 14.286s | 21.40x |
-| MIND_Sim async | 4 | 0.288s | 5.581s | 21.58x |
-| TVB-NetPyNE | 1 | 11.060s | 305.707s | 1.00x |
-| TVB-NetPyNE | 4 | 10.646s | 120.413s | 1.00x |
+| MIND_Sim async | 1 | 0.274s | 14.940s | 3.68x |
+| MIND_Sim async | 4 | 0.289s | 5.844s | 4.80x |
+| TVB+NEURON | 1 | 1.443s | 54.967s | 1.00x |
+| TVB+NEURON | 4 | 1.423s | 28.041s | 1.00x |
 
-This is an example-level comparison, not a standardized benchmark. A broader benchmark and full validation are coming soon.
+For the same 1s runs, the maximum absolute differences between MIND_Sim and the TVB+NEURON reference are `1.09e-14` for macro `x`, `3.56e-14` for macro `z`, and less than `9e-11 mV` for representative PYR, BAS, OLM, and PYR Adend3 voltage traces. Spike sample indices are exactly equal for the representative PYR, BAS, and OLM cells. This is an example-level comparison, not a standardized benchmark.
 
 ## Acknowledgements
 

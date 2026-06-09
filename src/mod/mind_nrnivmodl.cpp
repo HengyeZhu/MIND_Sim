@@ -12,6 +12,10 @@
 #include <string_view>
 #include <vector>
 
+#if defined(__linux__)
+#include <unistd.h>
+#endif
+
 namespace fs = std::filesystem;
 
 #ifndef MIND_SIM_NMODL_PATH
@@ -588,6 +592,78 @@ void validate_micro_output_net_receive_ast(const JsonValue& ast) {
     return "-I" + shell_quote(path);
 }
 
+[[nodiscard]] fs::path current_executable_path() {
+#if defined(__linux__)
+    std::vector<char> buffer(4096);
+    while (true) {
+        const ssize_t size = readlink("/proc/self/exe", buffer.data(), buffer.size());
+        if (size < 0) {
+            return {};
+        }
+        if (static_cast<std::size_t>(size) < buffer.size()) {
+            return fs::path(std::string(buffer.data(), static_cast<std::size_t>(size)));
+        }
+        buffer.resize(buffer.size() * 2);
+    }
+#else
+    return {};
+#endif
+}
+
+[[nodiscard]] fs::path current_executable_dir() {
+    const fs::path exe = current_executable_path();
+    if (!exe.empty()) {
+        return exe.parent_path();
+    }
+    return fs::current_path();
+}
+
+[[nodiscard]] fs::path packaged_root_dir() {
+    const fs::path exe_dir = current_executable_dir();
+    if (exe_dir.filename() == "bin") {
+        return exe_dir.parent_path();
+    }
+    return exe_dir;
+}
+
+[[nodiscard]] fs::path existing_or_empty(const fs::path& path) {
+    std::error_code ec;
+    if (fs::exists(path, ec)) {
+        return path;
+    }
+    return {};
+}
+
+[[nodiscard]] fs::path resolved_nmodl_path() {
+    if (auto path = existing_or_empty(fs::path{MIND_SIM_NMODL_PATH}); !path.empty()) {
+        return path;
+    }
+    if (auto path = existing_or_empty(current_executable_dir() / "nmodl"); !path.empty()) {
+        return path;
+    }
+    throw std::runtime_error("could not locate MIND-aware nmodl executable");
+}
+
+[[nodiscard]] fs::path resolved_source_include_dir() {
+    if (auto path = existing_or_empty(fs::path{MIND_SIM_SOURCE_DIR} / "src"); !path.empty()) {
+        return path;
+    }
+    if (auto path = existing_or_empty(packaged_root_dir() / "include" / "src"); !path.empty()) {
+        return path;
+    }
+    throw std::runtime_error("could not locate MIND_Sim source include directory");
+}
+
+[[nodiscard]] fs::path resolved_mechanism_include_dir() {
+    if (auto path = existing_or_empty(fs::path{MIND_SIM_MECHANISM_INCLUDE_DIR}); !path.empty()) {
+        return path;
+    }
+    if (auto path = existing_or_empty(packaged_root_dir() / "include" / "src" / "micro" / "sim"); !path.empty()) {
+        return path;
+    }
+    throw std::runtime_error("could not locate MIND_Sim mechanism include directory");
+}
+
 void compile_object_file(const fs::path& source_path, const fs::path& object_path) {
     fs::create_directories(object_path.parent_path());
     run({
@@ -596,8 +672,8 @@ void compile_object_file(const fs::path& source_path, const fs::path& object_pat
         "-O2",
         "-fPIC",
         MIND_SIM_MOD_CXX_FLAGS,
-        include_arg(fs::path{MIND_SIM_SOURCE_DIR} / "src"),
-        include_arg(MIND_SIM_MECHANISM_INCLUDE_DIR),
+        include_arg(resolved_source_include_dir()),
+        include_arg(resolved_mechanism_include_dir()),
         "-DCORENEURON_BUILD",
         "-DCORENRN_BUILD=1",
         "-DVECTORIZE=1",
@@ -704,7 +780,7 @@ struct NmodlGenerated {
     fs::create_directories(generated_dir);
     fs::create_directories(scratch_dir);
     run_in_dir(mod.parent_path(), {
-        shell_quote(MIND_SIM_NMODL_PATH),
+        shell_quote(resolved_nmodl_path()),
         shell_quote(mod.filename()),
         "-o",
         shell_quote(generated_dir),

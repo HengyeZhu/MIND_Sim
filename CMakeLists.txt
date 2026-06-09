@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(mind_sim LANGUAGES CXX)
 
 option(MIND_SIM_ENABLE_GPU "Enable CoreNEURON OpenACC GPU backend for the micro runtime" OFF)
+option(MIND_SIM_ENABLE_HDF5 "Enable HDF5-backed save_h5 helpers" OFF)
 set(MIND_SIM_GPU_ARCHS "lineinfo" CACHE STRING "NVHPC -gpu option list for MIND_Sim GPU builds")
 
 set(CMAKE_CXX_STANDARD 20)
@@ -25,14 +26,13 @@ execute_process(
   OUTPUT_VARIABLE Python_PREFIX
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
-find_path(MIND_SIM_HDF5_INCLUDE_DIR hdf5.h
-  HINTS "${Python_PREFIX}/include"
-  REQUIRED
-)
-find_library(MIND_SIM_HDF5_LIBRARY hdf5
-  HINTS "${Python_PREFIX}/lib"
-  REQUIRED
-)
+set(MIND_SIM_HDF5_INCLUDE_DIRS)
+set(MIND_SIM_HDF5_LIBRARIES)
+if(MIND_SIM_ENABLE_HDF5)
+  find_package(HDF5 REQUIRED COMPONENTS C)
+  set(MIND_SIM_HDF5_INCLUDE_DIRS ${HDF5_INCLUDE_DIRS})
+  set(MIND_SIM_HDF5_LIBRARIES ${HDF5_C_LIBRARIES})
+endif()
 
 execute_process(
   COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
@@ -475,11 +475,17 @@ function(mind_sim_apply_native_includes target)
   target_include_directories("${target}" PRIVATE
     "${PROJECT_SOURCE_DIR}/src"
     "${PROJECT_SOURCE_DIR}/src/micro/frontend"
-    "${MIND_SIM_HDF5_INCLUDE_DIR}"
+    ${MIND_SIM_HDF5_INCLUDE_DIRS}
   )
   target_include_directories("${target}" SYSTEM PRIVATE
     "${PROJECT_SOURCE_DIR}/src/micro/sim"
   )
+endfunction()
+
+function(mind_sim_apply_optional_io_definitions target)
+  if(MIND_SIM_ENABLE_HDF5)
+    target_compile_definitions("${target}" PRIVATE MIND_SIM_ENABLE_HDF5=1)
+  endif()
 endfunction()
 
 function(mind_sim_apply_coreneuron_definitions target)
@@ -551,6 +557,7 @@ add_dependencies(mind_sim_native_core mind_sim_default_mechanisms)
 mind_sim_apply_native_includes(mind_sim_native_core)
 mind_sim_apply_coreneuron_definitions(mind_sim_native_core)
 mind_sim_apply_gpu_definitions(mind_sim_native_core)
+mind_sim_apply_optional_io_definitions(mind_sim_native_core)
 mind_sim_apply_runtime_compile_options(mind_sim_native_core)
 
 set(MIND_SIM_NANOBIND_OPTIONS
@@ -599,12 +606,28 @@ set_target_properties(_native PROPERTIES
 target_link_libraries(_native PRIVATE
   ${CMAKE_DL_LIBS}
   OpenMP::OpenMP_CXX
-  ${MIND_SIM_HDF5_LIBRARY}
+  ${MIND_SIM_HDF5_LIBRARIES}
   ${MIND_SIM_GPU_RUNTIME_LIBRARY}
 )
 if(MIND_SIM_GPU_LINK_OPTIONS)
   target_link_options(_native PRIVATE ${MIND_SIM_GPU_LINK_OPTIONS})
 endif()
+
+install(
+  DIRECTORY "${PROJECT_SOURCE_DIR}/src/python_api/mind_sim/"
+  DESTINATION mind_sim
+  FILES_MATCHING
+    PATTERN "*.py"
+)
+install(TARGETS _native LIBRARY DESTINATION mind_sim)
+install(
+  DIRECTORY "${PROJECT_SOURCE_DIR}/src/"
+  DESTINATION mind_sim/include/src
+  FILES_MATCHING
+    PATTERN "*.h"
+    PATTERN "*.hpp"
+    PATTERN "*.inc"
+)
 
 add_executable(mind_nrnivmodl src/mod/mind_nrnivmodl.cpp)
 target_compile_features(mind_nrnivmodl PRIVATE cxx_std_20)
@@ -617,7 +640,8 @@ target_compile_definitions(mind_nrnivmodl PRIVATE
   MIND_SIM_MOD_CXX_FLAGS="${MIND_SIM_MOD_CXX_FLAGS}"
   MIND_SIM_MOD_LINK_FLAGS="${MIND_SIM_MOD_LINK_FLAGS}"
 )
-install(TARGETS mind_nrnivmodl RUNTIME DESTINATION bin)
+install(TARGETS nmodl RUNTIME DESTINATION mind_sim/bin)
+install(TARGETS mind_nrnivmodl RUNTIME DESTINATION mind_sim/bin)
 
 enable_testing()
 
