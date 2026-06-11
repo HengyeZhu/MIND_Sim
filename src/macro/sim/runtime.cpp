@@ -32,7 +32,7 @@ mind_sim::macro::sim::MacroSimulationResult MacroRuntime::run(double t_stop, dou
     const int roi_count = network_.roi_count();
     const int input_count = network_.input_count();
     const int output_count = network_.output_count();
-    const int step_count = static_cast<int>(std::ceil(t_stop / dt_macro - 1e-12));
+    const int step_count = static_cast<int>(std::ceil(t_stop / dt_macro));
     auto region_owners = network_.region_owners();
     auto field_owners = network_.neural_field_owners();
     const auto roi_owners =

@@ -19,6 +19,20 @@ BAS_COUNT = 200
 OLM_COUNT = 200
 SPIKE_THRESHOLD_MV = 0.0
 
+CORENEURON_FIXED_STEP_TOL = 1.0e-9
+
+
+def fixed_step_count(value: float, dt: float, what: str) -> int:
+    exact_steps = value / dt
+    steps = int(round(exact_steps))
+    if not math.isclose(exact_steps, steps, rel_tol=0.0, abs_tol=CORENEURON_FIXED_STEP_TOL):
+        raise SystemExit(f"{what} must be an integer multiple of {dt:g} ms")
+    return steps
+
+
+def micro_tick(time_ms: float) -> int:
+    return int(round(time_ms / 0.025))
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Pure TVB + NEURON CA3 co-simulation reference.")
@@ -52,14 +66,8 @@ def main() -> None:
         raise SystemExit("--duration-ms must be positive")
     if args.micro_threads < 1:
         raise SystemExit("--micro-threads must be positive")
-    duration_steps_float = args.duration_ms / 0.1
-    duration_steps = int(round(duration_steps_float))
-    if not math.isclose(duration_steps_float, duration_steps, rel_tol=0.0, abs_tol=1.0e-9):
-        raise SystemExit("--duration-ms must be an integer multiple of 0.1 ms")
-    exchange_steps_float = 0.5 / 0.1
-    exchange_steps = int(round(exchange_steps_float))
-    if not math.isclose(exchange_steps_float, exchange_steps, rel_tol=0.0, abs_tol=1.0e-9):
-        raise SystemExit("exchange window must be an integer multiple of dt_macro")
+    duration_steps = fixed_step_count(args.duration_ms, 0.1, "--duration-ms")
+    exchange_steps = fixed_step_count(0.5, 0.1, "exchange window")
 
     for path in reversed(
         [
@@ -153,7 +161,8 @@ def main() -> None:
     min_positive_delay = float(np.min(positive_delays)) if positive_delays.size else 0.0
     if min_positive_delay <= 0.0:
         raise SystemExit("connectivity delays must contain at least one positive delay")
-    if 0.5 > min_positive_delay + 1.0e-9:
+    min_positive_delay_steps = int(round(min_positive_delay / 0.1))
+    if fixed_step_count(0.5, 0.1, "exchange window") > min_positive_delay_steps:
         raise SystemExit("exchange window must not exceed the minimum positive connectivity delay")
 
     tvb_connectivity = Connectivity(
@@ -602,7 +611,7 @@ def main() -> None:
     pc.set_maxstep(10.0)
     h.finitialize(-65.0)
     pc.psolve(0.0)
-    if abs(float(h.t)) > 1.0e-7:
+    if micro_tick(float(h.t)) != micro_tick(0.0):
         raise RuntimeError(f"NEURON time drift after initialization: h.t={float(h.t):.17g}")
     h.t = 0.0
 
@@ -621,7 +630,7 @@ def main() -> None:
         for step in range(exchange_start, exchange_stop):
             interval_start = step * 0.1
             interval_stop = min(args.duration_ms, interval_start + 0.1)
-            if interval_start >= args.duration_ms - 1.0e-12:
+            if interval_start >= args.duration_ms:
                 continue
             macro_coupling_input = macro_coupling(macro_step_offset + step + 1, macro_history)
             ca3_input = float(macro_coupling_input[0, ca3_index, 0])
@@ -643,7 +652,7 @@ def main() -> None:
                 for _ in range(spike_count):
                     event_time = interval_start + window_ms * stream.uniform(0.0, 1.0)
                     delivery_time = event_time + 0.2
-                    if delivery_time <= float(h.t) + 1.0e-7:
+                    if delivery_time <= float(h.t):
                         raise RuntimeError(
                             "macro2micro generated an already elapsed delivery: "
                             f"event={event_time:.17g}, delivery={delivery_time:.17g}, h.t={float(h.t):.17g}"
@@ -653,7 +662,7 @@ def main() -> None:
 
         exchange_stop_time = exchange_stop * 0.1
         pc.psolve(exchange_stop_time)
-        if abs(float(h.t) - exchange_stop_time) > 1.0e-7:
+        if micro_tick(float(h.t)) != micro_tick(exchange_stop_time):
             raise RuntimeError(
                 f"NEURON time drift at exchange {exchange_start}:{exchange_stop}: "
                 f"h.t={float(h.t):.17g}, nominal={exchange_stop_time:.17g}"
@@ -663,6 +672,7 @@ def main() -> None:
         spike_times = np.asarray(spike_times_vector.to_python())
         spike_gids = np.asarray(spike_gids_vector.to_python(), dtype=int)
         if spike_times.size:
+            spike_times = np.rint(spike_times / 0.025) * 0.025
             order = np.lexsort((spike_gids, spike_times))
             spike_times = spike_times[order]
             spike_gids = spike_gids[order]
@@ -674,10 +684,7 @@ def main() -> None:
             current_time = start_time
             while spike_cursor < spike_times.size:
                 spike_time = float(spike_times[spike_cursor])
-                if step + 1 == exchange_stop:
-                    if spike_time >= exchange_stop_time:
-                        break
-                elif spike_time > stop_time + 1.0e-12:
+                if spike_time >= stop_time:
                     break
                 event_time = min(max(spike_time, current_time), stop_time)
                 decay_ms = event_time - current_time
@@ -763,7 +770,7 @@ def main() -> None:
         "macro2micro_random_stream": "NEURON h.Random Random123(seed_low, neuron_index, seed_high^roi) + Knuth Poisson + uniform-in-window event placement",
         "scheduled_macro2micro_events": int(scheduled_macro2micro_events),
         "recorded_spike_count": int(spike_times_vector.size()),
-        "micro2macro_window": "[exchange_start, exchange_stop) per exchange window; within an exchange, spikes at a macro sample boundary are consumed by the sample ending at that boundary",
+        "micro2macro_window": "spike times are canonicalized to 0.025 ms ticks and consumed by half-open macro bins [step, step+1)",
         "mechanism_dir": str(mod_dir),
         "voltage_recording": "representative PYR/BAS/OLM soma voltages in voltage_traces; fixed output key voltage remains PYR[0].soma; PYR[0].Adend3(0.5) voltage is in adend3_voltage",
         "voltage_trace_labels": voltage_labels,

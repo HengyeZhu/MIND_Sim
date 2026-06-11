@@ -36,6 +36,8 @@ namespace nb = nanobind;
 
 namespace mind_sim::python_api::bindings {
 
+inline constexpr double kCoreNeuronFixedStepTolerance = 1.0e-9;
+
 using mind_sim::micro::frontend::MicroFrontendModel;
 using mind_sim::micro::frontend::MechanismPlacementKind;
 using mind_sim::micro::frontend::MorphologyTemplateSpec;
@@ -398,18 +400,19 @@ struct Sim {
         }
 
         const double start = model.time();
-        if (tstop < start - 1e-12) {
+        if (tstop < start) {
             throw std::runtime_error("run tstop must not be earlier than current simulation time");
         }
         const double runtime = tstop - start;
-        if (runtime <= 1e-12) {
+        if (runtime <= 0.0) {
             return 0;
         }
         const double dt = model.dt();
         const double exact_steps = runtime / dt;
         const int sample_count = static_cast<int>(std::llround(exact_steps));
         if (sample_count < 0 ||
-            std::abs(exact_steps - static_cast<double>(sample_count)) > 1e-9) {
+            std::abs(exact_steps - static_cast<double>(sample_count)) >
+                kCoreNeuronFixedStepTolerance) {
             throw std::runtime_error(
                 "recorded run requires tstop-current_time to be an integer multiple of dt");
         }

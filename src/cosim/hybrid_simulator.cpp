@@ -22,13 +22,19 @@ namespace mind_sim::cosim {
 
 namespace {
 
+constexpr double kCoreNeuronFixedStepTolerance = 1.0e-9;
+
 bool is_integer_multiple(double value, double unit) {
     const double ratio = value / unit;
-    return std::abs(ratio - std::round(ratio)) <= 1e-9;
+    return std::abs(ratio - std::round(ratio)) <= kCoreNeuronFixedStepTolerance;
 }
 
 int integer_step_count(double value, double unit) {
     return static_cast<int>(std::llround(value / unit));
+}
+
+double canonical_micro_time(double time, double dt_micro) {
+    return static_cast<double>(std::llround(time / dt_micro)) * dt_micro;
 }
 
 bool env_flag_enabled(const char* name) {
@@ -141,15 +147,16 @@ double infer_micro_dt(const mind_sim::macro::frontend::Network& network) {
             have_dt = true;
             continue;
         }
-        if (std::abs(dt - circuit_dt) > 1e-12) {
+        if (dt != circuit_dt) {
             throw std::runtime_error("all attached micro circuits must use the same dt");
         }
     }
     return dt;
 }
 
-double minimum_active_connectivity_delay(
-    const mind_sim::macro::frontend::Network& network) {
+int minimum_active_connectivity_delay_steps(
+    const mind_sim::macro::frontend::Network& network,
+    double dt_macro) {
     const auto& connectivity = network.connectivity();
     const auto& weights = connectivity.weights();
     const auto& delays = connectivity.delays();
@@ -157,7 +164,7 @@ double minimum_active_connectivity_delay(
         throw std::runtime_error("connectivity weights and delays have different sizes");
     }
 
-    double min_delay = std::numeric_limits<double>::infinity();
+    int min_delay_steps = std::numeric_limits<int>::max();
     for (std::size_t index = 0; index < weights.size(); ++index) {
         if (weights[index] == 0.0) {
             continue;
@@ -165,9 +172,9 @@ double minimum_active_connectivity_delay(
         if (delays[index] <= 0.0) {
             throw std::runtime_error("active connectivity edges must have positive delays");
         }
-        min_delay = std::min(min_delay, delays[index]);
+        min_delay_steps = std::min(min_delay_steps, integer_step_count(delays[index], dt_macro));
     }
-    return std::isfinite(min_delay) ? min_delay : 0.0;
+    return min_delay_steps == std::numeric_limits<int>::max() ? 0 : min_delay_steps;
 }
 
 struct TraceAheadSafety {
@@ -525,10 +532,10 @@ bool macro2micro_uses_source_exposure(
 void bind_spike_views(
     const mind_sim::micro::sim::MicroSpikeTableView& spikes,
     const mind_sim::macro::frontend::MicroCircuitOwner& circuit,
-    int circuit_index,
     mind_sim::micro::sim::MicroSpikeTable& pending_spikes,
     std::vector<std::vector<mind_sim::micro::sim::MicroSpikeTable>>& transform_spikes,
     std::vector<std::vector<mind_sim::micro::sim::MicroSpikeTableView>>& transform_views,
+    double dt_micro,
     double window_start,
     double window_stop) {
     for (auto& binding_tables: transform_spikes) {
@@ -547,14 +554,15 @@ void bind_spike_views(
     mind_sim::micro::sim::MicroSpikeTable window_spikes;
     mind_sim::micro::sim::MicroSpikeTable next_pending_spikes;
     const auto partition_spike = [&](double spike_time, int spike_gid) {
-        if (spike_time < window_start) {
+        const double event_time = canonical_micro_time(spike_time, dt_micro);
+        if (event_time < window_start) {
             return;
         }
-        if (spike_time >= window_stop) {
-            next_pending_spikes.append(spike_time, spike_gid);
+        if (event_time >= window_stop) {
+            next_pending_spikes.append(event_time, spike_gid);
             return;
         }
-        window_spikes.append(spike_time, spike_gid);
+        window_spikes.append(event_time, spike_gid);
     };
     for (std::size_t spike = 0; spike < pending_spikes.size(); ++spike) {
         partition_spike(pending_spikes.time[spike], pending_spikes.gid[spike]);
@@ -634,11 +642,11 @@ void Simulator::validate_timing() const {
     if (!is_integer_multiple(exchange_window_, dt_macro_)) {
         throw std::runtime_error("exchange_window must be an integer multiple of dt_macro");
     }
-    const double min_delay = minimum_active_connectivity_delay(network_);
-    if (min_delay <= 0.0) {
+    const int min_delay_steps = minimum_active_connectivity_delay_steps(network_, dt_macro_);
+    if (min_delay_steps <= 0) {
         throw std::runtime_error("exchange_window requires at least one active connectivity delay");
     }
-    if (exchange_window_ - min_delay > 1e-9) {
+    if (integer_step_count(exchange_window_, dt_macro_) > min_delay_steps) {
         throw std::runtime_error(
             "exchange_window must not exceed the minimum active connectivity delay");
     }
@@ -948,10 +956,10 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
                 bind_spike_views(
                     spikes,
                     circuit,
-                    circuit_index,
                     micro_pending_spikes[static_cast<std::size_t>(circuit_index)],
                     micro_transform_spikes[static_cast<std::size_t>(circuit_index)],
                     micro_transform_views[static_cast<std::size_t>(circuit_index)],
+                    dt_micro_,
                     window_start_time,
                     window_stop_time);
                 for (int binding_index = 0; binding_index < static_cast<int>(circuit.bindings.size()); ++binding_index) {
@@ -1024,10 +1032,10 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
                 bind_spike_views(
                     window.spikes,
                     circuit,
-                    circuit_index,
                     micro_pending_spikes[static_cast<std::size_t>(circuit_index)],
                     micro_transform_spikes[static_cast<std::size_t>(circuit_index)],
                     micro_transform_views[static_cast<std::size_t>(circuit_index)],
+                    dt_micro_,
                     window_start_time,
                     window_stop_time);
                 for (int binding_index = 0; binding_index < static_cast<int>(circuit.bindings.size()); ++binding_index) {

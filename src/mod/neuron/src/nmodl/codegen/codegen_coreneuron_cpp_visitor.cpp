@@ -3570,8 +3570,7 @@ std::string mind_render_micro_output(const MindRenderData& data) {
     out << "        set_field(kScratch, kParamFieldOffsets[i], count, 0, ctx->params[i]);\n";
     out << "    }\n";
     out << "    auto* const inst = static_cast<coreneuron::" << data.model << "_Instance*>(kScratch.ml.instance);\n";
-    out << R"(    constexpr double kSampleTimeEps = 1.0e-12;
-    const int sample_count = ctx->sample_count;
+    out << R"(    const int sample_count = ctx->sample_count;
     if (sample_count <= 0) {
         return;
     }
@@ -3594,12 +3593,12 @@ std::string mind_render_micro_output(const MindRenderData& data) {
         if (sample_time > ctx->stop_time) {
             sample_time = ctx->stop_time;
         }
-        while (spike < ctx->spikes->size && ctx->spikes->time[spike] <= sample_time + kSampleTimeEps) {
+        while (spike < ctx->spikes->size && ctx->spikes->time[spike] < sample_time) {
             double event_time = ctx->spikes->time[spike];
             if (event_time > sample_time) {
                 event_time = sample_time;
             }
-            if (event_time < current_time - kSampleTimeEps) {
+            if (event_time < current_time) {
                 ++spike;
                 continue;
             }

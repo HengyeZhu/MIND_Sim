@@ -36,6 +36,8 @@ namespace mind_sim::micro::sim {
 
 namespace {
 
+constexpr double kCoreNeuronFixedStepTolerance = 1.0e-9;
+
 mind_sim::micro::sim::CoreNeuronData* bound_core_data = nullptr;
 
 std::mutex& core_runtime_mutex() {
@@ -142,8 +144,11 @@ int chunk_steps_for_mindelay(double mindelay, double dt) {
     if (!std::isfinite(mindelay) || mindelay <= 0.0) {
         return 1;
     }
-    int steps = std::max(1, static_cast<int>(std::floor(mindelay / dt + 1.0e-9)));
-    while (steps > 1 && static_cast<double>(steps) * dt > mindelay + 1.0e-9) {
+    int steps = std::max(
+        1,
+        static_cast<int>(std::floor(mindelay / dt + kCoreNeuronFixedStepTolerance)));
+    while (steps > 1 &&
+           static_cast<double>(steps) * dt > mindelay + kCoreNeuronFixedStepTolerance) {
         --steps;
     }
     return steps;
@@ -454,7 +459,7 @@ MicroWindowToken MicroRuntime::prepare_window(double start_time, double stop_tim
     const auto spike_begin = coreneuron::spikevec_time.size();
     enqueue_due_events(scheduled_events_, stop_time, *core_data_);
     const double step_ratio = (stop_time - start_time) / core_data_->dt;
-    if (std::abs(step_ratio - std::round(step_ratio)) > 1e-9) {
+    if (std::abs(step_ratio - std::round(step_ratio)) > kCoreNeuronFixedStepTolerance) {
         throw std::runtime_error("MicroRuntime advance window must be an integer multiple of dt");
     }
 
