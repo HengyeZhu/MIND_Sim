@@ -80,10 +80,10 @@ For full cosimulation, runtime is usually dominated by the micro-scale simulatio
 
 | Workflow | Threads | Pre-run | Run | Speedup |
 | --- | ---: | ---: | ---: | ---: |
-| MIND_Sim async | 1 | 2.049s | 15.936s | 3.69x |
-| MIND_Sim async | 4 | 2.050s | 6.205s | 4.82x |
-| TVB+NEURON | 1 | 0.479s | 58.862s | 1.00x |
-| TVB+NEURON | 4 | 0.491s | 29.912s | 1.00x |
+| MIND_Sim async | 1 | 0.215s | 16.401s | 3.57x |
+| MIND_Sim async | 4 | 0.198s | 6.556s | 4.89x |
+| TVB+NEURON | 1 | 0.495s | 58.501s | 1.00x |
+| TVB+NEURON | 4 | 0.513s | 32.040s | 1.00x |
 
 For the same 1s runs, using the TVB+NEURON reference with TVB's official macro APIs, the maximum absolute differences between MIND_Sim and the reference are `1.28464e-06` for macro `x`, `1.4922e-09` for macro `z`, and `2.17177e-10 mV` for representative PYR, BAS, OLM, and PYR Adend3 voltage traces. The macro comparison includes the precision boundary between TVB's single-precision (`float32`) state/history storage and MIND_Sim's double-precision macro state. Spike sample indices are exactly equal for the representative PYR, BAS, and OLM cells. This is an example-level comparison, not a standardized benchmark.
 
