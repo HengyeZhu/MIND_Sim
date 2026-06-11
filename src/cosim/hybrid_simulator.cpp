@@ -425,6 +425,7 @@ void prepare_micro_events_for_exchange(
     int output_count,
     int exchange_start,
     int exchange_stop,
+    int history_step_offset,
     double dt_macro,
     const std::vector<double>& history,
     std::vector<double>& micro_input_trace_soa,
@@ -451,14 +452,15 @@ void prepare_micro_events_for_exchange(
         sample_input_soa.assign(input_stride, 0.0);
     }
     const auto exposure_base =
-        static_cast<std::size_t>(exchange_start % micro_macro_to_macro_evaluation.history_capacity) *
+        static_cast<std::size_t>((history_step_offset + exchange_start) %
+                                 micro_macro_to_macro_evaluation.history_capacity) *
         exposure_stride;
     for (int sample = 0; sample < sample_count; ++sample) {
         apply_macro_to_macro(micro_macro_to_macro_evaluation,
                              roi_count,
                              input_count,
                              output_count,
-                             exchange_start + sample,
+                             history_step_offset + exchange_start + sample + 1,
                              history,
                              sample_input_soa);
         const auto base = static_cast<std::size_t>(sample) * input_stride;
@@ -684,20 +686,21 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
     for (const auto& owner: field_owners) {
         aggregate_field_outputs(owner, current_output_soa);
     }
-    initialize_history(history,
-                       macro_to_macro_runtime.history_capacity,
-                       roi_count,
-                       output_count,
-                       current_output_soa,
-                       network_.initial_history(),
-                       network_.initial_history_time_count());
+    const int history_step_offset =
+        initialize_history(history,
+                           macro_to_macro_runtime.history_capacity,
+                           roi_count,
+                           output_count,
+                           current_output_soa,
+                           network_.initial_history(),
+                           network_.initial_history_time_count());
 
     std::vector<double> current_input_soa;
     apply_macro_to_macro(region_macro_to_macro_evaluation,
                     roi_count,
                     input_count,
                     output_count,
-                    0,
+                    history_step_offset + 1,
                     history,
                     current_input_soa);
 
@@ -1070,7 +1073,7 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
                             roi_count,
                             input_count,
                             output_count,
-                            boundary_step,
+                            history_step_offset + boundary_step + 1,
                             history,
                             next_input_soa);
         });
@@ -1088,6 +1091,7 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
                                            output_count,
                                            window_start,
                                            window_stop,
+                                           history_step_offset,
                                            dt_macro_,
                                            history,
                                            micro_input_trace_soa,
@@ -1111,6 +1115,7 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
                                            output_count,
                                            0,
                                            first_exchange_stop,
+                                           history_step_offset,
                                            dt_macro_,
                                            history,
                                            micro_input_trace_soa,
@@ -1140,6 +1145,7 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
                                                output_count,
                                                exchange_start,
                                                exchange_stop,
+                                               history_step_offset,
                                                dt_macro_,
                                                history,
                                                micro_input_trace_soa,
@@ -1214,7 +1220,8 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
             }
 
             write_history_slot(history,
-                               (step + 1) % macro_to_macro_runtime.history_capacity,
+                               (history_step_offset + step + 1) %
+                                   macro_to_macro_runtime.history_capacity,
                                roi_count,
                                output_count,
                                current_output_soa);
@@ -1224,13 +1231,14 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
                             roi_count,
                             input_count,
                             output_count,
-                            step + 1,
+                            history_step_offset + step + 2,
                             history,
                             current_input_soa);
         }
 
         write_history_slot(history,
-                           exchange_stop % macro_to_macro_runtime.history_capacity,
+                           (history_step_offset + exchange_stop) %
+                               macro_to_macro_runtime.history_capacity,
                            roi_count,
                            output_count,
                            current_output_soa);
@@ -1249,7 +1257,7 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
                             roi_count,
                             input_count,
                             output_count,
-                            exchange_stop,
+                            history_step_offset + exchange_stop + 1,
                             history,
                             current_input_soa);
         }

@@ -38,13 +38,20 @@ def main() -> None:
 
     output = args.output
 
-    for path in (
-        str(Path(__file__).resolve().parents[3] / "src" / "python_api"),
-        str(Path(__file__).resolve().parents[3] / "build"),
-    ):
-        if path in sys.path:
-            sys.path.remove(path)
-        sys.path.insert(0, path)
+    repo_root = Path(__file__).resolve().parents[3]
+    build_path = repo_root / "build"
+    source_python_path = repo_root / "src" / "python_api"
+    if any((build_path / "mind_sim").glob("_native*.so")):
+        sys.meta_path[:] = [
+            finder
+            for finder in sys.meta_path
+            if finder.__class__.__module__ != "_mind_sim_editable"
+        ]
+    for path in (source_python_path, build_path):
+        path_text = str(path)
+        if path_text in sys.path:
+            sys.path.remove(path_text)
+        sys.path.insert(0, path_text)
 
     import mind_sim as ms
 
@@ -58,7 +65,7 @@ def main() -> None:
     # Micro model
     micro = ms.Sim()
     micro.set_device("cpu")
-    micro.set_num_threads(int(args.micro_threads))
+    micro.set_num_threads(args.micro_threads)
     micro.set_dt(0.025)
     micro.load_mech(str(Path(__file__).resolve().parent / "mod"))
 
@@ -172,7 +179,6 @@ def main() -> None:
         soma[0](0.5).insert("IClamp", **{"del": 0.2, "dur": 1.0e9, "amp": -25e-3})
         sid = int(cell.gid)
         micro.network().register_spike_source(sid, soma[0](0.5)._ref_v, SPIKE_THRESHOLD_MV)
-
     macro_rng = np.random.default_rng(1234)
     propagation_labels = {
         "Left-CA1",
@@ -184,8 +190,8 @@ def main() -> None:
         "Left-entorhinal",
         "Right-entorhinal",
     }
-    initial_x = np.zeros(len(rois.labels), dtype=float)
-    initial_z = np.zeros(len(rois.labels), dtype=float)
+    initial_x = np.zeros(len(rois.labels))
+    initial_z = np.zeros(len(rois.labels))
     for roi_index, roi in enumerate(rois.rois()):
         if roi.label == left_ca3_roi.label:
             x0 = -1.6
@@ -193,7 +199,7 @@ def main() -> None:
             x0 = -1.9
         else:
             x0 = -2.4
-        x_initial = x0 + 0.02 * float(macro_rng.standard_normal())
+        x_initial = x0 + 0.02 * macro_rng.standard_normal()
         initial_state = {"x": x_initial, "z": 0.0}
         if roi.label != left_ca3_roi.label:
             initial_x[roi_index] = x_initial
@@ -226,7 +232,6 @@ def main() -> None:
         "threshold": -0.35,
         "slope": 4.0,
     }
-
     # Micro recurrent connections
     conn_rng = random.Random(4321)
 
@@ -312,7 +317,6 @@ def main() -> None:
         target = cell.group("Adend2")[0](0.5).insert("MyExp2SynBB", tau1=0.2, tau2=20.0, e=-80.0)
         for olm_local in conn_rng.sample(range(OLM_COUNT), 10):
             micro.network().sid_connect(int(olm_population.gid_begin) + int(olm_local), target, 0.08 * 4.0 * 3.0 * 6.0e-3, 2.0)
-
     for cell in pyr_population:
         target = cell.group("Adend3")[0](0.5).insert("MyExp2SynBB", tau1=0.05, tau2=5.3, e=0.0)
         left_ca3_roi.macro2micro(
@@ -322,21 +326,14 @@ def main() -> None:
             delay=0.2,
             params=ca3_input_to_spikes_params,
         )
-
-    for target in rois.rois():
-        if target.label == left_ca3_roi.label:
-            for source in rois.rois():
-                target.insert(
-                    source.label,
-                    "ca3_input_macro2macro",
-                )
-            continue
-        for source in rois.rois():
+    for target_index, target in enumerate(rois.rois()):
+        for source_index, source_label in enumerate(rois.labels):
+            if rois.weights[target_index][source_index] == 0.0:
+                continue
             target.insert(
-                source.label,
-                "vep_x_macro2macro",
+                source_label,
+                "ca3_input_macro2macro" if target.label == left_ca3_roi.label else "vep_x_macro2macro",
             )
-
     ca3_pyr_spikes_to_vep_params = {
         "tau_ms": 50.0,
         "x_baseline": -1.8,
@@ -371,17 +368,18 @@ def main() -> None:
             sid=int(cell.gid),
             params=ca3_olm_spikes_to_vep_params,
         )
-    micro.build_microcircuit()
 
-    history_steps = int(round(float(np.max(np.asarray(rois.delays, dtype=float))) / 0.1)) + 1
-    history_alpha = np.linspace(-1.0, 0.0, history_steps, dtype=float)[:, np.newaxis]
-    roi_phase = np.linspace(0.0, 2.0 * np.pi, len(rois.labels), endpoint=False, dtype=float)[np.newaxis, :]
-    macro_initial_history = np.empty((history_steps, 2, len(rois.labels)), dtype=float)
+    history_steps = round(np.max(rois.delays) / 0.1) + 1
+    history_alpha = np.linspace(-1.0, 0.0, history_steps)[:, np.newaxis]
+    roi_phase = np.linspace(0.0, 2.0 * np.pi, len(rois.labels), endpoint=False)[np.newaxis, :]
+    macro_initial_history = np.empty((history_steps, 2, len(rois.labels)))
     macro_initial_history[:, 0] = initial_x + 0.01 * history_alpha * np.sin(roi_phase)
     macro_initial_history[:, 1] = initial_z + 0.002 * history_alpha * np.cos(roi_phase)
     macro_initial_history[-1, 0] = initial_x
     macro_initial_history[-1, 1] = initial_z
     rois.initial_history(macro_initial_history, outputs=["x", "z"])
+
+    micro.build_microcircuit()
 
     for roi in rois.rois():
         roi.record("x")
@@ -396,31 +394,31 @@ def main() -> None:
 
     run_start = time.perf_counter()
     simulator = ms.Simulator(rois)
-    result = simulator.run(float(args.duration_ms))
+    result = simulator.run(args.duration_ms)
     run_s = time.perf_counter() - run_start
 
-    times_ms = np.asarray(result.times, dtype=float)
+    times_ms = np.asarray(result.times)
     recorded_macro = result.records
-    cube = np.asarray(recorded_macro.values, dtype=float).reshape(
-        int(recorded_macro.sample_count),
-        int(recorded_macro.recorded_roi_count),
-        int(recorded_macro.output_count),
+    cube = np.asarray(recorded_macro.values).reshape(
+        recorded_macro.sample_count,
+        recorded_macro.recorded_roi_count,
+        recorded_macro.output_count,
     )
     x = cube[:, :, 0]
     z = cube[:, :, 1].copy()
     left_ca3_column = rois.labels.index(left_ca3_roi.label)
     z[:, left_ca3_column] = np.nan
-    voltage_time = np.asarray(voltage_time_trace.to_python(), dtype=float)
-    pyr_voltage = np.asarray(pyr_voltage_trace.to_python(), dtype=float)
-    bas_voltage = np.asarray(bas_voltage_trace.to_python(), dtype=float)
-    olm_voltage = np.asarray(olm_voltage_trace.to_python(), dtype=float)
-    voltage_traces = np.empty((voltage_time.size, 3), dtype=float)
+    voltage_time = np.asarray(voltage_time_trace.to_python())
+    pyr_voltage = np.asarray(pyr_voltage_trace.to_python())
+    bas_voltage = np.asarray(bas_voltage_trace.to_python())
+    olm_voltage = np.asarray(olm_voltage_trace.to_python())
+    voltage_traces = np.empty((voltage_time.size, 3))
     voltage_traces[:, 0] = pyr_voltage
     voltage_traces[:, 1] = bas_voltage
     voltage_traces[:, 2] = olm_voltage
     voltage = pyr_voltage.copy()
-    adend3_voltage = np.asarray(adend3_voltage_trace.to_python(), dtype=float)
-    voltage_labels = np.asarray(["PYR[0].soma", "BAS[0].soma", "OLM[0].soma"], dtype=object)
+    adend3_voltage = np.asarray(adend3_voltage_trace.to_python())
+    voltage_labels = ["PYR[0].soma", "BAS[0].soma", "OLM[0].soma"]
 
     metadata = {
         "source": "MIND Sim TVB Epileptor2D-equivalent neural mass + MIND Sim API rewrite of ModelDB 186768 CA3",
@@ -430,11 +428,11 @@ def main() -> None:
         "ca3_micro_model": "ModelDB 186768 CA3, MIND Sim API/CoreNEURON rewrite",
         "macro_model": "TVB built-in Epileptor2D equations implemented as a MOD mechanism",
         "micro_backend": "CoreNEURON",
-        "duration_ms": float(args.duration_ms),
+        "duration_ms": args.duration_ms,
         "dt_micro_ms": 0.025,
         "dt_macro_ms": 0.1,
-        "micro_num_threads": int(args.micro_threads),
-        "min_positive_delay_ms": float(rois.min_positive_delay()),
+        "micro_num_threads": args.micro_threads,
+        "min_positive_delay_ms": rois.min_positive_delay(),
         "exchange_window_ms": 0.5,
         "macro_i_ext": 3.1,
         "pyr_current_na": 0.1,
@@ -451,7 +449,7 @@ def main() -> None:
         "initial_history": "explicit non-constant TVB-style chronological history with axes time,output,roi and outputs ['x', 'z']; history[-1] is the t=0 state",
         "notes": "Left-CA3 ROI is replaced by population-specific PYR/BAS/OLM event-driven micro x output; macro input to Left-CA3 is transformed into external AMPA events on PYR Adend3 synapses. Left-CA3 z is not a transform output.",
         "voltage_recording": "representative PYR/BAS/OLM soma voltages in voltage_traces; fixed output key voltage remains PYR[0].soma; PYR[0].Adend3(0.5) voltage is in adend3_voltage",
-        "voltage_trace_labels": voltage_labels.tolist(),
+        "voltage_trace_labels": voltage_labels,
         "spike_validation": "derive representative PYR/BAS/OLM soma spikes from recorded voltage threshold crossings; no spike array is exported",
         "record_names": ["x", "z"],
     }
@@ -459,10 +457,10 @@ def main() -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         output,
-        labels=np.asarray(rois.labels, dtype=object),
-        weights=np.asarray(rois.weights, dtype=float),
-        delays=np.asarray(rois.delays, dtype=float),
-        record_names=np.asarray(["x", "z"], dtype=object),
+        labels=rois.labels,
+        weights=rois.weights,
+        delays=rois.delays,
+        record_names=["x", "z"],
         time_ms=times_ms,
         macro_records=cube,
         macro_x=x,
@@ -474,13 +472,13 @@ def main() -> None:
         voltage_traces=voltage_traces,
         adend3_voltage=adend3_voltage,
         left_ca3_macro_output_x=x[:, left_ca3_column],
-        timing_s=np.asarray([pre_run_s, run_s, pre_run_s + run_s], dtype=float),
+        timing_s=[pre_run_s, run_s, pre_run_s + run_s],
         metadata_json=json.dumps(metadata, sort_keys=True),
     )
     print(f"output={output}")
     print("backend=mind_sim")
     print("device=cpu")
-    print(f"num_threads={int(args.micro_threads)}")
+    print(f"num_threads={args.micro_threads}")
     print(f"pre_run_s={pre_run_s:.6f}")
     print(f"run_s={run_s:.6f}")
 

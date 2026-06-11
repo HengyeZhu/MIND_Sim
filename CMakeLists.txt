@@ -1,7 +1,74 @@
 cmake_minimum_required(VERSION 3.20)
+
+set(MIND_SIM_USE_NVHPC_DEFAULT ON CACHE BOOL "Prefer NVIDIA HPC SDK nvc++ when no CMake C++ compiler is specified")
+
+if(MIND_SIM_USE_NVHPC_DEFAULT AND NOT DEFINED CMAKE_CXX_COMPILER)
+  set(_mind_sim_nvhpc_cxx)
+  if(DEFINED ENV{NVHPC_CXX} AND EXISTS "$ENV{NVHPC_CXX}")
+    set(_mind_sim_nvhpc_cxx "$ENV{NVHPC_CXX}")
+  elseif(DEFINED ENV{NVHPC_HOME} AND EXISTS "$ENV{NVHPC_HOME}/bin/nvc++")
+    set(_mind_sim_nvhpc_cxx "$ENV{NVHPC_HOME}/bin/nvc++")
+  else()
+    file(GLOB _mind_sim_nvhpc_candidates
+      "/opt/nvidia/hpc_sdk/Linux_x86_64/*/compilers/bin/nvc++"
+    )
+    if(_mind_sim_nvhpc_candidates)
+      list(SORT _mind_sim_nvhpc_candidates COMPARE NATURAL ORDER DESCENDING)
+      list(GET _mind_sim_nvhpc_candidates 0 _mind_sim_nvhpc_cxx)
+    endif()
+  endif()
+  if(_mind_sim_nvhpc_cxx)
+    get_filename_component(_mind_sim_nvhpc_cxx "${_mind_sim_nvhpc_cxx}" REALPATH)
+    set(_mind_sim_nvhpc_wrapper "${CMAKE_BINARY_DIR}/mind_sim_nvhpc_cxx")
+    file(WRITE "${_mind_sim_nvhpc_wrapper}" [=[
+#!/usr/bin/env bash
+set -e
+if [[ -n "${CONDA_PREFIX:-}" && -n "${PATH:-}" ]]; then
+  clean_path=""
+  IFS=':' read -r -a path_entries <<< "${PATH}"
+  for entry in "${path_entries[@]}"; do
+    if [[ -n "${entry}" && "${entry}" != "${CONDA_PREFIX}/bin" ]]; then
+      if [[ -z "${clean_path}" ]]; then
+        clean_path="${entry}"
+      else
+        clean_path="${clean_path}:${entry}"
+      fi
+    fi
+  done
+  export PATH="${clean_path}"
+fi
+unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS LD
+exec "__MIND_SIM_NVHPC_CXX__" "$@"
+]=])
+    file(READ "${_mind_sim_nvhpc_wrapper}" _mind_sim_nvhpc_wrapper_text)
+    string(REPLACE "__MIND_SIM_NVHPC_CXX__" "${_mind_sim_nvhpc_cxx}" _mind_sim_nvhpc_wrapper_text "${_mind_sim_nvhpc_wrapper_text}")
+    file(WRITE "${_mind_sim_nvhpc_wrapper}" "${_mind_sim_nvhpc_wrapper_text}")
+    file(CHMOD "${_mind_sim_nvhpc_wrapper}"
+      PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
+    )
+    set(ENV{CFLAGS} "")
+    set(ENV{CXXFLAGS} "")
+    set(ENV{CPPFLAGS} "")
+    set(ENV{LDFLAGS} "")
+    set(ENV{LD} "")
+    set(CMAKE_CXX_COMPILER "${_mind_sim_nvhpc_wrapper}" CACHE FILEPATH "MIND_Sim NVHPC compiler wrapper")
+    set(MIND_SIM_CXX_COMPILER_FOR_MODS "${_mind_sim_nvhpc_cxx}" CACHE FILEPATH "C++ compiler used by mind_nrnivmodl")
+  endif()
+endif()
+
 project(mind_sim LANGUAGES CXX)
 
-option(MIND_SIM_ENABLE_GPU "Enable CoreNEURON OpenACC GPU backend for the micro runtime" OFF)
+if(NOT DEFINED MIND_SIM_CXX_COMPILER_FOR_MODS)
+  set(MIND_SIM_CXX_COMPILER_FOR_MODS "${CMAKE_CXX_COMPILER}" CACHE FILEPATH "C++ compiler used by mind_nrnivmodl")
+endif()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "NVHPC|PGI")
+  set(MIND_SIM_ENABLE_GPU_DEFAULT ON)
+else()
+  set(MIND_SIM_ENABLE_GPU_DEFAULT OFF)
+endif()
+
+option(MIND_SIM_ENABLE_GPU "Enable CoreNEURON OpenACC GPU backend for the micro runtime" ${MIND_SIM_ENABLE_GPU_DEFAULT})
 option(MIND_SIM_ENABLE_HDF5 "Enable HDF5-backed save_h5 helpers" OFF)
 set(MIND_SIM_GPU_ARCHS "lineinfo" CACHE STRING "NVHPC -gpu option list for MIND_Sim GPU builds")
 
@@ -60,7 +127,7 @@ if(MIND_SIM_ENABLE_GPU)
   if(CUDAToolkit_FOUND)
     set(MIND_SIM_GPU_RUNTIME_LIBRARY CUDA::cudart)
   else()
-    get_filename_component(MIND_SIM_NVHPC_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    get_filename_component(MIND_SIM_NVHPC_BIN_DIR "${MIND_SIM_CXX_COMPILER_FOR_MODS}" DIRECTORY)
     get_filename_component(MIND_SIM_NVHPC_COMPILER_DIR "${MIND_SIM_NVHPC_BIN_DIR}" DIRECTORY)
     get_filename_component(MIND_SIM_NVHPC_VERSION_DIR "${MIND_SIM_NVHPC_COMPILER_DIR}" DIRECTORY)
     file(GLOB MIND_SIM_CUDART_CANDIDATES
@@ -214,6 +281,8 @@ add_subdirectory("${MIND_SIM_NRN_SOURCE_DIR}/src/nmodl" "${PROJECT_BINARY_DIR}/s
 set(CMAKE_CXX_STANDARD "${MIND_SIM_PARENT_CXX_STANDARD}")
 set_target_properties(nmodl PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin"
+  BUILD_RPATH "${Python_RUNTIME_LIBRARY_DIRS};${Python_LIBRARY_DIRS}"
+  INSTALL_RPATH "${Python_RUNTIME_LIBRARY_DIRS};${Python_LIBRARY_DIRS}"
 )
 set(MIND_SIM_NMODL "${PROJECT_BINARY_DIR}/bin/nmodl${CMAKE_EXECUTABLE_SUFFIX}")
 add_custom_target(mind_sim_nmodl DEPENDS nmodl)
@@ -289,7 +358,7 @@ function(mind_sim_add_mod_compile_target)
   file(WRITE "${signature}"
     "backend=${MIND_SIM_NMODL_BACKEND}\n"
     "nmodl=${MIND_SIM_NMODL}\n"
-    "cxx=${CMAKE_CXX_COMPILER}\n"
+    "cxx=${MIND_SIM_CXX_COMPILER_FOR_MODS}\n"
     "cxx_flags=${MIND_SIM_MOD_CXX_FLAGS}\n"
     "link_flags=${MIND_SIM_MOD_LINK_FLAGS}\n"
     "defines=${MODGEN_DEFINES}\n"
@@ -634,7 +703,7 @@ target_compile_features(mind_nrnivmodl PRIVATE cxx_std_20)
 add_dependencies(mind_nrnivmodl mind_sim_nmodl)
 target_compile_definitions(mind_nrnivmodl PRIVATE
   MIND_SIM_NMODL_PATH="${MIND_SIM_NMODL}"
-  MIND_SIM_CXX_COMPILER="${CMAKE_CXX_COMPILER}"
+  MIND_SIM_CXX_COMPILER="${MIND_SIM_CXX_COMPILER_FOR_MODS}"
   MIND_SIM_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
   MIND_SIM_MECHANISM_INCLUDE_DIR="${PROJECT_SOURCE_DIR}/src/micro/sim"
   MIND_SIM_MOD_CXX_FLAGS="${MIND_SIM_MOD_CXX_FLAGS}"

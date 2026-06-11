@@ -51,13 +51,14 @@ mind_sim::macro::sim::MacroSimulationResult MacroRuntime::run(double t_stop, dou
     for (const auto& owner: field_owners) {
         aggregate_field_outputs(owner, current_output_soa);
     }
-    initialize_history(history,
-                       macro_to_macro_runtime.history_capacity,
-                       roi_count,
-                       output_count,
-                       current_output_soa,
-                       network_.initial_history(),
-                       network_.initial_history_time_count());
+    const int history_step_offset =
+        initialize_history(history,
+                           macro_to_macro_runtime.history_capacity,
+                           roi_count,
+                           output_count,
+                           current_output_soa,
+                           network_.initial_history(),
+                           network_.initial_history_time_count());
 
     auto region_groups = build_region_groups(region_owners);
     const auto macro_to_macro_evaluation = macro_to_macro_evaluation_for_targets(macro_to_macro_runtime,
@@ -70,7 +71,7 @@ mind_sim::macro::sim::MacroSimulationResult MacroRuntime::run(double t_stop, dou
                     roi_count,
                     input_count,
                     output_count,
-                    0,
+                    history_step_offset + 1,
                     history,
                     current_input_soa);
 
@@ -116,7 +117,7 @@ mind_sim::macro::sim::MacroSimulationResult MacroRuntime::run(double t_stop, dou
         }
 
         write_history_slot(history,
-                           (step + 1) % macro_to_macro_runtime.history_capacity,
+                           (history_step_offset + step + 1) % macro_to_macro_runtime.history_capacity,
                            roi_count,
                            output_count,
                            current_output_soa);
@@ -126,7 +127,7 @@ mind_sim::macro::sim::MacroSimulationResult MacroRuntime::run(double t_stop, dou
                         roi_count,
                         input_count,
                         output_count,
-                        step + 1,
+                        history_step_offset + step + 2,
                         history,
                         current_input_soa);
     }

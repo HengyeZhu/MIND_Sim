@@ -1,63 +1,162 @@
 # Examples
 
-Run commands from the `examples/` directory.
-
-This repository currently keeps one CA3 epilepsy whole-brain cosimulation example:
-
-```text
-ca3_epilepsy_cosim/
-```
-
-## Data
-
-The full workflow was designed around a subject-specific connectivity matrix built from real HCP subject `100206` data. Because the original imaging data are distributed under their own access and usage terms, this repository uses a synthetic connectivity matrix for the public example.
-
-The synthetic file keeps the same labelled matrix format used by the real workflow, but its edge weights, delays, and topology are not subject-specific data:
-
-```text
-ca3_epilepsy_cosim/data/synthetic_hybrid_ca3_connectivity.csv
-```
-
-Users who have access to the original HCP data can regenerate the real connectivity matrix with the preprocessing script:
-
-```text
-ca3_epilepsy_cosim/mind_sim/prepare_hcp100206_ca3.py
-```
-
-That script prepares the HCP/HippUnfold-derived CA3 parcellation and converts the processed connectome into the labelled matrix CSV format expected by the simulator.
-
-## Model Sources
-
-The micro model is based on the CA3 epilepsy network from ModelDB 186768.
-
-The macro model is based on the TVB `Epileptor2D` neural mass model. 
-
-## Compile Mechanisms
-
-The example uses one mechanism directory:
-
-```text
-ca3_epilepsy_cosim/mind_sim/mod/
-```
-
-Run the following commands from `examples/`.
-
-`mod/` contains the standard NEURON/CoreNEURON mechanisms used by the CA3 microcircuit and the MIND_Sim extended MOD modules for macro dynamics, macro coupling, micro2macro transforms, and macro2micro transforms. Compile it with the MIND_Sim compiler:
+Run commands from the repository root:
 
 ```bash
-mind_nrnivmodl ca3_epilepsy_cosim/mind_sim/mod
+cd MIND_Sim
 ```
 
-## MIND_Sim Workflow
+## Prepare MIND_Sim
 
-The complete MIND_Sim modeling flow for this example is in:
+```bash
+conda create -n mind_sim python=3.11 -y
+conda activate mind_sim
+conda install -c conda-forge cmake ninja bison flex -y
+pip install -e .
+```
+
+Compile the MIND_Sim mechanisms:
+
+```bash
+conda activate mind_sim
+mind_nrnivmodl examples/ca3_epilepsy_cosim/mind_sim/mod
+ldd examples/ca3_epilepsy_cosim/mind_sim/mod/x86_64/libcorenrnmech.so | grep -E 'libnvc|libnvomp|libnvhpc|libacc'
+```
+
+## Prepare TVB+NEURON
+
+Create the reference environment:
+
+```bash
+conda create -n test python=3.11 -y
+conda activate test
+pip install numpy scipy matplotlib networkx numba numexpr six Deprecated mako docutils h5py traitlets neuron
+```
+
+Download TVB:
+
+```bash
+git clone https://github.com/the-virtual-brain/tvb-root.git ~/tvb-root
+```
+
+Check the reference imports:
+
+```bash
+conda activate test
+python -c "import numpy, matplotlib, neuron"
+python -c "import sys, pathlib; root = pathlib.Path.home() / 'tvb-root'; [sys.path.insert(0, str(root / name)) for name in ['tvb_library', 'tvb_contrib', 'tvb_storage', 'tvb_framework']]; from tvb.simulator.history import SparseHistory; from tvb.simulator.models.epileptor import Epileptor2D"
+```
+
+Compile the TVB+NEURON mechanisms:
+
+```bash
+conda activate test
+cd examples/ca3_epilepsy_cosim/neuron_tvb/mod
+nrnivmodl .
+cd -
+```
+
+## Public CA3 Run
+
+Use the included synthetic connectivity:
 
 ```text
-ca3_epilepsy_cosim/mind_sim/run_vep_ca3_cosim.py
+examples/ca3_epilepsy_cosim/data/synthetic_hybrid_ca3_connectivity.csv
 ```
 
-A detailed [blog](https://hengyezhu.github.io/mind-simulator-demo.html) is here.
+Run MIND_Sim, TVB+NEURON, comparison, and plots:
 
-## Validation
+```bash
+DURATION_MS=1000 ./examples/ca3_epilepsy_cosim/allinone.sh
+```
 
-The validation workflow is still being refined. A clearer comparison guide and reference validation procedure are coming soon.
+The all-in-one workflow rebuilds MIND_Sim mechanisms with `mind_nrnivmodl` and TVB+NEURON mechanisms with the `nrnivmodl` command from the `test` environment.
+
+Run only the comparison step on existing outputs:
+
+```bash
+RUN_EXPERIMENTS=0 DURATION_MS=1000 ./examples/ca3_epilepsy_cosim/allinone.sh
+```
+
+Set a custom output directory:
+
+```bash
+OUTDIR=examples/ca3_epilepsy_cosim/outputs/my_run DURATION_MS=1000 ./examples/ca3_epilepsy_cosim/allinone.sh
+```
+
+Generated files:
+
+```text
+examples/ca3_epilepsy_cosim/outputs/allinone_1000ms/
+examples/ca3_epilepsy_cosim/outputs/allinone_1000ms/compare_1000ms.json
+examples/ca3_epilepsy_cosim/outputs/allinone_1000ms/compare_1000ms.md
+examples/ca3_epilepsy_cosim/outputs/allinone_1000ms/plots/
+```
+
+## Public Data
+
+Included:
+
+```text
+examples/ca3_epilepsy_cosim/data/synthetic_hybrid_ca3_connectivity.csv
+examples/ca3_epilepsy_cosim/data/freesurfer_color_lut.tsv
+examples/ca3_epilepsy_cosim/data/hippunfold_multihist7_subfields.tsv
+examples/ca3_epilepsy_cosim/mind_sim/mod/
+examples/ca3_epilepsy_cosim/neuron_tvb/mod/
+```
+
+Download:
+
+```text
+~/tvb-root
+```
+
+No HCP download is needed for the public synthetic run.
+
+## HCP 100206 Data
+
+Place HCP subject data here:
+
+```text
+examples/HCP_1200/100206/
+```
+
+Prepare a data environment:
+
+```bash
+conda create -n hcp_prep python=3.11 -y
+conda activate hcp_prep
+conda install -c conda-forge numpy nibabel -y
+```
+
+Check required files:
+
+```bash
+conda activate hcp_prep
+python examples/ca3_epilepsy_cosim/mind_sim/prepare_hcp100206_ca3.py check \
+  --hcp-root examples/HCP_1200 \
+  --subject 100206
+```
+
+Create BIDS symlinks for HippUnfold:
+
+```bash
+python examples/ca3_epilepsy_cosim/mind_sim/prepare_hcp100206_ca3.py prepare-bids \
+  --hcp-root examples/HCP_1200 \
+  --subject 100206 \
+  --output-bids examples/ca3_epilepsy_cosim/outputs/hcp_bids \
+  --replace
+```
+
+Use these inputs for the real-connectivity path:
+
+```text
+examples/HCP_1200/100206/T1w/T1w_acpc_dc_restore.nii.gz
+examples/HCP_1200/100206/T1w/T2w_acpc_dc_restore.nii.gz
+examples/HCP_1200/100206/T1w/aparc+aseg.nii.gz
+examples/HCP_1200/100206/T1w/wmparc.nii.gz
+examples/ca3_epilepsy_cosim/outputs/hippunfold/sub-100206/anat/
+MRtrix weights CSV
+MRtrix lengths CSV
+ROI labels TSV
+```

@@ -3496,7 +3496,10 @@ std::string mind_render_macro_to_macro(const MindRenderData& data) {
     const int roi_count = ctx->roi_count;
     const int history_stride = ctx->exposure_count * roi_count;
     const int history_size = ctx->history_capacity * history_stride;
-    const int current_history_offset = (ctx->step % ctx->history_capacity) * history_stride;
+    const int query_current_step = ctx->step - 1;
+    const int current_slot =
+        ((query_current_step % ctx->history_capacity) + ctx->history_capacity) % ctx->history_capacity;
+    const int current_history_offset = current_slot * history_stride;
     for (int unit = 0; unit < count; ++unit) {
         const int edge = edge_indices[static_cast<std::size_t>(unit)];
         const int target_roi = target_indices[static_cast<std::size_t>(unit)];

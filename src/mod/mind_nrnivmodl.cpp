@@ -336,8 +336,74 @@ void write_text(const fs::path& path, const std::string& text) {
     return out;
 }
 
+[[nodiscard]] std::string shell_quote_text(std::string_view text) {
+    std::string out{"'"};
+    for (char c : text) {
+        if (c == '\'') {
+            out += "'\\''";
+        } else {
+            out += c;
+        }
+    }
+    out += "'";
+    return out;
+}
+
+[[nodiscard]] bool using_nvhpc_compiler() {
+    const std::string compiler = MIND_SIM_CXX_COMPILER;
+    return compiler.find("nvc++") != std::string::npos || compiler.find("pgc++") != std::string::npos;
+}
+
+[[nodiscard]] bool same_path(const std::string& lhs, const fs::path& rhs) {
+    std::error_code ec;
+    if (fs::equivalent(fs::path{lhs}, rhs, ec)) {
+        return true;
+    }
+    return fs::path{lhs}.lexically_normal() == rhs.lexically_normal();
+}
+
+[[nodiscard]] std::string subprocess_env_prefix() {
+    if (!using_nvhpc_compiler()) {
+        return {};
+    }
+    const char* path_env = std::getenv("PATH");
+    const char* conda_prefix_env = std::getenv("CONDA_PREFIX");
+    if (path_env == nullptr || conda_prefix_env == nullptr) {
+        return {};
+    }
+
+    const fs::path conda_bin = fs::path{conda_prefix_env} / "bin";
+    std::vector<std::string> kept;
+    std::string_view path{path_env};
+    std::size_t begin = 0;
+    while (begin <= path.size()) {
+        const std::size_t end = path.find(':', begin);
+        std::string entry{path.substr(begin, end == std::string_view::npos ? path.size() - begin : end - begin)};
+        if (!entry.empty() && !same_path(entry, conda_bin)) {
+            kept.push_back(std::move(entry));
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        begin = end + 1;
+    }
+    if (kept.empty()) {
+        return {};
+    }
+
+    std::ostringstream joined;
+    for (std::size_t i = 0; i < kept.size(); ++i) {
+        if (i != 0) {
+            joined << ':';
+        }
+        joined << kept[i];
+    }
+    return "PATH=" + shell_quote_text(joined.str()) + " ";
+}
+
 void run(const std::vector<std::string>& command) {
     std::ostringstream shell;
+    shell << subprocess_env_prefix();
     for (std::size_t i = 0; i < command.size(); ++i) {
         if (i != 0) {
             shell << ' ';
@@ -352,7 +418,7 @@ void run(const std::vector<std::string>& command) {
 
 void run_in_dir(const fs::path& directory, const std::vector<std::string>& command) {
     std::ostringstream shell;
-    shell << "cd " << shell_quote(directory) << " && ";
+    shell << "cd " << shell_quote(directory) << " && " << subprocess_env_prefix();
     for (std::size_t i = 0; i < command.size(); ++i) {
         if (i != 0) {
             shell << ' ';

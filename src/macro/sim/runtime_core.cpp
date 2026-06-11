@@ -322,16 +322,16 @@ void initialize_history(std::vector<double>& history,
     }
 }
 
-void initialize_history(std::vector<double>& history,
-                        int history_capacity,
-                        int roi_count,
-                        int output_count,
-                        const std::vector<double>& output_soa,
-                        const std::vector<double>& initial_history,
-                        int initial_history_time_count) {
+int initialize_history(std::vector<double>& history,
+                       int history_capacity,
+                       int roi_count,
+                       int output_count,
+                       const std::vector<double>& output_soa,
+                       const std::vector<double>& initial_history,
+                       int initial_history_time_count) {
     initialize_history(history, history_capacity, roi_count, output_count, output_soa);
     if (initial_history.empty()) {
-        return;
+        return 0;
     }
     if (initial_history_time_count <= 0) {
         throw std::runtime_error("initial_history time count must be positive");
@@ -342,15 +342,18 @@ void initialize_history(std::vector<double>& history,
         throw std::runtime_error("initial_history storage size does not match runtime history shape");
     }
     const int copied_steps = std::min(initial_history_time_count, history_capacity);
-    for (int age = 0; age < copied_steps; ++age) {
-        const int source_step = initial_history_time_count - 1 - age;
-        const int target_slot = (history_capacity - age) % history_capacity;
+    const int first_source_step =
+        initial_history_time_count >= history_capacity ? initial_history_time_count - history_capacity : 0;
+    for (int step = 0; step < copied_steps; ++step) {
+        const int source_step = first_source_step + step;
+        const int target_slot = step;
         const auto source_base = static_cast<std::size_t>(source_step) * slot_size;
         const auto target_base = static_cast<std::size_t>(target_slot) * slot_size;
         std::copy(initial_history.begin() + static_cast<std::ptrdiff_t>(source_base),
                   initial_history.begin() + static_cast<std::ptrdiff_t>(source_base + slot_size),
                   history.begin() + static_cast<std::ptrdiff_t>(target_base));
     }
+    return initial_history_time_count - 1;
 }
 
 void write_history_slot(std::vector<double>& history,
