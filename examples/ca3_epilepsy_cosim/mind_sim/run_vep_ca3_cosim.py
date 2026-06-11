@@ -5,7 +5,6 @@ import argparse
 import json
 import math
 import random
-import sys
 import time
 from pathlib import Path
 
@@ -38,27 +37,16 @@ def main() -> None:
 
     output = args.output
 
-    repo_root = Path(__file__).resolve().parents[3]
-    build_path = repo_root / "build"
-    source_python_path = repo_root / "src" / "python_api"
-    if any((build_path / "mind_sim").glob("_native*.so")):
-        sys.meta_path[:] = [
-            finder
-            for finder in sys.meta_path
-            if finder.__class__.__module__ != "_mind_sim_editable"
-        ]
-    for path in (source_python_path, build_path):
-        path_text = str(path)
-        if path_text in sys.path:
-            sys.path.remove(path_text)
-        sys.path.insert(0, path_text)
-
     import mind_sim as ms
 
     ms.macro.load_mech(Path(__file__).resolve().parent / "mod")
     ms.macro.dt(0.1)
     ms.macro.exchange_window(0.5)
     rois = ms.macro.load_rois(args.connectivity_csv)
+    roi_list = rois.rois()
+    roi_labels = rois.labels
+    roi_weights = rois.weights
+    roi_delays = rois.delays
     left_ca3_roi = rois.roi("Left-CA3")
 
     pre_start = time.perf_counter()
@@ -326,9 +314,9 @@ def main() -> None:
             delay=0.2,
             params=ca3_input_to_spikes_params,
         )
-    for target_index, target in enumerate(rois.rois()):
-        for source_index, source_label in enumerate(rois.labels):
-            if rois.weights[target_index][source_index] == 0.0:
+    for target_index, target in enumerate(roi_list):
+        for source_index, source_label in enumerate(roi_labels):
+            if roi_weights[target_index][source_index] == 0.0:
                 continue
             target.insert(
                 source_label,
@@ -369,10 +357,10 @@ def main() -> None:
             params=ca3_olm_spikes_to_vep_params,
         )
 
-    history_steps = round(np.max(rois.delays) / 0.1) + 1
+    history_steps = round(np.max(roi_delays) / 0.1) + 1
     history_alpha = np.linspace(-1.0, 0.0, history_steps)[:, np.newaxis]
-    roi_phase = np.linspace(0.0, 2.0 * np.pi, len(rois.labels), endpoint=False)[np.newaxis, :]
-    macro_initial_history = np.empty((history_steps, 2, len(rois.labels)))
+    roi_phase = np.linspace(0.0, 2.0 * np.pi, len(roi_labels), endpoint=False)[np.newaxis, :]
+    macro_initial_history = np.empty((history_steps, 2, len(roi_labels)))
     macro_initial_history[:, 0] = initial_x + 0.01 * history_alpha * np.sin(roi_phase)
     macro_initial_history[:, 1] = initial_z + 0.002 * history_alpha * np.cos(roi_phase)
     macro_initial_history[-1, 0] = initial_x
@@ -457,9 +445,9 @@ def main() -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         output,
-        labels=rois.labels,
-        weights=rois.weights,
-        delays=rois.delays,
+        labels=roi_labels,
+        weights=roi_weights,
+        delays=roi_delays,
         record_names=["x", "z"],
         time_ms=times_ms,
         macro_records=cube,
