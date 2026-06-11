@@ -104,6 +104,11 @@ struct MicroTraceRecorder {
 
 class Network {
   public:
+    enum class InitialHistoryLayout {
+        TimeOutputRoi,
+        TimeRoiOutput,
+    };
+
     Network(Connectivity connectivity,
             std::vector<std::string> inputs,
             std::vector<std::string> outputs,
@@ -137,6 +142,15 @@ class Network {
     [[nodiscard]] const std::vector<std::vector<double>*>& micro_time_record_targets() const noexcept;
 
     [[nodiscard]] const std::vector<mind_sim::macro::sim::ScalarBuffer>& output_history_start() const noexcept;
+    void set_initial_history(const std::vector<std::string>& output_names,
+                             int time_count,
+                             int axis1_count,
+                             int axis2_count,
+                             const std::vector<double>& values,
+                             InitialHistoryLayout layout);
+    [[nodiscard]] bool has_initial_history() const noexcept;
+    [[nodiscard]] int initial_history_time_count() const noexcept;
+    [[nodiscard]] const std::vector<double>& initial_history() const noexcept;
 
     void set_dc_input(const ROI& roi, const mind_sim::macro::sim::ScalarBuffer& input);
     void set_dc_input_value(const ROI& roi, const std::string& input_name, double value);
@@ -228,6 +242,8 @@ class Network {
     std::vector<std::string> outputs_{};
     std::unordered_map<std::string, int> output_to_index_{};
     std::vector<mind_sim::macro::sim::ScalarBuffer> output_history_start_{};
+    std::vector<double> initial_history_{};
+    int initial_history_time_count_{0};
     std::vector<mind_sim::macro::sim::ScalarBuffer> dc_inputs_{};
     std::vector<int> recorded_rois_{};
     std::vector<int> recorded_outputs_{};

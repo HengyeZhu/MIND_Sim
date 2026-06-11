@@ -31,6 +31,12 @@ class NetworkBuilder {
     void set_dt(double dt);
     void set_exchange_window(double exchange_window);
     void load_mech(std::string directory);
+    void set_initial_history(std::vector<std::string> output_names,
+                             int time_count,
+                             int axis1_count,
+                             int axis2_count,
+                             std::vector<double> values,
+                             mind_sim::macro::frontend::Network::InitialHistoryLayout layout);
 
     void set_dc_input(int roi_index, std::unordered_map<std::string, double> values);
     void use_region(int roi_index,
@@ -97,6 +103,16 @@ class NetworkBuilder {
         std::unordered_map<std::string, double> params{};
     };
 
+    struct InitialHistoryConfig {
+        std::vector<std::string> output_names{};
+        int time_count{0};
+        int axis1_count{0};
+        int axis2_count{0};
+        std::vector<double> values{};
+        mind_sim::macro::frontend::Network::InitialHistoryLayout layout{
+            mind_sim::macro::frontend::Network::InitialHistoryLayout::TimeOutputRoi};
+    };
+
     struct MicroBindingConfig {
         int roi{-1};
         Sim* micro{nullptr};
@@ -129,6 +145,7 @@ class NetworkBuilder {
     std::optional<std::vector<int>> recorded_rois_{};
     std::optional<std::vector<std::string>> recorded_outputs_{};
     std::vector<std::unordered_map<std::string, double>> dc_inputs_{};
+    std::optional<InitialHistoryConfig> initial_history_{};
     std::vector<RegionConfig> regions_{};
     std::vector<FieldConfig> fields_{};
     std::vector<MacroToMacroConfig> macro_to_macro_{};

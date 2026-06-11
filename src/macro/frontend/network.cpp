@@ -54,6 +54,14 @@ void validate_buffer_size(const mind_sim::macro::sim::ScalarBuffer& buffer,
     }
 }
 
+void validate_history_axis(int value, int expected, const char* name, const char* layout) {
+    if (value != expected) {
+        throw std::runtime_error(std::string("initial_history ") + name + " axis mismatch for " +
+                                 layout + ": got " + std::to_string(value) +
+                                 ", expected " + std::to_string(expected));
+    }
+}
+
 void require_positive_finite(double value, const char* what) {
     if (value <= 0.0 || !std::isfinite(value)) {
         throw std::runtime_error(std::string(what) + " must be positive and finite");
@@ -205,6 +213,170 @@ const std::vector<std::vector<double>*>& Network::micro_time_record_targets() co
 
 const std::vector<mind_sim::macro::sim::ScalarBuffer>& Network::output_history_start() const noexcept {
     return output_history_start_;
+}
+
+void Network::set_initial_history(const std::vector<std::string>& output_names,
+                                  int time_count,
+                                  int axis1_count,
+                                  int axis2_count,
+                                  const std::vector<double>& values,
+                                  InitialHistoryLayout layout) {
+    if (time_count <= 0) {
+        throw std::runtime_error("initial_history time axis must be positive");
+    }
+    if (axis1_count <= 0 || axis2_count <= 0) {
+        throw std::runtime_error("initial_history spatial/output axes must be positive");
+    }
+    const char* layout_name =
+        layout == InitialHistoryLayout::TimeOutputRoi ? "time_output_roi" : "time_roi_output";
+    const int provided_output_count =
+        output_names.empty() ? output_count() : static_cast<int>(output_names.size());
+    if (provided_output_count <= 0) {
+        throw std::runtime_error("initial_history requires at least one output");
+    }
+    if (layout == InitialHistoryLayout::TimeOutputRoi) {
+        validate_history_axis(axis1_count, provided_output_count, "output", layout_name);
+        validate_history_axis(axis2_count, roi_count(), "roi", layout_name);
+    } else {
+        validate_history_axis(axis1_count, roi_count(), "roi", layout_name);
+        validate_history_axis(axis2_count, provided_output_count, "output", layout_name);
+    }
+    const auto expected_size =
+        static_cast<std::size_t>(time_count) *
+        static_cast<std::size_t>(axis1_count) *
+        static_cast<std::size_t>(axis2_count);
+    if (values.size() != expected_size) {
+        throw std::runtime_error("initial_history value count does not match its shape");
+    }
+
+    std::vector<int> output_indices;
+    output_indices.reserve(static_cast<std::size_t>(provided_output_count));
+    if (output_names.empty()) {
+        for (int output = 0; output < output_count(); ++output) {
+            output_indices.push_back(output);
+        }
+    } else {
+        std::vector<unsigned char> seen_outputs(static_cast<std::size_t>(output_count()), 0);
+        for (const auto& name: output_names) {
+            const int output = output_index(name);
+            if (seen_outputs[static_cast<std::size_t>(output)] != 0) {
+                throw std::runtime_error("initial_history output names must be unique");
+            }
+            seen_outputs[static_cast<std::size_t>(output)] = 1;
+            output_indices.push_back(output);
+        }
+    }
+
+    const auto slot_size = static_cast<std::size_t>(roi_count() * output_count());
+    std::vector<double> canonical(static_cast<std::size_t>(time_count) * slot_size, 0.0);
+    const auto start_soa = [&]() {
+        std::vector<double> soa(slot_size, 0.0);
+        for (int roi_value = 0; roi_value < roi_count(); ++roi_value) {
+            const auto& buffer = output_history_start_[static_cast<std::size_t>(roi_value)];
+            for (int output = 0; output < output_count(); ++output) {
+                soa[static_cast<std::size_t>(output * roi_count() + roi_value)] =
+                    buffer.values[static_cast<std::size_t>(output)];
+            }
+        }
+        return soa;
+    }();
+    for (int time = 0; time < time_count; ++time) {
+        std::copy(start_soa.begin(),
+                  start_soa.end(),
+                  canonical.begin() + static_cast<std::ptrdiff_t>(
+                                        static_cast<std::size_t>(time) * slot_size));
+    }
+
+    for (int time = 0; time < time_count; ++time) {
+        for (int provided_output = 0; provided_output < provided_output_count; ++provided_output) {
+            const int output = output_indices[static_cast<std::size_t>(provided_output)];
+            for (int roi_value = 0; roi_value < roi_count(); ++roi_value) {
+                std::size_t source_offset = 0;
+                if (layout == InitialHistoryLayout::TimeOutputRoi) {
+                    source_offset =
+                        (static_cast<std::size_t>(time) * static_cast<std::size_t>(axis1_count) +
+                         static_cast<std::size_t>(provided_output)) *
+                            static_cast<std::size_t>(axis2_count) +
+                        static_cast<std::size_t>(roi_value);
+                } else {
+                    source_offset =
+                        (static_cast<std::size_t>(time) * static_cast<std::size_t>(axis1_count) +
+                         static_cast<std::size_t>(roi_value)) *
+                            static_cast<std::size_t>(axis2_count) +
+                        static_cast<std::size_t>(provided_output);
+                }
+                const double value = values[source_offset];
+                if (!std::isfinite(value)) {
+                    throw std::runtime_error("initial_history values must be finite");
+                }
+                canonical[static_cast<std::size_t>(time) * slot_size +
+                          static_cast<std::size_t>(output * roi_count() + roi_value)] = value;
+            }
+        }
+    }
+
+    initial_history_time_count_ = time_count;
+    initial_history_ = std::move(canonical);
+
+    const auto current_offset = static_cast<std::size_t>(time_count - 1) * slot_size;
+    for (int roi_value = 0; roi_value < roi_count(); ++roi_value) {
+        auto& buffer = output_history_start_[static_cast<std::size_t>(roi_value)];
+        for (int output = 0; output < output_count(); ++output) {
+            buffer.values[static_cast<std::size_t>(output)] =
+                initial_history_[current_offset +
+                                 static_cast<std::size_t>(output * roi_count() + roi_value)];
+        }
+    }
+
+    for (auto& owner: region_owners_) {
+        const auto& exposure_names = owner.rule->source_exposure_names();
+        const auto& state_names = owner.rule->state_names();
+        for (const auto& exposure_name: exposure_names) {
+            const auto state_found =
+                std::find(state_names.begin(), state_names.end(), exposure_name);
+            if (state_found == state_names.end()) {
+                continue;
+            }
+            const int state_index = static_cast<int>(state_found - state_names.begin());
+            const int output = output_index(exposure_name);
+            owner.state[static_cast<std::size_t>(state_index)] =
+                initial_history_[current_offset +
+                                 static_cast<std::size_t>(output * roi_count() + owner.roi_index)];
+        }
+    }
+
+    for (auto& owner: neural_field_owners_) {
+        for (const auto& reducer: owner.reducers) {
+            const int output =
+                static_cast<int>(reducer.output_offset / static_cast<std::size_t>(roi_count()));
+            for (std::size_t owner_roi = 0; owner_roi < owner.owned_rois.size(); ++owner_roi) {
+                const int roi_value = owner.owned_rois[owner_roi];
+                const double value =
+                    initial_history_[current_offset +
+                                     static_cast<std::size_t>(output * roi_count() + roi_value)];
+                const int begin = owner.roi_node_offsets[owner_roi];
+                const int end = owner.roi_node_offsets[owner_roi + 1];
+                for (int position = begin; position < end; ++position) {
+                    const auto node =
+                        static_cast<std::size_t>(owner.roi_nodes[static_cast<std::size_t>(position)]);
+                    owner.state_soa[reducer.state_offset + node] = value;
+                    owner.previous_state_soa[reducer.state_offset + node] = value;
+                }
+            }
+        }
+    }
+}
+
+bool Network::has_initial_history() const noexcept {
+    return initial_history_time_count_ > 0;
+}
+
+int Network::initial_history_time_count() const noexcept {
+    return initial_history_time_count_;
+}
+
+const std::vector<double>& Network::initial_history() const noexcept {
+    return initial_history_;
 }
 
 void Network::set_dc_input(const ROI& roi_value,

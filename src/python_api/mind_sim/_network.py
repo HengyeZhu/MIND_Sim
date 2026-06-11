@@ -182,6 +182,14 @@ class Network:
     def min_positive_delay(self) -> float:
         return float(self._builder.min_positive_delay())
 
+    def initial_history(self, history, *, outputs=None, layout: str = "time_output_roi") -> "Network":
+        self._builder.set_initial_history(
+            history,
+            list(outputs) if outputs is not None else [],
+            str(layout),
+        )
+        return self
+
     def use_neural_field(self, field: NeuralField, *, node_map) -> "Network":
         if field.local_data is None:
             self._builder.use_neural_field(

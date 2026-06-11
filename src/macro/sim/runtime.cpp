@@ -55,7 +55,9 @@ mind_sim::macro::sim::MacroSimulationResult MacroRuntime::run(double t_stop, dou
                        macro_to_macro_runtime.history_capacity,
                        roi_count,
                        output_count,
-                       current_output_soa);
+                       current_output_soa,
+                       network_.initial_history(),
+                       network_.initial_history_time_count());
 
     auto region_groups = build_region_groups(region_owners);
     const auto macro_to_macro_evaluation = macro_to_macro_evaluation_for_targets(macro_to_macro_runtime,

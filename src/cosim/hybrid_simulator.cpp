@@ -688,7 +688,9 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
                        macro_to_macro_runtime.history_capacity,
                        roi_count,
                        output_count,
-                       current_output_soa);
+                       current_output_soa,
+                       network_.initial_history(),
+                       network_.initial_history_time_count());
 
     std::vector<double> current_input_soa;
     apply_macro_to_macro(region_macro_to_macro_evaluation,

@@ -56,15 +56,23 @@ class DoubleSparseHistory:
     def initialize(self, initial_history):
         if initial_history.shape[1] > self.n_cvar:
             initial_history = initial_history[:, self.cvars]
+        if initial_history.shape[0] != self.n_time:
+            raise ValueError(
+                f"DoubleSparseHistory expects {self.n_time} chronological history samples, "
+                f"got {initial_history.shape[0]}"
+            )
         self.buffer = np.asarray(initial_history, dtype=float).copy()
+        self.step_offset = int(initial_history.shape[0]) - 1
 
     def update(self, step, state):
-        self.buffer[int(step) % self.n_time] = state[self.cvars]
+        absolute_step = self.step_offset + int(step)
+        self.buffer[absolute_step % self.n_time] = state[self.cvars]
 
     def query_sparse(self, step):
-        time_indices = ((int(step) - 1 - self.nnz_idelays + self.n_time) % self.n_time).reshape((-1, 1))
+        absolute_step = self.step_offset + int(step)
+        time_indices = ((absolute_step - 1 - self.nnz_idelays + self.n_time) % self.n_time).reshape((-1, 1))
         delayed_state = self.buffer.take(time_indices * self.time_stride + self.const_indices)
-        current_state = self.buffer[(int(step) - 1) % self.n_time]
+        current_state = self.buffer[(absolute_step - 1) % self.n_time]
         return current_state, delayed_state
 
 
@@ -614,8 +622,14 @@ def main() -> None:
         (history_capacity, len(macro_model.state_variables), roi_count, macro_model.number_of_modes),
         dtype=float,
     )
-    initial_history[:, 0, :, 0] = x
-    initial_history[:, 1, :, 0] = z
+    history_alpha = np.linspace(-1.0, 0.0, history_capacity, dtype=float)[:, np.newaxis]
+    roi_phase = np.linspace(0.0, 2.0 * np.pi, roi_count, endpoint=False, dtype=float)[np.newaxis, :]
+    chronological_x = x + 0.01 * history_alpha * np.sin(roi_phase)
+    chronological_z = z + 0.002 * history_alpha * np.cos(roi_phase)
+    chronological_x[-1] = x
+    chronological_z[-1] = z
+    initial_history[:, 0, :, 0] = chronological_x
+    initial_history[:, 1, :, 0] = chronological_z
     macro_history = DoubleSparseHistory(
         np.asarray(tvb_connectivity.weights, dtype=float),
         np.asarray(tvb_connectivity.idelays, dtype=int),
@@ -790,6 +804,7 @@ def main() -> None:
         "exchange_window_ms": EXCHANGE_WINDOW_MS,
         "min_positive_delay_ms": float(min_positive_delay),
         "initial_history_steps": int(history_capacity),
+        "initial_history": "explicit non-constant chronological history; history[-1] is the t=0 state",
         "macro_i_ext": float(args.macro_i_ext),
         "epileptor2d_kvf": 0.35,
         "epileptor2d_ks": 0.0,

@@ -184,15 +184,19 @@ def main() -> None:
         "Left-entorhinal",
         "Right-entorhinal",
     }
-    for roi in rois.rois():
+    initial_x = np.zeros(len(rois.labels), dtype=float)
+    initial_z = np.zeros(len(rois.labels), dtype=float)
+    for roi_index, roi in enumerate(rois.rois()):
         if roi.label == left_ca3_roi.label:
             x0 = -1.6
         elif roi.label in propagation_labels:
             x0 = -1.9
         else:
             x0 = -2.4
-        initial_state = {"x": x0 + 0.02 * float(macro_rng.standard_normal()), "z": 0.0}
+        x_initial = x0 + 0.02 * float(macro_rng.standard_normal())
+        initial_state = {"x": x_initial, "z": 0.0}
         if roi.label != left_ca3_roi.label:
+            initial_x[roi_index] = x_initial
             roi.use_macro(
                 "tvb_epileptor2d",
                 initial_state=initial_state,
@@ -211,6 +215,8 @@ def main() -> None:
                     "modification": 0.0,
                 },
             )
+        else:
+            initial_x[roi_index] = 0.0
 
     left_ca3_roi.use_micro()
     ca3_input_to_spikes_params = {
@@ -367,6 +373,16 @@ def main() -> None:
         )
     micro.build_microcircuit()
 
+    history_steps = int(round(float(np.max(np.asarray(rois.delays, dtype=float))) / 0.1)) + 1
+    history_alpha = np.linspace(-1.0, 0.0, history_steps, dtype=float)[:, np.newaxis]
+    roi_phase = np.linspace(0.0, 2.0 * np.pi, len(rois.labels), endpoint=False, dtype=float)[np.newaxis, :]
+    macro_initial_history = np.empty((history_steps, 2, len(rois.labels)), dtype=float)
+    macro_initial_history[:, 0] = initial_x + 0.01 * history_alpha * np.sin(roi_phase)
+    macro_initial_history[:, 1] = initial_z + 0.002 * history_alpha * np.cos(roi_phase)
+    macro_initial_history[-1, 0] = initial_x
+    macro_initial_history[-1, 1] = initial_z
+    rois.initial_history(macro_initial_history, outputs=["x", "z"])
+
     for roi in rois.rois():
         roi.record("x")
         roi.record("z")
@@ -432,6 +448,7 @@ def main() -> None:
         "effective_drive_weight": 0.02e-3 * 1.0e-2,
         "drive_delay_ms": 0.2,
         "connections": True,
+        "initial_history": "explicit non-constant TVB-style chronological history with axes time,output,roi and outputs ['x', 'z']; history[-1] is the t=0 state",
         "notes": "Left-CA3 ROI is replaced by population-specific PYR/BAS/OLM event-driven micro x output; macro input to Left-CA3 is transformed into external AMPA events on PYR Adend3 synapses. Left-CA3 z is not a transform output.",
         "voltage_recording": "representative PYR/BAS/OLM soma voltages in voltage_traces; fixed output key voltage remains PYR[0].soma; PYR[0].Adend3(0.5) voltage is in adend3_voltage",
         "voltage_trace_labels": voltage_labels.tolist(),

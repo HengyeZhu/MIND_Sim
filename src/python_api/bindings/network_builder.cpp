@@ -364,6 +364,26 @@ void NetworkBuilder::load_mech(std::string directory) {
     register_mod_library(unified_mod_library_for(source_dir).string());
 }
 
+void NetworkBuilder::set_initial_history(
+    std::vector<std::string> output_names,
+    int time_count,
+    int axis1_count,
+    int axis2_count,
+    std::vector<double> values,
+    mind_sim::macro::frontend::Network::InitialHistoryLayout layout) {
+    if (time_count <= 0) {
+        throw std::runtime_error("initial_history time axis must be positive");
+    }
+    initial_history_ = InitialHistoryConfig{
+        .output_names = std::move(output_names),
+        .time_count = time_count,
+        .axis1_count = axis1_count,
+        .axis2_count = axis2_count,
+        .values = std::move(values),
+        .layout = layout,
+    };
+}
+
 void NetworkBuilder::set_dc_input(int roi_index_value,
                                   std::unordered_map<std::string, double> values) {
     validate_roi_index(roi_index_value, "dc input ROI");
@@ -807,6 +827,14 @@ mind_sim::macro::frontend::Network NetworkBuilder::build() const {
                        macro_to_macro_param_values(*config.rule, config.params),
                        offset_map(outputs, config.rule->source_exposure_names(), roi_width),
                        offset_map(inputs, config.rule->target_input_names(), roi_width));
+    }
+    if (initial_history_.has_value()) {
+        network.set_initial_history(initial_history_->output_names,
+                                    initial_history_->time_count,
+                                    initial_history_->axis1_count,
+                                    initial_history_->axis2_count,
+                                    initial_history_->values,
+                                    initial_history_->layout);
     }
     return network;
 }

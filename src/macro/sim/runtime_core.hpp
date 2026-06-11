@@ -101,6 +101,13 @@ void initialize_history(std::vector<double>& history,
                         int roi_count,
                         int output_count,
                         const std::vector<double>& output_soa);
+void initialize_history(std::vector<double>& history,
+                        int history_capacity,
+                        int roi_count,
+                        int output_count,
+                        const std::vector<double>& output_soa,
+                        const std::vector<double>& initial_history,
+                        int initial_history_time_count);
 
 void write_history_slot(std::vector<double>& history,
                         int slot,
