@@ -87,6 +87,8 @@ For full cosimulation, runtime is usually dominated by the micro-scale simulatio
 
 For the same 1s runs, using the TVB+NEURON reference with TVB's official macro APIs, the maximum absolute differences between MIND_Sim and the reference are `1.28464e-06` for macro `x`, `1.4922e-09` for macro `z`, and `2.17177e-10 mV` for representative PYR, BAS, OLM, and PYR Adend3 voltage traces. The macro comparison includes the precision boundary between TVB's single-precision (`float32`) state/history storage and MIND_Sim's double-precision macro state. Spike sample indices are exactly equal for the representative PYR, BAS, and OLM cells. This is an example-level comparison, not a standardized benchmark.
 
+A direct TVB+CoreNEURON baseline is not used because, in a short-window TVB loop, each `pc.psolve()` call repeatedly re-enters embedded CoreNEURON instead of keeping a resident CoreNEURON execution state. Profiling shows that the dominant overheads are NEURON-side model preparation and CoreNEURON-side model loading. These costs made TVB+CoreNEURON slower than TVB+NEURON by 3.68x with one thread and 5.65x with four threads. This motivates a co-simulation simulator built directly on CoreNEURON: MPI-level coupling alone cannot efficiently use CoreNEURON's GPU mode for future scaling.
+
 ## Acknowledgements
 
 I sincerely acknowledge the contributions of simulators such as [NEURON](https://github.com/neuronsimulator/nrn), [Arbor](https://github.com/arbor-sim/arbor/), [GeNN](https://github.com/genn-team/genn), and [TVB](https://github.com/the-virtual-brain/tvb-root) to computational neuroscience.
