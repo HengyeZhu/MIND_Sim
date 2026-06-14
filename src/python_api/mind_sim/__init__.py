@@ -1,10 +1,10 @@
 from . import _native
+from ._vector import Vector
 from ._network import (
     Simulator,
 )
 
 Sim = _native.Sim
-Vector = _native.Vector
 section = _native.section
 section_list = _native.section_list
 segment_values = _native.segment_values

@@ -175,6 +175,10 @@ inline double nrnran123_negexp(nrnran123_State* s) {
     return -std::log(nrnran123_dblpick(s));
 }
 
+inline double nrnran123_negexp(nrnran123_State* s, double mean) {
+    return nrnran123_negexp(s) * mean;
+}
+
 /* at cost of a cached  value we could compute two at a time. */
 inline double nrnran123_normal(nrnran123_State* s) {
     double w, u1;
@@ -187,6 +191,10 @@ inline double nrnran123_normal(nrnran123_State* s) {
     } while (w > 1);
     double y{std::sqrt((-2. * std::log(w)) / w)};
     return u1 * y;
+}
+
+inline double nrnran123_normal(nrnran123_State* s, double mean, double std) {
+    return mean + std * nrnran123_normal(s);
 }
 
 // nrnran123_gauss, nrnran123_iran were declared but not defined in CoreNEURON

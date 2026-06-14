@@ -1,56 +1,14 @@
 #include "micro/frontend/model.hpp"
 
-#include "coreneuron/coreneuron.hpp"
-#include "coreneuron/nrniv/nrniv_decl.h"
-
-#if defined(MIND_SIM_ENABLE_GPU) && defined(CORENEURON_ENABLE_GPU)
-#include "coreneuron/gpu/nrn_acc_manager.hpp"
-#endif
+#include "micro/sim/recording.hpp"
 
 #include <algorithm>
 #include <cmath>
-#include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <stdexcept>
 #include <vector>
 
 namespace mind_sim::micro::frontend {
-
-namespace {
-
-int thread_index_for_pointer(const mind_sim::micro::sim::CoreNeuronData& core_data,
-                             const double* ptr) {
-    if (ptr == nullptr) {
-        return 0;
-    }
-    const auto address = reinterpret_cast<std::uintptr_t>(ptr);
-    for (std::size_t tid = 0; tid < core_data.threads.size(); ++tid) {
-        const auto& storage = core_data.threads[tid].data_storage;
-        if (storage.empty()) {
-            continue;
-        }
-        const auto begin = reinterpret_cast<std::uintptr_t>(storage.data());
-        const auto end = begin + storage.size() * sizeof(double);
-        if (address >= begin && address < end) {
-            return static_cast<int>(tid);
-        }
-    }
-    return 0;
-}
-
-struct ThreadTrajectoryRecording {
-    std::vector<void*> vpr{};
-    std::vector<double*> gather{};
-    std::vector<double*> varrays{};
-    coreneuron::TrajectoryRequests request{};
-
-    [[nodiscard]] bool active() const noexcept {
-        return !gather.empty();
-    }
-};
-
-}  // namespace
 
 int MicroFrontendModel::build_microcircuit() {
     require_morphology();
@@ -83,6 +41,7 @@ int MicroFrontendModel::finitialize(double v_init) {
         runtime_backend_ = std::make_unique<mind_sim::micro::sim::MicroRuntime>(*core_neuron_data_);
     }
     runtime_backend_->finitialize(v_init);
+    recorded_spikes_.clear();
     core_initialized_ = true;
     return 0;
 }
@@ -104,9 +63,49 @@ int MicroFrontendModel::continue_run(double runtime) {
     if (!runtime_backend_) {
         runtime_backend_ = std::make_unique<mind_sim::micro::sim::MicroRuntime>(*core_neuron_data_);
     }
-    (void) runtime_backend_->advance_window(t_, t_ + runtime);
+    const auto spikes = runtime_backend_->advance_window(t_, t_ + runtime);
+    recorded_spikes_.append_view(spikes);
     t_ += runtime;
     return 0;
+}
+
+const std::vector<double>& MicroFrontendModel::spike_times() const noexcept {
+    return recorded_spikes_.time;
+}
+
+const std::vector<int>& MicroFrontendModel::spike_gids() const noexcept {
+    return recorded_spikes_.gid;
+}
+
+void MicroFrontendModel::clear_spikes() noexcept {
+    recorded_spikes_.clear();
+}
+
+void MicroFrontendModel::schedule_spike_input_event(int spike_input_id, double time) {
+    if (!std::isfinite(time)) {
+        throw std::runtime_error("spike input event time must be finite");
+    }
+    if (!core_initialized_) {
+        throw std::runtime_error("spike input event requires finitialize first");
+    }
+    const int runtime_index = network_registry_.spike_input_runtime_index(spike_input_id);
+    if (runtime_index < 0) {
+        throw std::runtime_error("spike input event requires build_microcircuit first");
+    }
+    if (!runtime_backend_) {
+        runtime_backend_ = std::make_unique<mind_sim::micro::sim::MicroRuntime>(*core_neuron_data_);
+    }
+    auto& events = runtime_backend_->scheduled_events();
+    events.time.push_back(time);
+    events.index.push_back(runtime_index);
+}
+
+void MicroFrontendModel::schedule_netcon_event(int connection_id, double time) {
+    const int spike_input_id = network_registry_.get_netcon_source_spike_input_id(connection_id);
+    if (spike_input_id < 0) {
+        throw std::runtime_error("NetCon.event is currently supported only for spike-input sources");
+    }
+    schedule_spike_input_event(spike_input_id, time);
 }
 
 int MicroFrontendModel::continue_run_with_recording(double runtime,
@@ -132,114 +131,26 @@ int MicroFrontendModel::continue_run_with_recording(double runtime,
         return continue_run(runtime);
     }
 
-    std::vector<ThreadTrajectoryRecording> recordings(core_neuron_data_->threads.size());
+    mind_sim::micro::sim::CoreRecordingPlan recording_plan(*core_neuron_data_);
     for (std::size_t i = 0; i < refs.size(); ++i) {
         if (sample_buffers[i] == nullptr) {
             throw std::runtime_error("recorded continue_run received null sample buffer");
         }
-        double* const pointer = variable_pointer(refs[i]);
-        const int tid = thread_index_for_pointer(*core_neuron_data_, pointer);
-        auto& recording = recordings[static_cast<std::size_t>(tid)];
-        recording.vpr.push_back(nullptr);
-        recording.gather.push_back(pointer);
-        recording.varrays.push_back(sample_buffers[i]);
+        recording_plan.add_target(variable_pointer(refs[i]), sample_buffers[i]);
     }
-
-    for (std::size_t tid = 0; tid < recordings.size(); ++tid) {
-        if (!recordings[tid].active()) {
-            continue;
-        }
-        auto& nt = core_neuron_data_->threads[tid];
-        if (nt.trajec_requests != nullptr) {
-            throw std::runtime_error("CoreNEURON trajectory recording is already active");
-        }
-        auto& trajectory = recordings[tid].request;
-        trajectory.vpr = recordings[tid].vpr.data();
-        trajectory.scatter = nullptr;
-        trajectory.varrays = recordings[tid].varrays.data();
-        trajectory.gather = recordings[tid].gather.data();
-        trajectory.n_pr = static_cast<int>(recordings[tid].gather.size());
-        trajectory.n_trajec = static_cast<int>(recordings[tid].gather.size());
-        trajectory.bsize = sample_count;
-        trajectory.vsize = 0;
-        nt.trajec_requests = &trajectory;
-        if (tid < core_neuron_data_->runtime_threads.size()) {
-            core_neuron_data_->runtime_threads[tid].trajec_requests = &trajectory;
-        }
-    }
-
-    const auto clear_recording_requests = [&]() {
-        for (std::size_t tid = 0; tid < recordings.size(); ++tid) {
-        if (recordings[tid].active()) {
-            core_neuron_data_->threads[tid].trajec_requests = nullptr;
-            if (tid < core_neuron_data_->runtime_threads.size()) {
-                core_neuron_data_->runtime_threads[tid].trajec_requests = nullptr;
-            }
-        }
-        }
-    };
-
-    const bool use_gpu =
-        core_neuron_data_->device_config.kind == mind_sim::micro::sim::MicroDeviceKind::Gpu;
-#if !defined(MIND_SIM_ENABLE_GPU) || !defined(CORENEURON_ENABLE_GPU)
-    if (use_gpu) {
-        throw std::runtime_error(
-            "MIND_Sim was built without CoreNEURON GPU support; rebuild with -DMIND_SIM_ENABLE_GPU=ON");
-    }
-#endif
+    recording_plan.prepare(sample_count);
 
     try {
-#if defined(MIND_SIM_ENABLE_GPU) && defined(CORENEURON_ENABLE_GPU)
-        if (use_gpu && core_neuron_data_->gpu_device_runtime_active) {
-            core_neuron_data_->bind();
-            coreneuron::nrn_nthread = static_cast<int>(core_neuron_data_->threads.size());
-            coreneuron::nrn_threads = core_neuron_data_->nrn_threads();
-            coreneuron::setup_trajectory_requests_on_device(coreneuron::nrn_threads,
-                                                            coreneuron::nrn_nthread);
-        }
-#endif
+        recording_plan.activate();
         continue_run(runtime);
-#if defined(MIND_SIM_ENABLE_GPU) && defined(CORENEURON_ENABLE_GPU)
-        if (use_gpu && core_neuron_data_->gpu_device_runtime_active) {
-            core_neuron_data_->bind();
-            coreneuron::nrn_nthread = static_cast<int>(core_neuron_data_->threads.size());
-            coreneuron::nrn_threads = core_neuron_data_->nrn_threads();
-            coreneuron::update_trajectory_requests_on_host(coreneuron::nrn_threads,
-                                                           coreneuron::nrn_nthread);
-            coreneuron::delete_trajectory_requests_on_device(coreneuron::nrn_threads,
-                                                             coreneuron::nrn_nthread);
-        }
-#endif
+        recording_plan.update_host();
     } catch (...) {
-#if defined(MIND_SIM_ENABLE_GPU) && defined(CORENEURON_ENABLE_GPU)
-        if (use_gpu && core_neuron_data_->gpu_device_runtime_active) {
-            try {
-                core_neuron_data_->bind();
-                coreneuron::nrn_nthread = static_cast<int>(core_neuron_data_->threads.size());
-                coreneuron::nrn_threads = core_neuron_data_->nrn_threads();
-                coreneuron::delete_trajectory_requests_on_device(coreneuron::nrn_threads,
-                                                                 coreneuron::nrn_nthread);
-            } catch (...) {
-            }
-        }
-#endif
-        clear_recording_requests();
+        recording_plan.deactivate();
         throw;
     }
-    clear_recording_requests();
-
-    int recorded = -1;
-    for (const auto& recording: recordings) {
-        if (!recording.active()) {
-            continue;
-        }
-        if (recorded < 0) {
-            recorded = recording.request.vsize;
-        } else if (recorded != recording.request.vsize) {
-            throw std::runtime_error("CoreNEURON trajectory recording count differs across threads");
-        }
-    }
-    return recorded < 0 ? 0 : recorded;
+    const int recorded = recording_plan.recorded_sample_count();
+    recording_plan.deactivate();
+    return recorded;
 }
 
 int MicroFrontendModel::fadvance() {

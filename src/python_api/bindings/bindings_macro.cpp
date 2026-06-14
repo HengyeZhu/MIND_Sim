@@ -112,73 +112,9 @@ void bind_macro(nb::module_& m) {
         .def("delay_at", &Connectivity::delay_at, nb::arg("target_roi"), nb::arg("source_roi"))
         .def("min_positive_delay", &Connectivity::min_positive_delay);
 
-    nb::class_<NodeToRoiMap>(m, "NodeToRoiMap")
-        .def(nb::init<std::vector<int>, std::vector<double>>(),
-             nb::arg("node_to_roi"),
-             nb::arg("node_weights") = std::vector<double>{})
-        .def_static("from_surface",
-                    &node_to_roi_map_from_surface,
-                    nb::arg("surface"),
-                    nb::arg("node_weights") = std::optional<std::vector<double>>{})
-        .def_static("from_file",
-                    &NodeToRoiMap::from_file,
-                    nb::arg("node_to_roi_path"),
-                    nb::arg("node_weights_path") = std::string{})
-        .def_prop_ro("node_count", &NodeToRoiMap::node_count)
-        .def_prop_ro("node_to_roi", &NodeToRoiMap::node_to_roi)
-        .def_prop_ro("node_weights", &NodeToRoiMap::node_weights)
-        .def("__repr__",
-             [](const NodeToRoiMap& mapping) {
-                 return "<mind_sim.NodeToRoiMap nodes=" +
-                        std::to_string(mapping.node_count()) + ">";
-             });
-
-    nb::class_<LocalConnectivity>(m, "LocalConnectivity")
-        .def(nb::init<int, std::vector<int>, std::vector<int>, std::vector<double>>(),
-             nb::arg("node_count"),
-             nb::arg("indptr"),
-             nb::arg("indices"),
-             nb::arg("weights"))
-        .def_static("from_arrays",
-                    [](int node_count,
-                       std::vector<int> indptr,
-                       std::vector<int> indices,
-                       std::vector<double> weights) {
-                        return LocalConnectivity(
-                            node_count,
-                            std::move(indptr),
-                            std::move(indices),
-                            std::move(weights));
-                    },
-                    nb::arg("node_count"),
-                    nb::arg("indptr"),
-                    nb::arg("indices"),
-                    nb::arg("weights"))
-        .def_static("from_edges",
-                    &local_connectivity_from_edges,
-                    nb::arg("node_count"),
-                    nb::arg("edges"))
-        .def_static("from_csr", &local_connectivity_from_csr, nb::arg("matrix"))
-        .def_static("from_surface",
-                    &local_connectivity_from_surface,
-                    nb::arg("surface"),
-                    nb::arg("node_count") = std::optional<int>{})
-        .def_prop_ro("node_count", &LocalConnectivity::node_count)
-        .def_prop_ro("nnz", &LocalConnectivity::nnz)
-        .def_prop_ro("indptr", &LocalConnectivity::indptr)
-        .def_prop_ro("indices", &LocalConnectivity::indices)
-        .def_prop_ro("weights", &LocalConnectivity::weights)
-        .def("__repr__",
-             [](const LocalConnectivity& local) {
-                 return "<mind_sim.LocalConnectivity nodes=" +
-                        std::to_string(local.node_count()) + " edges=" +
-                        std::to_string(local.nnz()) + ">";
-             });
-
     nb::class_<Network>(m, "_Network")
-        .def(nb::init<Connectivity, std::vector<std::string>, std::vector<std::string>, std::vector<int>, std::vector<int>>(),
+        .def(nb::init<Connectivity, std::vector<std::string>, std::vector<int>, std::vector<int>>(),
              nb::arg("connectivity"),
-             nb::arg("inputs"),
              nb::arg("outputs"),
              nb::arg("recorded_rois"),
              nb::arg("recorded_outputs"))
@@ -189,52 +125,30 @@ void bind_macro(nb::module_& m) {
              nb::overload_cast<const std::string&>(&Network::roi, nb::const_),
              nb::arg("label"))
         .def("rois", &Network::rois)
-        .def("inputs", &Network::inputs)
         .def("outputs", &Network::outputs)
         .def("recorded_rois", &Network::recorded_rois)
         .def("recorded_outputs", &Network::recorded_outputs)
         .def("set_recorded_rois", &Network::set_recorded_rois, nb::arg("recorded_rois"))
         .def("set_recorded_outputs", &Network::set_recorded_outputs, nb::arg("recorded_outputs"))
-        .def("input_index", &Network::input_index, nb::arg("input"))
-        .def("input_count", &Network::input_count)
         .def("output_index", &Network::output_index, nb::arg("output"))
         .def("output_count", &Network::output_count)
-        .def("set_dc_input",
-             &Network::set_dc_input,
-             nb::arg("roi"),
-             nb::arg("input"))
-        .def("set_dc_input_value",
-             &Network::set_dc_input_value,
-             nb::arg("roi"),
-             nb::arg("input"),
-             nb::arg("value"))
         .def("macro2macro",
              &Network::macro_to_macro,
              nb::arg("source_roi"),
-             nb::arg("target_roi"),
-             nb::arg("rule"),
-             nb::arg("params"),
-             nb::arg("source_exposure_offsets"),
-             nb::arg("target_input_offsets"))
+	             nb::arg("target_roi"),
+	             nb::arg("rule"),
+	             nb::arg("params"),
+	             nb::arg("read_source_offsets"),
+	             nb::arg("read_target_offsets"),
+	             nb::arg("write_source_offsets"),
+	             nb::arg("write_target_offsets"))
         .def("use_region_rule",
              &Network::use_region_rule,
              nb::arg("roi"),
              nb::arg("rule"),
              nb::arg("state"),
              nb::arg("params"),
-             nb::arg("target_input_offsets"),
-             nb::arg("source_exposure_offsets"))
-        .def("use_neural_field",
-             &network_use_neural_field,
-             nb::arg("name"),
-             nb::arg("rule"),
-             nb::arg("node_map"),
-             nb::arg("local"),
-             nb::arg("state"),
-             nb::arg("params"),
-             nb::arg("target_input_offsets"),
-             nb::arg("reducer_state_indices"),
-             nb::arg("reducer_output_indices"))
+             nb::arg("exposure_offsets"))
         .def("bind_micro_roi",
              &network_bind_micro_roi,
              nb::arg("micro_circuit_index"),
@@ -308,38 +222,10 @@ void bind_macro(nb::module_& m) {
              nb::arg("history"),
              nb::arg("outputs") = std::vector<std::string>{},
              nb::arg("layout") = "tvb")
-        .def("set_dc_input",
-             &NetworkBuilder::set_dc_input,
-             nb::arg("roi"),
-             nb::arg("values"))
         .def("use_region",
              &NetworkBuilder::use_region,
              nb::arg("roi"),
              nb::arg("library_path"),
-             nb::arg("initial_state") = std::unordered_map<std::string, double>{},
-             nb::arg("params") = std::unordered_map<std::string, double>{})
-        .def("use_neural_field",
-             nb::overload_cast<std::string,
-                               std::string,
-                               NodeToRoiMap,
-                               LocalConnectivity,
-                               std::unordered_map<std::string, double>,
-                               std::unordered_map<std::string, double>>(&NetworkBuilder::use_neural_field),
-             nb::arg("name"),
-             nb::arg("library_path"),
-             nb::arg("node_map"),
-             nb::arg("local"),
-             nb::arg("initial_state") = std::unordered_map<std::string, double>{},
-             nb::arg("params") = std::unordered_map<std::string, double>{})
-        .def("use_neural_field",
-             nb::overload_cast<std::string,
-                               std::string,
-                               NodeToRoiMap,
-                               std::unordered_map<std::string, double>,
-                               std::unordered_map<std::string, double>>(&NetworkBuilder::use_neural_field),
-             nb::arg("name"),
-             nb::arg("library_path"),
-             nb::arg("node_map"),
              nb::arg("initial_state") = std::unordered_map<std::string, double>{},
              nb::arg("params") = std::unordered_map<std::string, double>{})
         .def("macro2macro",
@@ -349,8 +235,9 @@ void bind_macro(nb::module_& m) {
              nb::arg("library_path"),
              nb::arg("params") = std::unordered_map<std::string, double>{})
         .def("use_micro",
-             nb::overload_cast<int>(&NetworkBuilder::use_micro),
-             nb::arg("roi"))
+             &NetworkBuilder::use_micro,
+             nb::arg("roi"),
+             nb::arg("exposures"))
         .def("macro2micro",
              &NetworkBuilder::macro2micro,
              nb::arg("roi"),

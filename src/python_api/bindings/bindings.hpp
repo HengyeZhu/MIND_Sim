@@ -4,9 +4,7 @@
 #include "cosim/transform/interfaces.hpp"
 #include "coreneuron/io/output_spikes.hpp"
 #include "cosim/hybrid_simulator.hpp"
-#include "macro/frontend/local_connectivity.hpp"
 #include "macro/frontend/network.hpp"
-#include "macro/frontend/node_to_roi_map.hpp"
 #include "macro/sim/runtime.hpp"
 #include "morph/section_distance.hpp"
 #include "morph/section_spec.hpp"
@@ -43,16 +41,11 @@ using mind_sim::micro::frontend::MechanismPlacementKind;
 using mind_sim::micro::frontend::MorphologyTemplateSpec;
 using mind_sim::micro::frontend::VariableRef;
 using mind_sim::macro::frontend::Connectivity;
-using mind_sim::macro::frontend::FieldOutputReducer;
 using mind_sim::macro::frontend::GidRange;
-using mind_sim::macro::frontend::LocalConnectivity;
-using mind_sim::macro::frontend::LocalConnectivityEdge;
 using mind_sim::macro::frontend::Network;
-using mind_sim::macro::frontend::NodeToRoiMap;
 using mind_sim::macro::frontend::ROI;
 using mind_sim::macro::sim::MacroToMacroRule;
 using mind_sim::macro::sim::MacroRuntime;
-using mind_sim::macro::sim::NeuralFieldRule;
 using mind_sim::macro::sim::RegionRule;
 using mind_sim::macro::sim::ScalarBuffer;
 using mind_micro_biophysical::ObjectOpKind;
@@ -260,94 +253,6 @@ inline int py_len(nb::handle value, const char* what) {
     return static_cast<int>(length);
 }
 
-inline LocalConnectivity local_connectivity_from_csr(nb::handle matrix) {
-    nb::handle csr = matrix;
-    nb::object csr_owner;
-    if (nb::hasattr(csr, "tocsr")) {
-        csr_owner = nb::cast<nb::object>(csr.attr("tocsr")());
-        csr = csr_owner;
-    }
-    if (!nb::hasattr(csr, "indptr") || !nb::hasattr(csr, "indices") ||
-        !nb::hasattr(csr, "data")) {
-        throw std::runtime_error("LocalConnectivity.from_csr expects a CSR-like matrix");
-    }
-    if (!nb::hasattr(csr, "shape")) {
-        throw std::runtime_error("LocalConnectivity CSR matrix must expose shape");
-    }
-    auto shape = nb::cast<nb::tuple>(csr.attr("shape"));
-    if (shape.size() != 2) {
-        throw std::runtime_error("LocalConnectivity CSR matrix must be square");
-    }
-    const int rows = nb::cast<int>(shape[0]);
-    const int cols = nb::cast<int>(shape[1]);
-    if (rows != cols) {
-        throw std::runtime_error("LocalConnectivity CSR matrix must be square");
-    }
-    if (nb::hasattr(csr, "copy")) {
-        csr_owner = nb::cast<nb::object>(csr.attr("copy")());
-        csr = csr_owner;
-    }
-    if (nb::hasattr(csr, "sum_duplicates")) {
-        csr.attr("sum_duplicates")();
-    }
-    if (nb::hasattr(csr, "sort_indices")) {
-        csr.attr("sort_indices")();
-    }
-    return LocalConnectivity(
-        rows,
-        py_int_vector(csr.attr("indptr"), "LocalConnectivity indptr"),
-        py_int_vector(csr.attr("indices"), "LocalConnectivity indices"),
-        py_double_vector(csr.attr("data"), "LocalConnectivity weights"));
-}
-
-inline LocalConnectivity local_connectivity_from_edges(int node_count, nb::handle edges) {
-    std::vector<LocalConnectivityEdge> parsed;
-    for (nb::handle item: edges) {
-        auto edge = nb::cast<nb::tuple>(item);
-        if (edge.size() != 3) {
-            throw std::runtime_error("LocalConnectivity edges must be (target_node, source_node, weight)");
-        }
-        parsed.push_back(LocalConnectivityEdge{
-            .target_node = nb::cast<int>(edge[0]),
-            .source_node = nb::cast<int>(edge[1]),
-            .weight = nb::cast<double>(edge[2]),
-        });
-    }
-    return LocalConnectivity::from_edges(node_count, parsed);
-}
-
-inline LocalConnectivity local_connectivity_from_surface(
-    nb::handle surface,
-    std::optional<int> node_count) {
-    if (!nb::hasattr(surface, "prepare_local_coupling")) {
-        throw std::runtime_error("surface must provide prepare_local_coupling(node_count)");
-    }
-    int resolved_node_count = 0;
-    if (node_count.has_value()) {
-        resolved_node_count = *node_count;
-    } else if (nb::hasattr(surface, "region_mapping")) {
-        resolved_node_count = py_len(surface.attr("region_mapping"), "surface.region_mapping");
-    } else if (nb::hasattr(surface, "vertices")) {
-        resolved_node_count = py_len(surface.attr("vertices"), "surface.vertices");
-    } else {
-        throw std::runtime_error(
-            "LocalConnectivity.from_surface requires node_count when the surface has no "
-            "region_mapping or vertices");
-    }
-    return local_connectivity_from_csr(surface.attr("prepare_local_coupling")(resolved_node_count));
-}
-
-inline NodeToRoiMap node_to_roi_map_from_surface(
-    nb::handle surface,
-    std::optional<std::vector<double>> node_weights) {
-    if (!nb::hasattr(surface, "region_mapping")) {
-        throw std::runtime_error("NodeToRoiMap.from_surface expects surface.region_mapping");
-    }
-    return NodeToRoiMap(
-        py_int_vector(surface.attr("region_mapping"), "surface.region_mapping"),
-        node_weights.value_or(std::vector<double>{}));
-}
-
 struct Sim {
     Sim();
     Sim(const Sim&) = delete;
@@ -484,6 +389,12 @@ struct Sim {
     double ion_charge(const std::string& ion_mechanism) const {
         return model.ion_charge(ion_mechanism);
     }
+    double nernst(double ci, double co, double charge) const {
+        return model.nernst(ci, co, charge);
+    }
+    double ghk(double v, double ci, double co, double charge) const {
+        return model.ghk(v, ci, co, charge);
+    }
     double get_global(const std::string& name) const {
         return model.global_scalar(name);
     }
@@ -518,6 +429,11 @@ struct Sim {
     double get_t() const { return model.time(); }
     void set_celsius(double celsius) { model.set_celsius(celsius); }
     double get_celsius() const { return model.celsius(); }
+    void set_secondorder(int secondorder) { model.set_secondorder(secondorder); }
+    int get_secondorder() const { return model.secondorder(); }
+    std::vector<double> spike_times() const { return model.spike_times(); }
+    std::vector<int> spike_gids() const { return model.spike_gids(); }
+    void clear_spikes() { model.clear_spikes(); }
 };
 
 struct PopulationView;
@@ -665,6 +581,7 @@ struct SectionView {
     }
     nb::object insert(const std::string& mech, ParamList params) const;
     VariableRefView ref(const std::string& var, const std::string& mech = "global", int array_index = -1) const;
+    VariableRefView ref_attr(const std::string& attr) const;
     VariableRefView ref_v() const;
 };
 
@@ -674,6 +591,17 @@ struct VariableRefView {
 
     double value() const {
         return sim->model.read_variable(ref);
+    }
+    void set(double value) const {
+        *sim->model.variable_pointer(ref) = value;
+    }
+    VariableRefView at(int index) const {
+        if (index < 0) {
+            throw nb::index_error("variable_ref index out of range");
+        }
+        auto out = ref;
+        out.array_index = index;
+        return VariableRefView{sim, std::move(out)};
     }
 };
 
@@ -690,6 +618,9 @@ struct PointProcessView {
         out.var = var;
         out.array_index = array_index;
         return VariableRefView{sim, std::move(out)};
+    }
+    VariableRefView ref_attr(const std::string& attr) const {
+        return VariableRefView{sim, sim->model.object_variable_ref_from_python_attr(insert_id, attr)};
     }
     double get_var(const std::string& key) const {
         return sim->model.mechanism_scalar(insert_id, key);
@@ -712,6 +643,9 @@ struct ArtificialCellView {
         out.var = var;
         out.array_index = array_index;
         return VariableRefView{sim, std::move(out)};
+    }
+    VariableRefView ref_attr(const std::string& attr) const {
+        return VariableRefView{sim, sim->model.object_variable_ref_from_python_attr(insert_id, attr)};
     }
     double get_var(const std::string& key) const {
         return sim->model.mechanism_scalar(insert_id, key);
@@ -742,6 +676,7 @@ struct NetConView {
     void set_delay(double value) const { sim->model.set_netcon_delay(connection_id, value); }
     double get_threshold() const { return sim->model.netcon_threshold(connection_id); }
     void set_threshold(double value) const { sim->model.set_netcon_threshold(connection_id, value); }
+    void event(double time) const { sim->model.schedule_netcon_event(connection_id, time); }
 };
 
 struct SpikeInputView {
@@ -750,6 +685,7 @@ struct SpikeInputView {
 
     int id() const { return macro2micro_id; }
     int runtime_index() const { return sim->model.spike_input_runtime_index(macro2micro_id); }
+    void event(double time) const { sim->model.schedule_spike_input_event(macro2micro_id, time); }
 };
 
 struct NetworkView {
@@ -775,8 +711,22 @@ struct NetworkView {
         const int id = sim->model.event_target_connect(source.insert_id, post.insert_id, weight, delay);
         return NetConView{sim, id};
     }
+    NetConView event_connect(const ArtificialCellView& source,
+                             const ArtificialCellView& post,
+                             double weight,
+                             double delay) const {
+        const int id = sim->model.event_target_connect(source.insert_id, post.insert_id, weight, delay);
+        return NetConView{sim, id};
+    }
     NetConView event_connect(const PointProcessView& source,
                              const PointProcessView& post,
+                             double weight,
+                             double delay) const {
+        const int id = sim->model.event_target_connect(source.insert_id, post.insert_id, weight, delay);
+        return NetConView{sim, id};
+    }
+    NetConView event_connect(const PointProcessView& source,
+                             const ArtificialCellView& post,
                              double weight,
                              double delay) const {
         const int id = sim->model.event_target_connect(source.insert_id, post.insert_id, weight, delay);
@@ -907,6 +857,12 @@ inline VariableRefView SectionView::ref(const std::string& var, const std::strin
     return VariableRefView{sim, std::move(out)};
 }
 
+inline VariableRefView SectionView::ref_attr(const std::string& attr) const {
+    return VariableRefView{
+        sim,
+        sim->model.location_variable_ref_from_python_attr(gid, section_index, x, attr)};
+}
+
 inline VariableRefView SectionView::ref_v() const {
     return ref("v", "global", -1);
 }
@@ -946,37 +902,6 @@ inline std::vector<GidRange> make_gid_ranges(const std::vector<int>& begins,
         ranges.push_back(GidRange{.begin = begins[i], .end = ends[i]});
     }
     return ranges;
-}
-
-inline void network_use_neural_field(Network& network,
-                                     const std::string& name,
-                                     std::shared_ptr<NeuralFieldRule> rule,
-                                     NodeToRoiMap node_map,
-                                     LocalConnectivity local_connectivity,
-                                     std::vector<double> state_soa,
-                                     std::vector<double> params,
-                                     std::vector<int> target_input_offsets,
-                                     const std::vector<int>& reducer_state_indices,
-                                     const std::vector<int>& reducer_output_indices) {
-    if (reducer_state_indices.size() != reducer_output_indices.size()) {
-        throw std::runtime_error("field reducer state/output vectors must have the same size");
-    }
-    std::vector<FieldOutputReducer> reducers;
-    reducers.reserve(reducer_state_indices.size());
-    for (std::size_t index = 0; index < reducer_state_indices.size(); ++index) {
-        reducers.push_back(FieldOutputReducer{
-            .state_index = reducer_state_indices[index],
-            .output_index = reducer_output_indices[index],
-        });
-    }
-    network.use_neural_field(std::move(name),
-                             std::move(rule),
-                             std::move(node_map),
-                             std::move(local_connectivity),
-                             std::move(state_soa),
-                             std::move(params),
-                             std::move(target_input_offsets),
-                             std::move(reducers));
 }
 
 inline void network_bind_micro_roi(Network& network,

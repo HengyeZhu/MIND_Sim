@@ -80,8 +80,11 @@ class CodegenCoreneuronCppVisitor: public CodegenCppVisitor {
 
     bool has_mind_rule = false;
     std::string mind_rule_role;
-    std::vector<std::string> mind_rule_target_inputs;
-    std::vector<std::string> mind_rule_source_exposures;
+    std::vector<std::string> mind_rule_exposures;
+    std::vector<std::pair<std::string, std::string>> mind_rule_read_source_bindings;
+    std::vector<std::pair<std::string, std::string>> mind_rule_read_target_bindings;
+    std::vector<std::pair<std::string, std::string>> mind_rule_write_source_bindings;
+    std::vector<std::pair<std::string, std::string>> mind_rule_write_target_bindings;
 
     /****************************************************************************************/
     /*                              Generic information getters                             */

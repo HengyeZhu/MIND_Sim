@@ -10,6 +10,7 @@ enum class CoreDParamKind {
     IonVariable,
     IonStyle,
     Area,
+    Diam,
     PointProcess,
     NetSend,
     Random,
@@ -45,6 +46,7 @@ struct CoreMechanismField {
     int data_offset{-1};
     double default_value{0.0};
     bool is_global{false};
+    bool python_visible{false};
 };
 
 struct CoreRegisteredMechanism {
@@ -69,6 +71,8 @@ void ensure_core_mechanisms_registered();
 [[nodiscard]] int core_mechanism_order_rank(int type) noexcept;
 [[nodiscard]] int core_ion_register(const std::string& ion, double charge);
 [[nodiscard]] double core_ion_charge(const std::string& ion_mechanism);
+[[nodiscard]] double core_nernst(double ci, double co, double charge, double celsius);
+[[nodiscard]] double core_ghk(double v, double ci, double co, double charge, double celsius);
 [[nodiscard]] const std::vector<CoreDParamBinding>& core_dparam_bindings();
 [[nodiscard]] const std::vector<CoreRegisteredMechanism>& core_registered_mechanisms();
 [[nodiscard]] double core_global_scalar(const std::string& name);

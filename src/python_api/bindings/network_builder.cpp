@@ -146,45 +146,6 @@ std::vector<double> micro_output_param_values(
         rule.name() + " params");
 }
 
-std::vector<double> field_param_values(
-    const mind_sim::macro::sim::NeuralFieldRule& rule,
-    const std::unordered_map<std::string, double>& overrides) {
-    return values_with_defaults<mind_sim::macro::sim::NeuralFieldRule>(
-        rule.param_names(),
-        rule.param_defaults(),
-        overrides,
-        rule.name() + " params");
-}
-
-std::vector<double> node_values(double value, int node_count) {
-    return std::vector<double>(static_cast<std::size_t>(node_count), value);
-}
-
-mind_sim::macro::frontend::LocalConnectivity empty_local_connectivity(int node_count) {
-    return mind_sim::macro::frontend::LocalConnectivity(
-        node_count,
-        std::vector<int>(static_cast<std::size_t>(node_count + 1), 0),
-        {},
-        {});
-}
-
-std::vector<double> field_state_values(const mind_sim::macro::sim::NeuralFieldRule& rule,
-                                       const std::unordered_map<std::string, double>& overrides,
-                                       int node_count) {
-    auto values = values_with_defaults<mind_sim::macro::sim::NeuralFieldRule>(
-        rule.state_names(),
-        rule.state_defaults(),
-        overrides,
-        rule.name() + " state");
-    std::vector<double> out;
-    out.reserve(values.size() * static_cast<std::size_t>(node_count));
-    for (double value: values) {
-        auto expanded = node_values(value, node_count);
-        out.insert(out.end(), expanded.begin(), expanded.end());
-    }
-    return out;
-}
-
 void add_name(std::vector<std::string>& names, const std::string& name) {
     if (std::find(names.begin(), names.end(), name) == names.end()) {
         names.push_back(name);
@@ -280,9 +241,7 @@ void attach_micro_recorders(mind_sim::macro::frontend::Network& network, Sim& mi
 }  // namespace
 
 NetworkBuilder::NetworkBuilder(mind_sim::macro::frontend::Connectivity connectivity)
-    : connectivity_(std::move(connectivity)) {
-    dc_inputs_.resize(static_cast<std::size_t>(connectivity_.roi_count()));
-}
+    : connectivity_(std::move(connectivity)) {}
 
 mind_sim::macro::frontend::ROI NetworkBuilder::roi(int index) const {
     validate_roi_index(index, "ROI");
@@ -384,12 +343,6 @@ void NetworkBuilder::set_initial_history(
     };
 }
 
-void NetworkBuilder::set_dc_input(int roi_index_value,
-                                  std::unordered_map<std::string, double> values) {
-    validate_roi_index(roi_index_value, "dc input ROI");
-    dc_inputs_[static_cast<std::size_t>(roi_index_value)] = std::move(values);
-}
-
 void NetworkBuilder::use_region(int roi_index_value,
                                 std::string library_path,
                                 std::unordered_map<std::string, double> initial_state,
@@ -403,38 +356,6 @@ void NetworkBuilder::use_region(int roi_index_value,
         .state = std::move(initial_state),
         .params = std::move(params),
     });
-}
-
-void NetworkBuilder::use_neural_field(std::string name,
-                                      std::string library_path,
-                                      mind_sim::macro::frontend::NodeToRoiMap node_map,
-                                      mind_sim::macro::frontend::LocalConnectivity local,
-                                      std::unordered_map<std::string, double> initial_state,
-                                      std::unordered_map<std::string, double> params) {
-    const RuleRef rule_ref = resolve_rule_ref(library_path);
-    fields_.push_back(FieldConfig{
-        .name = std::move(name),
-        .rule = std::make_shared<mind_sim::macro::sim::NeuralFieldRule>(rule_ref.library_path,
-                                                                        rule_ref.rule_name),
-        .node_map = std::move(node_map),
-        .local = std::move(local),
-        .state = std::move(initial_state),
-        .params = std::move(params),
-    });
-}
-
-void NetworkBuilder::use_neural_field(std::string name,
-                                      std::string library_path,
-                                      mind_sim::macro::frontend::NodeToRoiMap node_map,
-                                      std::unordered_map<std::string, double> initial_state,
-                                      std::unordered_map<std::string, double> params) {
-    const int node_count = node_map.node_count();
-    use_neural_field(std::move(name),
-                     std::move(library_path),
-                     std::move(node_map),
-                     empty_local_connectivity(node_count),
-                     std::move(initial_state),
-                     std::move(params));
 }
 
 void NetworkBuilder::macro2macro(int source_roi,
@@ -453,8 +374,11 @@ void NetworkBuilder::macro2macro(int source_roi,
     });
 }
 
-void NetworkBuilder::use_micro(int roi_index_value) {
+void NetworkBuilder::use_micro(int roi_index_value, std::vector<std::string> exposures) {
     validate_roi_index(roi_index_value, "micro ROI");
+    if (exposures.empty()) {
+        throw std::runtime_error("ROI.use_micro requires at least one exposure");
+    }
     Sim& micro = default_micro();
     const auto& populations = micro.model.populations();
     if (populations.empty()) {
@@ -473,6 +397,7 @@ void NetworkBuilder::use_micro(int roi_index_value) {
         .micro = &micro,
         .gid_range_begins = std::move(begins),
         .gid_range_ends = std::move(ends),
+        .exposures = std::move(exposures),
     });
 }
 
@@ -535,10 +460,22 @@ void NetworkBuilder::micro2macro(int roi_index_value,
     if (sid < 0) {
         throw std::runtime_error("micro2macro source sid must be non-negative");
     }
+
+    std::shared_ptr<mind_sim::cosim::transform::MicroOutputRule> rule;
+    for (const auto& config: micro_outputs_) {
+        if (config.rule && config.rule->library_path() == rule_ref.library_path &&
+            config.rule->name() == rule_ref.rule_name) {
+            rule = config.rule;
+            break;
+        }
+    }
+    if (!rule) {
+        rule = std::make_shared<mind_sim::cosim::transform::MicroOutputRule>(rule_ref.library_path,
+                                                                             rule_ref.rule_name);
+    }
     micro_outputs_.push_back(MicroOutputConfig{
         .roi = roi_index_value,
-        .rule = std::make_shared<mind_sim::cosim::transform::MicroOutputRule>(rule_ref.library_path,
-                                                                              rule_ref.rule_name),
+        .rule = std::move(rule),
         .sid = sid,
         .state = std::move(state),
         .params = std::move(params),
@@ -546,94 +483,58 @@ void NetworkBuilder::micro2macro(int roi_index_value,
 }
 
 mind_sim::macro::frontend::Network NetworkBuilder::build() const {
-    std::vector<std::string> inputs;
     std::vector<std::string> outputs;
-    std::vector<std::unordered_set<std::string>> accepted_by_roi(static_cast<std::size_t>(roi_count()));
-    std::vector<std::unordered_set<std::string>> outputs_by_roi(static_cast<std::size_t>(roi_count()));
+    std::vector<std::unordered_set<std::string>> exposures_by_roi(static_cast<std::size_t>(roi_count()));
 
     for (const auto& config: regions_) {
-        for (const auto& name: config.rule->target_input_names()) {
-            add_name(inputs, name);
-            accepted_by_roi[static_cast<std::size_t>(config.roi)].insert(name);
-        }
-        for (const auto& name: config.rule->source_exposure_names()) {
+        for (const auto& name: config.rule->exposure_names()) {
             add_name(outputs, name);
-            outputs_by_roi[static_cast<std::size_t>(config.roi)].insert(name);
+            exposures_by_roi[static_cast<std::size_t>(config.roi)].insert(name);
         }
     }
 
-    for (const auto& config: fields_) {
-        const auto& node_to_roi = config.node_map.node_to_roi();
-        std::unordered_set<int> owned_rois;
-        for (int roi_value: node_to_roi) {
-            validate_roi_index(roi_value, "neural field node ROI");
-            owned_rois.insert(roi_value);
-        }
-        for (int roi_value: owned_rois) {
-            for (const auto& name: config.rule->target_input_names()) {
-                add_name(inputs, name);
-                accepted_by_roi[static_cast<std::size_t>(roi_value)].insert(name);
-            }
-            for (const auto& name: config.rule->source_exposure_names()) {
-                add_name(outputs, name);
-                outputs_by_roi[static_cast<std::size_t>(roi_value)].insert(name);
-            }
-        }
-    }
-
-    for (const auto& config: micro_inputs_) {
-        for (const auto& name: config.rule->target_input_names()) {
-            add_name(inputs, name);
-            accepted_by_roi[static_cast<std::size_t>(config.roi)].insert(name);
-        }
-    }
-
-    for (const auto& config: micro_outputs_) {
-        for (const auto& name: config.rule->source_exposure_names()) {
+    for (const auto& binding: micro_bindings_) {
+        for (const auto& name: binding.exposures) {
             add_name(outputs, name);
-            outputs_by_roi[static_cast<std::size_t>(config.roi)].insert(name);
+            exposures_by_roi[static_cast<std::size_t>(binding.roi)].insert(name);
         }
     }
 
     for (const auto& config: macro_to_macro_) {
-        for (const auto& name: config.rule->source_exposure_names()) {
-            add_name(outputs, name);
-        }
-        for (const auto& name: config.rule->target_input_names()) {
-            add_name(inputs, name);
-        }
         require_names(connectivity_.rois()[static_cast<std::size_t>(config.source)].label +
                           " -> " + connectivity_.rois()[static_cast<std::size_t>(config.target)].label +
-                          " source output",
-                      config.rule->source_exposure_names(),
-                      outputs_by_roi[static_cast<std::size_t>(config.source)]);
+                          " source exposure",
+                      config.rule->read_source_exposure_names(),
+                      exposures_by_roi[static_cast<std::size_t>(config.source)]);
         require_names(connectivity_.rois()[static_cast<std::size_t>(config.source)].label +
                           " -> " + connectivity_.rois()[static_cast<std::size_t>(config.target)].label +
-                          " target input",
-                      config.rule->target_input_names(),
-                      accepted_by_roi[static_cast<std::size_t>(config.target)]);
+                          " target exposure",
+                      config.rule->read_target_exposure_names(),
+                      exposures_by_roi[static_cast<std::size_t>(config.target)]);
+        require_names(connectivity_.rois()[static_cast<std::size_t>(config.source)].label +
+                          " -> " + connectivity_.rois()[static_cast<std::size_t>(config.target)].label +
+                          " source write exposure",
+                      config.rule->write_source_exposure_names(),
+                      exposures_by_roi[static_cast<std::size_t>(config.source)]);
+        require_names(connectivity_.rois()[static_cast<std::size_t>(config.source)].label +
+                          " -> " + connectivity_.rois()[static_cast<std::size_t>(config.target)].label +
+                          " target write exposure",
+                      config.rule->write_target_exposure_names(),
+                      exposures_by_roi[static_cast<std::size_t>(config.target)]);
     }
 
     for (const auto& config: micro_inputs_) {
         require_names(connectivity_.rois()[static_cast<std::size_t>(config.roi)].label +
-                          " macro2micro source exposure",
-                      config.rule->source_exposure_names(),
-                      outputs_by_roi[static_cast<std::size_t>(config.roi)]);
+                          " macro2micro exposure",
+                      config.rule->exposure_names(),
+                      exposures_by_roi[static_cast<std::size_t>(config.roi)]);
     }
 
-    for (int roi_value = 0; roi_value < roi_count(); ++roi_value) {
-        const auto& dc = dc_inputs_[static_cast<std::size_t>(roi_value)];
-        std::vector<std::string> dc_names;
-        dc_names.reserve(dc.size());
-        for (const auto& [name, _]: dc) {
-            dc_names.push_back(name);
-        }
-        require_names(connectivity_.rois()[static_cast<std::size_t>(roi_value)].label + " dc_input",
-                      dc_names,
-                      accepted_by_roi[static_cast<std::size_t>(roi_value)]);
-        for (const auto& name: dc_names) {
-            add_name(inputs, name);
-        }
+    for (const auto& config: micro_outputs_) {
+        require_names(connectivity_.rois()[static_cast<std::size_t>(config.roi)].label +
+                          " micro2macro exposure",
+                      config.rule->exposure_names(),
+                      exposures_by_roi[static_cast<std::size_t>(config.roi)]);
     }
 
     std::vector<int> record_rois;
@@ -658,7 +559,6 @@ mind_sim::macro::frontend::Network NetworkBuilder::build() const {
 
     mind_sim::macro::frontend::Network network(
         connectivity_,
-        inputs,
         outputs,
         std::move(record_rois),
         std::move(record_output_indices));
@@ -670,46 +570,12 @@ mind_sim::macro::frontend::Network NetworkBuilder::build() const {
     }
     const int roi_width = roi_count();
 
-    for (int roi_value = 0; roi_value < roi_count(); ++roi_value) {
-        const auto native_roi = network.roi(roi_value);
-        for (const auto& [name, value]: dc_inputs_[static_cast<std::size_t>(roi_value)]) {
-            network.set_dc_input_value(native_roi, name, value);
-        }
-    }
-
     for (const auto& config: regions_) {
         network.use_region_rule(network.roi(config.roi),
                                 config.rule,
                                 region_state_values(*config.rule, config.state),
                                 region_param_values(*config.rule, config.params),
-                                offset_map(inputs, config.rule->target_input_names(), roi_width),
-                                offset_map(outputs, config.rule->source_exposure_names(), roi_width));
-    }
-
-    for (const auto& config: fields_) {
-        std::vector<mind_sim::macro::frontend::FieldOutputReducer> reducers;
-        reducers.reserve(config.rule->source_exposure_names().size());
-        for (const auto& name: config.rule->source_exposure_names()) {
-            const auto state_found = std::find(config.rule->state_names().begin(),
-                                               config.rule->state_names().end(),
-                                               name);
-            if (state_found == config.rule->state_names().end()) {
-                throw std::runtime_error("neural field source output must name a STATE: " + name);
-            }
-            const auto output_found = std::find(outputs.begin(), outputs.end(), name);
-            reducers.push_back(mind_sim::macro::frontend::FieldOutputReducer{
-                .state_index = static_cast<int>(state_found - config.rule->state_names().begin()),
-                .output_index = static_cast<int>(output_found - outputs.begin()),
-            });
-        }
-        network.use_neural_field(config.name,
-                                 config.rule,
-                                 config.node_map,
-                                 config.local,
-                                 field_state_values(*config.rule, config.state, config.node_map.node_count()),
-                                 field_param_values(*config.rule, config.params),
-                                 offset_map(inputs, config.rule->target_input_names(), roi_width),
-                                 std::move(reducers));
+                                offset_map(outputs, config.rule->exposure_names(), roi_width));
     }
 
     std::vector<Sim*> micro_by_roi(static_cast<std::size_t>(roi_count()), nullptr);
@@ -773,8 +639,7 @@ mind_sim::macro::frontend::Network NetworkBuilder::build() const {
                                               micro_input_param_values(*batch.rule, batch.params),
                                               std::move(macro2micro_indices),
                                               batch.macro2micro_ids,
-                                              offset_map(inputs, batch.rule->target_input_names(), roi_width),
-                                              offset_map(outputs, batch.rule->source_exposure_names(), roi_width));
+                                              offset_map(outputs, batch.rule->exposure_names(), roi_width));
     }
 
     struct MicroOutputBatch {
@@ -817,16 +682,18 @@ mind_sim::macro::frontend::Network NetworkBuilder::build() const {
                                             micro_output_state_values(*batch.rule, batch.state),
                                             micro_output_param_values(*batch.rule, batch.params),
                                             std::move(batch.sids),
-                                            offset_map(outputs, batch.rule->source_exposure_names(), roi_width));
+                                            offset_map(outputs, batch.rule->exposure_names(), roi_width));
     }
 
     for (const auto& config: macro_to_macro_) {
         network.macro_to_macro(network.roi(config.source),
-                       network.roi(config.target),
-                       config.rule,
-                       macro_to_macro_param_values(*config.rule, config.params),
-                       offset_map(outputs, config.rule->source_exposure_names(), roi_width),
-                       offset_map(inputs, config.rule->target_input_names(), roi_width));
+	                       network.roi(config.target),
+	                       config.rule,
+	                       macro_to_macro_param_values(*config.rule, config.params),
+	                       offset_map(outputs, config.rule->read_source_exposure_names(), roi_width),
+	                       offset_map(outputs, config.rule->read_target_exposure_names(), roi_width),
+	                       offset_map(outputs, config.rule->write_source_exposure_names(), roi_width),
+	                       offset_map(outputs, config.rule->write_target_exposure_names(), roi_width));
     }
     if (initial_history_.has_value()) {
         network.set_initial_history(initial_history_->output_names,

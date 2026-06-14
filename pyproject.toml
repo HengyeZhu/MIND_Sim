@@ -34,3 +34,12 @@ mind_nrnivmodl = "mind_sim.cli:mind_nrnivmodl_main"
 [tool.scikit-build]
 cmake.build-type = "Release"
 wheel.packages = []
+
+[tool.pytest.ini_options]
+addopts = [
+  "--import-mode=importlib",
+]
+python_files = [
+  "test*.py",
+  "*_test.py",
+]

@@ -442,9 +442,10 @@ NodeCoreSoA build_nodes_neuron_compatible_impl(Morph morph,
     std::vector<std::int32_t> sec_parentnode_id(static_cast<std::size_t>(nsec), -1);
     std::vector<std::int32_t> sec_node_base_id(static_cast<std::size_t>(nsec), -1);
 
-    auto push_node = [&](std::int32_t parent, double area, double a, double b, double ri, double a_scale) {
+    auto push_node = [&](std::int32_t parent, double area, double diam, double a, double b, double ri, double a_scale) {
         out.parent_id.push_back(parent);
         out.area.push_back(area);
+        out.diam.push_back(diam);
         out.a.push_back(a);
         out.b.push_back(b);
         out.ri.push_back(ri);
@@ -467,12 +468,12 @@ NodeCoreSoA build_nodes_neuron_compatible_impl(Morph morph,
             // Internal representation: roots have parent_id < 0.
             // Exporters that target NEURON/CoreNEURON file formats may post-process this
             // into the on-disk convention (self-parent root ids).
-            push_node(-1, 100.0, 0.0, 0.0, huge_resistance_Mohm, 0.0);
+            push_node(-1, 100.0, 0.0, 0.0, 0.0, huge_resistance_Mohm, 0.0);
         }
     } else {
         // Synthetic super-root node (the only root in the node graph).
         const auto super_root_node_id = static_cast<std::int32_t>(out.parent_id.size());
-        push_node(-1, 100.0, 0.0, 0.0, huge_resistance_Mohm, 0.0);
+        push_node(-1, 100.0, 0.0, 0.0, 0.0, huge_resistance_Mohm, 0.0);
 
         // One per-root-section parentnode under the super-root.
         for (const auto root_section_id : roots) {
@@ -480,7 +481,7 @@ NodeCoreSoA build_nodes_neuron_compatible_impl(Morph morph,
             root_node_id[static_cast<std::size_t>(root_section_id)] = node_id;
             sec_parentnode_id[static_cast<std::size_t>(root_section_id)] = node_id;
             // Zero coupling to the super-root: this keeps disconnected trees independent.
-            push_node(super_root_node_id, 100.0, 0.0, 0.0, huge_resistance_Mohm, 0.0);
+            push_node(super_root_node_id, 100.0, 0.0, 0.0, 0.0, huge_resistance_Mohm, 0.0);
         }
     }
 
@@ -528,6 +529,7 @@ NodeCoreSoA build_nodes_neuron_compatible_impl(Morph morph,
             const std::int32_t parent = (j == 0) ? parentnode : (base + (j - 1));
             const auto idx = static_cast<std::size_t>(j);
             const double area = cable.area[idx];
+            const double diam = j < sec.nseg ? cable.diam[idx] : 0.0;
             const double rinv = cable.rinv[idx];
             const double ri = cable.ri[idx];
             const double a_scale = (j == 0) ? sec.rallbranch : 1.0;
@@ -536,7 +538,7 @@ NodeCoreSoA build_nodes_neuron_compatible_impl(Morph morph,
             const double a = -1.0e2 * a_scale * rinv / parent_area;
             const double b = -1.0e2 * rinv / area;
 
-            push_node(parent, area, a, b, ri, a_scale);
+            push_node(parent, area, diam, a, b, ri, a_scale);
         }
     }
 

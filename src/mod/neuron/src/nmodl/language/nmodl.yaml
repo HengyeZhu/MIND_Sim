@@ -595,8 +595,8 @@
                               - role:
                                   brief: "MIND Sim rule role"
                                   type: String
-                              - target_inputs:
-                                  brief: "MIND Sim target input names"
+                              - target_exposures:
+                                  brief: "MIND Sim target exposure names"
                                   type: String
                                   vector: true
                               - source_exposures:

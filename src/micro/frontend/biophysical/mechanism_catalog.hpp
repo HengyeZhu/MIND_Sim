@@ -29,6 +29,7 @@ struct MechanismField {
     int array_size{1};
     double default_value{0.0};
     bool is_global{false};
+    bool python_visible{false};
 };
 
 struct MechanismMetadata {

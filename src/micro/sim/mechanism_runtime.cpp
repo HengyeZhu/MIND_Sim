@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -44,6 +45,8 @@ std::unordered_map<std::string, std::vector<double>> g_parameter_defaults_by_mec
 std::unordered_map<std::string,
                    std::unordered_map<std::string, neuron::mechanism::field_role>>
     g_registered_field_roles_by_mechanism;
+std::unordered_map<std::string, std::unordered_set<std::string>>
+    g_python_visible_fields_by_mechanism;
 std::unordered_map<std::string, std::vector<neuron::mechanism::detail::data_field_info>>
     g_neuron_side_fields_by_mechanism;
 std::unordered_map<std::string, std::vector<neuron::mechanism::detail::dparam_field_info>>
@@ -220,6 +223,7 @@ void initialize_fixed_core_slots() {
     g_mechanism_type_by_name.clear();
     g_mechanism_name_by_type.assign(static_cast<std::size_t>(EXTRACELL) + 1, {});
     g_registered_mechanisms.assign(g_mechanism_name_by_type.size(), {});
+    g_python_visible_fields_by_mechanism.clear();
     g_memb_order.clear();
     g_memb_order_rank_by_type.clear();
     g_memb_order_lastion = EXTRACELL + 1;
@@ -304,7 +308,8 @@ void add_or_update_field(mind_sim::micro::sim::CoreRegisteredMechanism& info,
                          int array_size = 1,
                          int data_offset = -1,
                          std::optional<double> default_value = std::nullopt,
-                         bool is_global = false) {
+                         bool is_global = false,
+                         bool python_visible = false) {
     name = normalize_registered_field_name(std::move(name), info.name);
     if (name.empty()) {
         return;
@@ -320,6 +325,7 @@ void add_or_update_field(mind_sim::micro::sim::CoreRegisteredMechanism& info,
             it->default_value = *default_value;
         }
         it->is_global = it->is_global || is_global;
+        it->python_visible = it->python_visible || python_visible;
         return;
     }
     info.fields.push_back(mind_sim::micro::sim::CoreMechanismField{
@@ -329,13 +335,14 @@ void add_or_update_field(mind_sim::micro::sim::CoreRegisteredMechanism& info,
         .data_offset = data_offset,
         .default_value = default_value.value_or(0.0),
         .is_global = is_global,
+        .python_visible = python_visible,
     });
 }
 
 [[nodiscard]] std::vector<neuron::mechanism::detail::data_field_info>
 data_fields_from_mechanism_info(const std::string& mechanism, const char** mechanism_info) {
     std::vector<neuron::mechanism::detail::data_field_info> fields;
-    if (mechanism.empty() || mechanism_info == nullptr || mechanism_info[2] == nullptr) {
+    if (mechanism.empty() || mechanism_info == nullptr) {
         return fields;
     }
     int section = 0;
@@ -406,6 +413,20 @@ void pad_registered_data_fields_to_prop_size(const std::string& mechanism, int p
     return Role::Range;
 }
 
+[[nodiscard]] int field_role_priority(neuron::mechanism::field_role role) {
+    switch (role) {
+    case neuron::mechanism::field_role::parameter:
+        return 0;
+    case neuron::mechanism::field_role::assigned:
+        return 1;
+    case neuron::mechanism::field_role::state:
+        return 2;
+    case neuron::mechanism::field_role::range:
+        return 3;
+    }
+    return 0;
+}
+
 [[nodiscard]] neuron::mechanism::field_role registered_role_for_field(
     const std::string& mechanism,
     const std::string& field,
@@ -418,6 +439,9 @@ void pad_registered_data_fields_to_prop_size(const std::string& mechanism, int p
     if (field_it == mech_it->second.end()) {
         return default_role;
     }
+    if (field_role_priority(default_role) < field_role_priority(field_it->second)) {
+        return default_role;
+    }
     return field_it->second;
 }
 
@@ -426,6 +450,9 @@ void pad_registered_data_fields_to_prop_size(const std::string& mechanism, int p
     using Kind = mind_sim::micro::sim::CoreDParamKind;
     if (semantic == "area") {
         return Kind::Area;
+    }
+    if (semantic == "diam") {
+        return Kind::Diam;
     }
     if (semantic == "pntproc") {
         return Kind::PointProcess;
@@ -651,6 +678,7 @@ void apply_registered_data_fields(mind_sim::micro::sim::CoreRegisteredMechanism&
     const auto defaults_it = g_parameter_defaults_by_mechanism.find(info.name);
     const auto* defaults =
         defaults_it == g_parameter_defaults_by_mechanism.end() ? nullptr : &defaults_it->second;
+    const auto visible_it = g_python_visible_fields_by_mechanism.find(info.name);
     std::vector<mind_sim::micro::sim::CoreMechanismField> global_fields;
     for (const auto& existing : info.fields) {
         if (existing.is_global) {
@@ -661,6 +689,9 @@ void apply_registered_data_fields(mind_sim::micro::sim::CoreRegisteredMechanism&
     int data_offset = 0;
     for (const auto& field : fields_it->second) {
         std::string name = normalize_registered_field_name(field.name, info.name);
+        const bool python_visible =
+            visible_it != g_python_visible_fields_by_mechanism.end() &&
+            visible_it->second.find(name) != visible_it->second.end();
         const auto role =
             role_from_registered_field_role(registered_role_for_field(info.name, name, field.role));
         double default_value = 0.0;
@@ -679,6 +710,8 @@ void apply_registered_data_fields(mind_sim::micro::sim::CoreRegisteredMechanism&
             ordered_fields.back().role = role;
             ordered_fields.back().array_size = field.array_size;
             ordered_fields.back().data_offset = data_offset;
+            ordered_fields.back().python_visible =
+                ordered_fields.back().python_visible || python_visible;
             if (!ordered_fields.back().is_global) {
                 ordered_fields.back().default_value = default_value;
             }
@@ -692,6 +725,7 @@ void apply_registered_data_fields(mind_sim::micro::sim::CoreRegisteredMechanism&
             .data_offset = data_offset,
             .default_value = default_value,
             .is_global = false,
+            .python_visible = python_visible,
         });
         data_offset += field.array_size;
     }
@@ -702,6 +736,7 @@ void apply_registered_data_fields(mind_sim::micro::sim::CoreRegisteredMechanism&
         if (duplicate != ordered_fields.end()) {
             duplicate->is_global = true;
             duplicate->default_value = field.default_value;
+            duplicate->python_visible = duplicate->python_visible || field.python_visible;
             continue;
         }
         field.data_offset = -1;
@@ -850,6 +885,10 @@ void register_data_fields(
         if (!field.name.empty()) {
             fields.push_back(field);
             array_dims.push_back(field.array_size);
+            if (field.role == field_role::range || field.role == field_role::state) {
+                g_python_visible_fields_by_mechanism[mechanism].insert(
+                    normalize_registered_field_name(field.name, mechanism));
+            }
         }
     }
     coreneuron::corenrn.get_array_dims()[type] = std::move(array_dims);
@@ -1035,6 +1074,14 @@ double core_ion_charge(const std::string& ion_mechanism) {
     return coreneuron::nrn_ion_charge(type);
 }
 
+double core_nernst(double ci, double co, double charge, double celsius) {
+    return coreneuron::nrn_nernst(ci, co, charge, celsius);
+}
+
+double core_ghk(double v, double ci, double co, double charge, double celsius) {
+    return coreneuron::nrn_ghk(v, ci, co, charge, celsius);
+}
+
 double core_global_scalar(const std::string& name) {
     const auto it = g_global_scalars_by_name.find(name);
     if (it == g_global_scalars_by_name.end() || it->second == nullptr) {
@@ -1047,12 +1094,14 @@ namespace nrn_registration_mirror {
 
 void record_field_roles_from_mechanism_info(const std::string& mechanism,
                                             const char** mechanism_info) {
-    if (mechanism.empty() || mechanism_info == nullptr || mechanism_info[2] == nullptr) {
+    if (mechanism.empty() || mechanism_info == nullptr) {
         return;
     }
 
     auto& roles = g_registered_field_roles_by_mechanism[mechanism];
     roles.clear();
+    auto& python_visible = g_python_visible_fields_by_mechanism[mechanism];
+    python_visible.clear();
     int section = 0;
     for (int index = 2; mechanism_info[index] != nullptr || section < 3; ++index) {
         if (mechanism_info[index] == nullptr) {
@@ -1070,7 +1119,13 @@ void record_field_roles_from_mechanism_info(const std::string& mechanism,
         } else if (section == 2) {
             role = neuron::mechanism::field_role::state;
         }
-        roles[normalize_registered_field_name(mechanism_info[index], mechanism)] = role;
+        const auto name = normalize_registered_field_name(mechanism_info[index], mechanism);
+        const auto existing = roles.find(name);
+        if (existing == roles.end() ||
+            field_role_priority(role) < field_role_priority(existing->second)) {
+            roles[name] = role;
+        }
+        python_visible.insert(name);
     }
 }
 

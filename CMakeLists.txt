@@ -2,25 +2,38 @@ cmake_minimum_required(VERSION 3.20)
 
 set(MIND_SIM_USE_NVHPC_DEFAULT ON CACHE BOOL "Prefer NVIDIA HPC SDK nvc++ when no CMake C++ compiler is specified")
 
-if(MIND_SIM_USE_NVHPC_DEFAULT AND NOT DEFINED CMAKE_CXX_COMPILER)
-  set(_mind_sim_nvhpc_cxx)
-  if(DEFINED ENV{NVHPC_CXX} AND EXISTS "$ENV{NVHPC_CXX}")
-    set(_mind_sim_nvhpc_cxx "$ENV{NVHPC_CXX}")
-  elseif(DEFINED ENV{NVHPC_HOME} AND EXISTS "$ENV{NVHPC_HOME}/bin/nvc++")
-    set(_mind_sim_nvhpc_cxx "$ENV{NVHPC_HOME}/bin/nvc++")
-  else()
-    file(GLOB _mind_sim_nvhpc_candidates
-      "/opt/nvidia/hpc_sdk/Linux_x86_64/*/compilers/bin/nvc++"
-    )
-    if(_mind_sim_nvhpc_candidates)
-      list(SORT _mind_sim_nvhpc_candidates COMPARE NATURAL ORDER DESCENDING)
-      list(GET _mind_sim_nvhpc_candidates 0 _mind_sim_nvhpc_cxx)
-    endif()
+set(_mind_sim_default_nvhpc_cxx)
+if(DEFINED ENV{NVHPC_CXX} AND EXISTS "$ENV{NVHPC_CXX}")
+  set(_mind_sim_default_nvhpc_cxx "$ENV{NVHPC_CXX}")
+elseif(DEFINED ENV{NVHPC_HOME} AND EXISTS "$ENV{NVHPC_HOME}/bin/nvc++")
+  set(_mind_sim_default_nvhpc_cxx "$ENV{NVHPC_HOME}/bin/nvc++")
+else()
+  file(GLOB _mind_sim_nvhpc_candidates
+    "/opt/nvidia/hpc_sdk/Linux_x86_64/*/compilers/bin/nvc++"
+  )
+  if(_mind_sim_nvhpc_candidates)
+    list(SORT _mind_sim_nvhpc_candidates COMPARE NATURAL ORDER DESCENDING)
+    list(GET _mind_sim_nvhpc_candidates 0 _mind_sim_default_nvhpc_cxx)
   endif()
-  if(_mind_sim_nvhpc_cxx)
-    get_filename_component(_mind_sim_nvhpc_cxx "${_mind_sim_nvhpc_cxx}" REALPATH)
-    set(_mind_sim_nvhpc_wrapper "${CMAKE_BINARY_DIR}/mind_sim_nvhpc_cxx")
-    file(WRITE "${_mind_sim_nvhpc_wrapper}" [=[
+endif()
+
+set(_mind_sim_nvhpc_cxx)
+if(DEFINED CMAKE_CXX_COMPILER AND CMAKE_CXX_COMPILER MATCHES "(^|/)(nvc\\+\\+|pgc\\+\\+)$")
+  set(_mind_sim_nvhpc_cxx "${CMAKE_CXX_COMPILER}")
+elseif(DEFINED CMAKE_CXX_COMPILER AND CMAKE_CXX_COMPILER MATCHES "(^|/)mind_sim_nvhpc_cxx$")
+  if(DEFINED MIND_SIM_CXX_COMPILER_FOR_MODS AND NOT MIND_SIM_CXX_COMPILER_FOR_MODS MATCHES "(^|/)mind_sim_nvhpc_cxx$")
+    set(_mind_sim_nvhpc_cxx "${MIND_SIM_CXX_COMPILER_FOR_MODS}")
+  else()
+    set(_mind_sim_nvhpc_cxx "${_mind_sim_default_nvhpc_cxx}")
+  endif()
+elseif(MIND_SIM_USE_NVHPC_DEFAULT AND NOT DEFINED CMAKE_CXX_COMPILER)
+  set(_mind_sim_nvhpc_cxx "${_mind_sim_default_nvhpc_cxx}")
+endif()
+
+if(_mind_sim_nvhpc_cxx)
+  get_filename_component(_mind_sim_nvhpc_cxx "${_mind_sim_nvhpc_cxx}" REALPATH)
+  set(_mind_sim_nvhpc_wrapper "${CMAKE_BINARY_DIR}/mind_sim_nvhpc_cxx")
+  file(WRITE "${_mind_sim_nvhpc_wrapper}" [=[
 #!/usr/bin/env bash
 set -e
 if [[ -n "${CONDA_PREFIX:-}" && -n "${PATH:-}" ]]; then
@@ -35,25 +48,33 @@ if [[ -n "${CONDA_PREFIX:-}" && -n "${PATH:-}" ]]; then
       fi
     fi
   done
+  if [[ -z "${clean_path}" ]]; then
+    clean_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  fi
   export PATH="${clean_path}"
 fi
-unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS LD
+unset CC CXX GCC LD CFLAGS CXXFLAGS CPPFLAGS LDFLAGS LIBRARY_PATH COMPILER_PATH GCC_EXEC_PREFIX
 exec "__MIND_SIM_NVHPC_CXX__" "$@"
 ]=])
-    file(READ "${_mind_sim_nvhpc_wrapper}" _mind_sim_nvhpc_wrapper_text)
-    string(REPLACE "__MIND_SIM_NVHPC_CXX__" "${_mind_sim_nvhpc_cxx}" _mind_sim_nvhpc_wrapper_text "${_mind_sim_nvhpc_wrapper_text}")
-    file(WRITE "${_mind_sim_nvhpc_wrapper}" "${_mind_sim_nvhpc_wrapper_text}")
-    file(CHMOD "${_mind_sim_nvhpc_wrapper}"
-      PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
-    )
-    set(ENV{CFLAGS} "")
-    set(ENV{CXXFLAGS} "")
-    set(ENV{CPPFLAGS} "")
-    set(ENV{LDFLAGS} "")
-    set(ENV{LD} "")
-    set(CMAKE_CXX_COMPILER "${_mind_sim_nvhpc_wrapper}" CACHE FILEPATH "MIND_Sim NVHPC compiler wrapper")
-    set(MIND_SIM_CXX_COMPILER_FOR_MODS "${_mind_sim_nvhpc_cxx}" CACHE FILEPATH "C++ compiler used by mind_nrnivmodl")
-  endif()
+  file(READ "${_mind_sim_nvhpc_wrapper}" _mind_sim_nvhpc_wrapper_text)
+  string(REPLACE "__MIND_SIM_NVHPC_CXX__" "${_mind_sim_nvhpc_cxx}" _mind_sim_nvhpc_wrapper_text "${_mind_sim_nvhpc_wrapper_text}")
+  file(WRITE "${_mind_sim_nvhpc_wrapper}" "${_mind_sim_nvhpc_wrapper_text}")
+  file(CHMOD "${_mind_sim_nvhpc_wrapper}"
+    PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
+  )
+  set(ENV{CC} "")
+  set(ENV{CXX} "")
+  set(ENV{GCC} "")
+  set(ENV{CFLAGS} "")
+  set(ENV{CXXFLAGS} "")
+  set(ENV{CPPFLAGS} "")
+  set(ENV{LDFLAGS} "")
+  set(ENV{LD} "")
+  set(ENV{LIBRARY_PATH} "")
+  set(ENV{COMPILER_PATH} "")
+  set(ENV{GCC_EXEC_PREFIX} "")
+  set(CMAKE_CXX_COMPILER "${_mind_sim_nvhpc_wrapper}" CACHE FILEPATH "MIND_Sim NVHPC compiler wrapper" FORCE)
+  set(MIND_SIM_CXX_COMPILER_FOR_MODS "${_mind_sim_nvhpc_cxx}" CACHE FILEPATH "C++ compiler used by mind_nrnivmodl" FORCE)
 endif()
 
 project(mind_sim LANGUAGES CXX)
@@ -451,10 +472,7 @@ set(MIND_SIM_COSIM_TRANSFORM_SOURCES
 
 set(MIND_SIM_MACRO_SOURCES
   src/macro/frontend/connectivity.cpp
-  src/macro/frontend/local_connectivity.cpp
-  src/macro/frontend/node_to_roi_map.cpp
   src/macro/frontend/network.cpp
-  src/macro/frontend/network_field.cpp
   src/macro/frontend/network_micro.cpp
   src/macro/sim/model.cpp
   src/macro/sim/runtime_core.cpp
@@ -477,6 +495,7 @@ set(MIND_SIM_MICRO_SOURCES
   src/micro/sim/device.cpp
   src/micro/sim/mechanism_runtime.cpp
   src/micro/sim/micro_runtime.cpp
+  src/micro/sim/recording.cpp
 )
 
 set(MIND_SIM_IO_SOURCES
@@ -736,9 +755,6 @@ mind_sim_add_python_test(mind_sim_external_spike_input_reuse_check tests/micro/e
 mind_sim_add_python_test(mind_sim_coupling_check tests/macro/coupling_check.py)
 mind_sim_add_python_test(mind_sim_connectivity_loader_check tests/macro/connectivity_loader_check.py)
 mind_sim_add_python_test(mind_sim_explicit_rule_fields_check tests/macro/explicit_rule_fields_check.py)
-mind_sim_add_python_test(mind_sim_node_to_roi_map_file_check tests/macro/node_to_roi_map_file_check.py)
-mind_sim_add_python_test(mind_sim_neural_field_check tests/macro/neural_field_check.py)
-mind_sim_add_python_test(mind_sim_neural_field_global_coupling_check tests/macro/neural_field_global_coupling_check.py)
 
 add_custom_target(
   mind_sim_check

@@ -148,6 +148,8 @@ class MicroFrontendModel {
 
     void set_celsius(double celsius);
     [[nodiscard]] double celsius() const noexcept { return section_properties_.celsius; }
+    void set_secondorder(int secondorder);
+    [[nodiscard]] int secondorder() const noexcept { return core_neuron_data_->secondorder; }
 
     void set_device(const std::string& device);
     void load_mech(std::string path);
@@ -156,6 +158,8 @@ class MicroFrontendModel {
     }
     [[nodiscard]] int ion_register(std::string ion, double charge);
     [[nodiscard]] double ion_charge(const std::string& ion_mechanism) const;
+    [[nodiscard]] double nernst(double ci, double co, double charge) const;
+    [[nodiscard]] double ghk(double v, double ci, double co, double charge) const;
     void set_global_scalar(const std::string& name, double value);
     [[nodiscard]] double global_scalar(const std::string& name) const;
 
@@ -236,8 +240,20 @@ class MicroFrontendModel {
     [[nodiscard]] int netcon_runtime_index(int connection_id) const;
     [[nodiscard]] int netcon_target_event_target_id(int connection_id) const;
     [[nodiscard]] int netcon_source_event_target_id(int connection_id) const;
+    [[nodiscard]] int netcon_source_spike_input_id(int connection_id) const;
+    void schedule_spike_input_event(int spike_input_id, double time);
+    void schedule_netcon_event(int connection_id, double time);
+    [[nodiscard]] const std::vector<double>& spike_times() const noexcept;
+    [[nodiscard]] const std::vector<int>& spike_gids() const noexcept;
+    void clear_spikes() noexcept;
     [[nodiscard]] double read_variable(const VariableRef& ref) const;
     [[nodiscard]] double* variable_pointer(const VariableRef& ref);
+    [[nodiscard]] VariableRef location_variable_ref_from_python_attr(int gid,
+                                                                     int section_index,
+                                                                     double x,
+                                                                     const std::string& attr);
+    [[nodiscard]] VariableRef object_variable_ref_from_python_attr(int insert_id,
+                                                                   const std::string& attr);
 
     int build_microcircuit();
     int finitialize(double v_init);
@@ -315,6 +331,7 @@ class MicroFrontendModel {
         std::make_shared<mind_sim::micro::sim::CoreNeuronData>()};
     mind_sim::micro::sim::MicroDeviceConfig device_config_{};
     std::unique_ptr<mind_sim::micro::sim::MicroRuntime> runtime_backend_{};
+    mind_sim::micro::sim::MicroSpikeTable recorded_spikes_{};
     std::vector<int> morph_parent_index_{};
     std::vector<int> original_node_gid_{};
     std::vector<int> original_node_thread_{};
@@ -324,6 +341,7 @@ class MicroFrontendModel {
     std::vector<int> insert_runtime_thread_{};
     std::vector<std::size_t> insert_runtime_row_{};
     std::vector<double> morph_area_{};
+    std::vector<double> morph_diam_{};
     std::vector<int> runtime_node_by_original_{};
     std::vector<double> axial_a_ra1_{};
     std::vector<double> axial_b_ra1_{};

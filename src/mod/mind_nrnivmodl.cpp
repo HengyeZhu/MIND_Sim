@@ -366,10 +366,31 @@ void write_text(const fs::path& path, const std::string& text) {
     if (!using_nvhpc_compiler()) {
         return {};
     }
+    const char* vars_to_unset[] = {
+        "CC",
+        "CXX",
+        "GCC",
+        "LD",
+        "CFLAGS",
+        "CXXFLAGS",
+        "CPPFLAGS",
+        "LDFLAGS",
+        "LIBRARY_PATH",
+        "COMPILER_PATH",
+        "GCC_EXEC_PREFIX",
+    };
+
+    std::ostringstream prefix;
+    prefix << "/usr/bin/env";
+    for (const char* var: vars_to_unset) {
+        prefix << " -u " << var;
+    }
+
     const char* path_env = std::getenv("PATH");
     const char* conda_prefix_env = std::getenv("CONDA_PREFIX");
     if (path_env == nullptr || conda_prefix_env == nullptr) {
-        return {};
+        prefix << ' ';
+        return prefix.str();
     }
 
     const fs::path conda_bin = fs::path{conda_prefix_env} / "bin";
@@ -388,7 +409,8 @@ void write_text(const fs::path& path, const std::string& text) {
         begin = end + 1;
     }
     if (kept.empty()) {
-        return {};
+        prefix << " PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' ";
+        return prefix.str();
     }
 
     std::ostringstream joined;
@@ -398,7 +420,8 @@ void write_text(const fs::path& path, const std::string& text) {
         }
         joined << kept[i];
     }
-    return "PATH=" + shell_quote_text(joined.str()) + " ";
+    prefix << " PATH=" << shell_quote_text(joined.str()) << ' ';
+    return prefix.str();
 }
 
 void run(const std::vector<std::string>& command) {
@@ -416,9 +439,14 @@ void run(const std::vector<std::string>& command) {
     }
 }
 
-void run_in_dir(const fs::path& directory, const std::vector<std::string>& command) {
+void run_in_dir(const fs::path& directory,
+                const std::vector<std::string>& command,
+                bool use_subprocess_env_prefix = true) {
     std::ostringstream shell;
-    shell << "cd " << shell_quote(directory) << " && " << subprocess_env_prefix();
+    shell << "cd " << shell_quote(directory) << " && ";
+    if (use_subprocess_env_prefix) {
+        shell << subprocess_env_prefix();
+    }
     for (std::size_t i = 0; i < command.size(); ++i) {
         if (i != 0) {
             shell << ' ';
@@ -700,11 +728,19 @@ void validate_micro_output_net_receive_ast(const JsonValue& ast) {
     return {};
 }
 
-[[nodiscard]] fs::path resolved_nmodl_path() {
-    if (auto path = existing_or_empty(fs::path{MIND_SIM_NMODL_PATH}); !path.empty()) {
+[[nodiscard]] fs::path existing_file_or_empty(const fs::path& path) {
+    std::error_code ec;
+    if (fs::is_regular_file(path, ec)) {
         return path;
     }
-    if (auto path = existing_or_empty(current_executable_dir() / "nmodl"); !path.empty()) {
+    return {};
+}
+
+[[nodiscard]] fs::path resolved_nmodl_path() {
+    if (auto path = existing_file_or_empty(current_executable_dir() / "nmodl"); !path.empty()) {
+        return path;
+    }
+    if (auto path = existing_file_or_empty(fs::path{MIND_SIM_NMODL_PATH}); !path.empty()) {
         return path;
     }
     throw std::runtime_error("could not locate MIND-aware nmodl executable");
@@ -730,6 +766,29 @@ void validate_micro_output_net_receive_ast(const JsonValue& ast) {
     throw std::runtime_error("could not locate MIND_Sim mechanism include directory");
 }
 
+[[nodiscard]] fs::path resolved_randoms_include_dir() {
+    if (auto path = existing_or_empty(resolved_source_include_dir() / "micro" / "sim" /
+                                      "coreneuron" / "utils" / "randoms");
+        !path.empty()) {
+        return path;
+    }
+    throw std::runtime_error("could not locate CoreNEURON randoms include directory");
+}
+
+[[nodiscard]] fs::path resolved_eigen_include_dir() {
+    if (auto path = existing_or_empty(fs::path{MIND_SIM_SOURCE_DIR} / "src" / "mod" /
+                                      "neuron" / "external" / "eigen");
+        !path.empty()) {
+        return path;
+    }
+    if (auto path = existing_or_empty(packaged_root_dir() / "include" / "src" / "mod" /
+                                      "neuron" / "external" / "eigen");
+        !path.empty()) {
+        return path;
+    }
+    throw std::runtime_error("could not locate Eigen include directory");
+}
+
 void compile_object_file(const fs::path& source_path, const fs::path& object_path) {
     fs::create_directories(object_path.parent_path());
     run({
@@ -740,6 +799,8 @@ void compile_object_file(const fs::path& source_path, const fs::path& object_pat
         MIND_SIM_MOD_CXX_FLAGS,
         include_arg(resolved_source_include_dir()),
         include_arg(resolved_mechanism_include_dir()),
+        include_arg(resolved_randoms_include_dir()),
+        include_arg(resolved_eigen_include_dir()),
         "-DCORENEURON_BUILD",
         "-DCORENRN_BUILD=1",
         "-DVECTORIZE=1",
@@ -860,7 +921,7 @@ struct NmodlGenerated {
         "--inline",
         "codegen",
         "--force",
-    });
+    }, false);
 
     const std::string name = mod.stem().string();
     const fs::path generated_cpp = generated_dir / (name + ".cpp");
@@ -906,7 +967,6 @@ void write_rule_registry_source(const fs::path& path, const std::vector<MindRule
                 << (rule.role == "MICRO2MACRO" ? rule.apply_symbol : "nullptr") << ",\n";
             out << "        .region_apply = "
                 << (rule.role == "REGION" ? rule.apply_symbol : "nullptr") << ",\n";
-            out << "        .neural_field_apply = nullptr,\n";
             out << "    },\n";
         }
         out << "};\n\n";

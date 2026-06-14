@@ -63,8 +63,7 @@ void net_sem_from_gpu(int sendtype,
                       int ipnt,
                       double td,
                       double flag) {
-    (void) ith;
-    NrnThread& nt = *nrn_threads;
+    NrnThread& nt = nrn_threads[ith];
     Point_process* pnt = (Point_process*) nt._vdata[ipnt];
     if (sendtype == 0) {
         net_send(nt._vdata + i_vdata, weight_index_, pnt, td, flag);
@@ -107,17 +106,23 @@ void artcell_net_send(void** v, int weight_index_, Point_process* pnt, double td
 
 void net_event(Point_process* pnt, double time) {
     NrnThread* nt = PP2NT(pnt);
-    PreSyn* ps = nt->presyns +
-                 nt->pnt2presyn_ix[corenrn.get_pnttype2presyn()[pnt->_type]][pnt->_i_instance];
-    if (ps) {
-        if (time < nt->_t) {
-            char buf[100];
-            std::snprintf(buf, sizeof(buf), "net_event time-t = %g", time - nt->_t);
-            ps->pr(buf, time, net_cvode_instance);
-            hoc_execerror("net_event time < t", 0);
-        }
-        ps->send(time, net_cvode_instance, nt);
+    const int presyn_type = corenrn.get_pnttype2presyn()[pnt->_type];
+    if (presyn_type < 0 || nt->pnt2presyn_ix == nullptr ||
+        nt->pnt2presyn_ix[presyn_type] == nullptr) {
+        return;
     }
+    const int presyn_index = nt->pnt2presyn_ix[presyn_type][pnt->_i_instance];
+    if (presyn_index < 0) {
+        return;
+    }
+    PreSyn* ps = nt->presyns + presyn_index;
+    if (time < nt->_t) {
+        char buf[100];
+        std::snprintf(buf, sizeof(buf), "net_event time-t = %g", time - nt->_t);
+        ps->pr(buf, time, net_cvode_instance);
+        hoc_execerror("net_event time < t", 0);
+    }
+    ps->send(time, net_cvode_instance, nt);
 }
 
 NetCvodeThreadData::NetCvodeThreadData()

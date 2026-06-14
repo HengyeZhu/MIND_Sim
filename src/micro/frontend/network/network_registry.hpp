@@ -97,6 +97,8 @@ struct EventSourceSlot {
     RealNetConSourceKey real_source{};
     int source_event_target_id{-1};
     int spike_input_id{-1};
+    int output_gid{-1};
+    bool explicit_output_gid{false};
     double threshold{10.0};
     int fanout_count{0};
 };
@@ -230,6 +232,7 @@ public:
     [[nodiscard]] const std::vector<double>& event_edge_weights() const { return event_edge_weights_; }
     [[nodiscard]] std::size_t netcon_weight_count(int connection_id) const;
     [[nodiscard]] double get_netcon_weight(int connection_id, int array_index) const;
+    [[nodiscard]] int netcon_weight_offset(int connection_id, int array_index) const;
     void set_netcon_weight(int connection_id, int array_index, double value);
     [[nodiscard]] double get_netcon_threshold(int connection_id) const;
     void set_netcon_threshold(int connection_id, double value);
@@ -237,6 +240,7 @@ public:
     void set_netcon_delay(int connection_id, double value);
     [[nodiscard]] int get_netcon_target_event_target_id(int connection_id) const;
     [[nodiscard]] int get_netcon_source_event_target_id(int connection_id) const;
+    [[nodiscard]] int get_netcon_source_spike_input_id(int connection_id) const;
     [[nodiscard]] RealNetConSourceKey get_real_netcon_source_key(int connection_id) const;
     int register_spike_source(int sid,
                               int source_gid,

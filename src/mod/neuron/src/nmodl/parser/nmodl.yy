@@ -345,6 +345,9 @@
 %right  "^"
 
 %{
+    #include <algorithm>
+    #include <cctype>
+
     #include "lexer/nmodl_lexer.hpp"
     #include "parser/nmodl_driver.hpp"
     #include "parser/verbatim_driver.hpp"
@@ -2304,20 +2307,28 @@ nmodl::ast::MindBlock* parse_mind_block(std::string str) {
         return value.substr(first, last - first + 1);
     };
 
-    auto split_names = [&trim](std::string value) {
-        nmodl::ast::StringVector result;
+    auto split_values = [&trim](std::string value) {
+        std::vector<std::string> result;
         std::size_t start = 0;
         while (start <= value.size()) {
             const auto comma = value.find(',', start);
             const auto end = comma == std::string::npos ? value.size() : comma;
             auto item = trim(value.substr(start, end - start));
             if (!item.empty()) {
-                result.emplace_back(std::make_shared<nmodl::ast::String>(item));
+                result.push_back(item);
             }
             if (comma == std::string::npos) {
                 break;
             }
             start = comma + 1;
+        }
+        return result;
+    };
+
+    auto split_names = [&split_values](std::string value) {
+        nmodl::ast::StringVector result;
+        for (auto& item: split_values(std::move(value))) {
+            result.emplace_back(std::make_shared<nmodl::ast::String>(std::move(item)));
         }
         return result;
     };
@@ -2333,9 +2344,69 @@ nmodl::ast::MindBlock* parse_mind_block(std::string str) {
         str.pop_back();
     }
 
+    auto upper = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+            return static_cast<char>(std::toupper(c));
+        });
+        return value;
+    };
+
+    auto encoded_binding = [&trim, &upper](const std::string& op,
+                                           const std::string& endpoint,
+                                           const std::string& value) {
+        std::istringstream fields(value);
+        std::vector<std::string> tokens;
+        std::string token;
+        while (fields >> token) {
+            tokens.push_back(token);
+        }
+        if (tokens.empty()) {
+            throw std::runtime_error("empty MIND " + op + "_" + endpoint + " binding");
+        }
+        if (tokens.size() != 1 && !(tokens.size() == 3 && upper(tokens[1]) == "AS")) {
+            throw std::runtime_error("MIND " + op + "_" + endpoint + " binding must be '<exposure>' or '<exposure> AS <variable>': " + value);
+        }
+        std::string exposure = trim(tokens[0]);
+        std::string variable = tokens.size() == 1 ? exposure : trim(tokens[2]);
+        if (exposure.empty() || variable.empty()) {
+            throw std::runtime_error("MIND " + op + "_" + endpoint + " binding has empty exposure or variable");
+        }
+        return op + "|" + exposure + "|" + variable;
+    };
+
+    auto split_bindings = [&split_values, &encoded_binding](const std::string& op,
+                                                            const std::string& endpoint,
+                                                            std::string value) {
+        nmodl::ast::StringVector result;
+        for (const auto& item: split_values(std::move(value))) {
+            result.emplace_back(std::make_shared<nmodl::ast::String>(encoded_binding(op, endpoint, item)));
+        }
+        return result;
+    };
+
+    auto binding_has_op = [](const std::shared_ptr<nmodl::ast::String>& value, const std::string& op) {
+        const auto encoded = value->eval();
+        return encoded.rfind(op + "|", 0) == 0;
+    };
+
+    auto all_bindings_are = [&binding_has_op](const nmodl::ast::StringVector& values, const std::string& op) {
+        return std::all_of(values.begin(), values.end(), [&](const auto& value) {
+            return binding_has_op(value, op);
+        });
+    };
+
+    auto any_binding_is = [&binding_has_op](const nmodl::ast::StringVector& values, const std::string& op) {
+        return std::any_of(values.begin(), values.end(), [&](const auto& value) {
+            return binding_has_op(value, op);
+        });
+    };
+
     std::string role;
-    nmodl::ast::StringVector target_inputs;
+    nmodl::ast::StringVector exposures;
     nmodl::ast::StringVector source_exposures;
+    nmodl::ast::StringVector target_exposures;
+    bool saw_exposure = false;
+    bool saw_read_write = false;
 
     std::istringstream input(str);
     std::string line;
@@ -2355,12 +2426,26 @@ nmodl::ast::MindBlock* parse_mind_block(std::string str) {
                 throw std::runtime_error("MIND ROLE is empty");
             }
             role = rest;
-        } else if (key == "TARGET_INPUT") {
+        } else if (key == "EXPOSURE") {
             auto names = split_names(rest);
-            target_inputs.insert(target_inputs.end(), names.begin(), names.end());
-        } else if (key == "SOURCE_EXPOSURE") {
-            auto names = split_names(rest);
+            exposures.insert(exposures.end(), names.begin(), names.end());
+            saw_exposure = true;
+        } else if (key == "READ_SOURCE") {
+            auto names = split_bindings("READ", "SOURCE", rest);
             source_exposures.insert(source_exposures.end(), names.begin(), names.end());
+            saw_read_write = true;
+        } else if (key == "READ_TARGET") {
+            auto names = split_bindings("READ", "TARGET", rest);
+            target_exposures.insert(target_exposures.end(), names.begin(), names.end());
+            saw_read_write = true;
+        } else if (key == "WRITE_SOURCE") {
+            auto names = split_bindings("WRITE", "SOURCE", rest);
+            source_exposures.insert(source_exposures.end(), names.begin(), names.end());
+            saw_read_write = true;
+        } else if (key == "WRITE_TARGET") {
+            auto names = split_bindings("WRITE", "TARGET", rest);
+            target_exposures.insert(target_exposures.end(), names.begin(), names.end());
+            saw_read_write = true;
         } else {
             throw std::runtime_error("unknown MIND key: " + key);
         }
@@ -2369,8 +2454,38 @@ nmodl::ast::MindBlock* parse_mind_block(std::string str) {
     if (role.empty()) {
         throw std::runtime_error("MIND block is missing ROLE");
     }
+    const auto role_key = upper(role);
+    if (role_key == "REGION") {
+        if (saw_read_write) {
+            throw std::runtime_error("MIND REGION uses EXPOSURE, not READ or WRITE");
+        }
+        source_exposures.insert(source_exposures.end(), exposures.begin(), exposures.end());
+    } else if (role_key == "MACRO2MACRO") {
+        if (saw_exposure) {
+            throw std::runtime_error("MIND MACRO2MACRO uses READ and WRITE, not EXPOSURE");
+        }
+        if (!any_binding_is(source_exposures, "WRITE") && !any_binding_is(target_exposures, "WRITE")) {
+            throw std::runtime_error("MIND MACRO2MACRO must use WRITE_SOURCE or WRITE_TARGET");
+        }
+    } else if (role_key == "MACRO2MICRO") {
+        if (saw_exposure) {
+            throw std::runtime_error("MIND MACRO2MICRO uses READ_SOURCE, not EXPOSURE");
+        }
+        if (!target_exposures.empty() || !all_bindings_are(source_exposures, "READ")) {
+            throw std::runtime_error("MIND MACRO2MICRO supports READ_SOURCE only");
+        }
+    } else if (role_key == "MICRO2MACRO") {
+        if (saw_exposure) {
+            throw std::runtime_error("MIND MICRO2MACRO uses WRITE_TARGET, not EXPOSURE");
+        }
+        if (!source_exposures.empty() || !all_bindings_are(target_exposures, "WRITE")) {
+            throw std::runtime_error("MIND MICRO2MACRO supports WRITE_TARGET only");
+        }
+    } else {
+        throw std::runtime_error("unsupported MIND ROLE " + role);
+    }
     return new nmodl::ast::MindBlock(
-        new nmodl::ast::String(role), target_inputs, source_exposures);
+        new nmodl::ast::String(role), target_exposures, source_exposures);
 }
 
 /** Bison expects error handler for parser.

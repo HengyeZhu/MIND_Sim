@@ -49,6 +49,7 @@ namespace {
             .array_size = source.array_size,
             .default_value = source.default_value,
             .is_global = source.is_global,
+            .python_visible = source.python_visible,
         });
     }
     metadata.field_data_offsets.reserve(metadata.fields.size());

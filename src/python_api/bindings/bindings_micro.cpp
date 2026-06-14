@@ -1,6 +1,7 @@
 #include "python_api/bindings/bindings.hpp"
 
 #include <algorithm>
+#include <string_view>
 
 namespace mind_sim::python_api::bindings {
 
@@ -271,6 +272,23 @@ void bind_micro(nb::module_& m) {
              nb::arg("mech") = "global",
              nb::arg("array_index") = -1)
         .def_prop_ro("_ref_v", &SectionView::ref_v)
+        .def("__getattr__",
+             [](const SectionView& sec, const std::string& key) -> nb::object {
+                 if (key.starts_with("_ref_")) {
+                     try {
+                         return nb::cast(sec.ref_attr(key));
+                     } catch (const std::runtime_error& e) {
+                         const std::string message = e.what();
+                         constexpr std::string_view prefix =
+                             "unknown section variable reference attribute:";
+                         if (message.rfind(prefix, 0) == 0) {
+                             throw nb::attribute_error(message.c_str());
+                         }
+                         throw;
+                     }
+                 }
+                 throw nb::attribute_error(("section_view has no attribute '" + key + "'").c_str());
+             })
         .def("__repr__",
              [](const SectionView& sec) {
                  return "<mind_sim.section_view gid=" + std::to_string(sec.gid) +
@@ -279,17 +297,35 @@ void bind_micro(nb::module_& m) {
 
     nb::class_<VariableRefView>(m, "variable_ref")
         .def("value", &VariableRefView::value)
+        .def("set", &VariableRefView::set, nb::arg("value"))
+        .def("__getitem__", &VariableRefView::at)
         .def("__repr__", [](const VariableRefView&) { return "<mind_sim.variable_ref>"; });
 
     nb::class_<PointProcessView>(m, "point_process")
         .def_ro("insert_id", &PointProcessView::insert_id)
         .def("ref", &PointProcessView::ref, nb::arg("var"), nb::arg("array_index") = -1)
         .def("__getattr__",
-             [](const PointProcessView& mechanism, const std::string& key) {
-                 return mechanism.get_var(key);
+             [](const PointProcessView& mechanism, const std::string& key) -> nb::object {
+                 if (key.starts_with("_ref_")) {
+                     try {
+                         return nb::cast(mechanism.ref_attr(key));
+                     } catch (const std::runtime_error& e) {
+                         const std::string message = e.what();
+                         constexpr std::string_view prefix =
+                             "unknown object variable reference attribute:";
+                         if (message.rfind(prefix, 0) == 0) {
+                             throw nb::attribute_error(message.c_str());
+                         }
+                         throw;
+                     }
+                 }
+                 return nb::cast(mechanism.get_var(key));
              })
         .def("__setattr__",
              [](PointProcessView& mechanism, const std::string& key, nb::handle value) {
+                 if (key.starts_with("_ref_")) {
+                     throw nb::attribute_error(("point_process attribute '" + key + "' is read-only").c_str());
+                 }
                  mechanism.set_var(key, nb::cast<double>(value));
              })
         .def("__repr__",
@@ -301,11 +337,27 @@ void bind_micro(nb::module_& m) {
         .def_ro("insert_id", &ArtificialCellView::insert_id)
         .def("ref", &ArtificialCellView::ref, nb::arg("var"), nb::arg("array_index") = -1)
         .def("__getattr__",
-             [](const ArtificialCellView& mechanism, const std::string& key) {
-                 return mechanism.get_var(key);
+             [](const ArtificialCellView& mechanism, const std::string& key) -> nb::object {
+                 if (key.starts_with("_ref_")) {
+                     try {
+                         return nb::cast(mechanism.ref_attr(key));
+                     } catch (const std::runtime_error& e) {
+                         const std::string message = e.what();
+                         constexpr std::string_view prefix =
+                             "unknown object variable reference attribute:";
+                         if (message.rfind(prefix, 0) == 0) {
+                             throw nb::attribute_error(message.c_str());
+                         }
+                         throw;
+                     }
+                 }
+                 return nb::cast(mechanism.get_var(key));
              })
         .def("__setattr__",
              [](ArtificialCellView& mechanism, const std::string& key, nb::handle value) {
+                 if (key.starts_with("_ref_")) {
+                     throw nb::attribute_error(("artificial_cell attribute '" + key + "' is read-only").c_str());
+                 }
                  mechanism.set_var(key, nb::cast<double>(value));
              })
         .def("__repr__",
@@ -333,9 +385,19 @@ void bind_micro(nb::module_& m) {
         .def("wcnt", &NetConView::wcnt)
         .def_prop_rw("delay", &NetConView::get_delay, &NetConView::set_delay)
         .def_prop_rw("threshold", &NetConView::get_threshold, &NetConView::set_threshold)
+        .def("event", &NetConView::event, nb::arg("time"))
         .def("__repr__",
              [](const NetConView& nc) {
                  return "<mind_sim.netcon id=" + std::to_string(nc.connection_id) + ">";
+             });
+
+    nb::class_<SpikeInputView>(m, "spike_input")
+        .def_prop_ro("id", &SpikeInputView::id)
+        .def_prop_ro("runtime_index", &SpikeInputView::runtime_index)
+        .def("event", &SpikeInputView::event, nb::arg("time"))
+        .def("__repr__",
+             [](const SpikeInputView& input) {
+                 return "<mind_sim.spike_input id=" + std::to_string(input.macro2micro_id) + ">";
              });
 
     nb::class_<NetworkView>(m, "network")
@@ -364,12 +426,43 @@ void bind_micro(nb::module_& m) {
              nb::arg("delay"))
         .def("event_connect",
              [](const NetworkView& network,
+                const ArtificialCellView& source,
+                const ArtificialCellView& post,
+                double weight,
+                double delay) {
+                 return network.event_connect(source, post, weight, delay);
+             },
+             nb::arg("source"),
+             nb::arg("post"),
+             nb::arg("weight"),
+             nb::arg("delay"))
+        .def("event_connect",
+             [](const NetworkView& network,
                 const PointProcessView& source,
                 const PointProcessView& post,
                 double weight,
                 double delay) {
                  return network.event_connect(source, post, weight, delay);
              },
+             nb::arg("source"),
+             nb::arg("post"),
+             nb::arg("weight"),
+             nb::arg("delay"))
+        .def("event_connect",
+             [](const NetworkView& network,
+                const PointProcessView& source,
+                const ArtificialCellView& post,
+                double weight,
+                double delay) {
+                 return network.event_connect(source, post, weight, delay);
+             },
+             nb::arg("source"),
+             nb::arg("post"),
+             nb::arg("weight"),
+             nb::arg("delay"))
+        .def("spike_input", &NetworkView::spike_input)
+        .def("macro_connect",
+             &NetworkView::macro_connect,
              nb::arg("source"),
              nb::arg("post"),
              nb::arg("weight"),
@@ -414,6 +507,8 @@ void bind_micro(nb::module_& m) {
         .def("load_mech", &Sim::load_mech)
         .def("ion_register", &Sim::ion_register, nb::arg("ion"), nb::arg("charge"))
         .def("ion_charge", &Sim::ion_charge, nb::arg("ion_mechanism"))
+        .def("nernst", &Sim::nernst, nb::arg("ci"), nb::arg("co"), nb::arg("charge"))
+        .def("ghk", &Sim::ghk, nb::arg("v"), nb::arg("ci"), nb::arg("co"), nb::arg("charge"))
         .def("get_loaded_mech_paths", &Sim::get_loaded_mech_paths)
         .def("__getattr__",
              [](const Sim& sim, const std::string& key) {
@@ -430,6 +525,10 @@ void bind_micro(nb::module_& m) {
                  }
                  if (key == "celsius") {
                      sim.set_celsius(nb::cast<double>(value));
+                     return;
+                 }
+                 if (key == "secondorder") {
+                     sim.set_secondorder(nb::cast<int>(value));
                      return;
                  }
                  sim.set_global(key, nb::cast<double>(value));
@@ -452,7 +551,11 @@ void bind_micro(nb::module_& m) {
              nb::call_guard<nb::gil_scoped_release>())
         .def("fadvance", &Sim::fadvance, nb::call_guard<nb::gil_scoped_release>())
         .def("get_t", &Sim::get_t)
+        .def("spike_times", &Sim::spike_times)
+        .def("spike_gids", &Sim::spike_gids)
+        .def("clear_spikes", &Sim::clear_spikes)
         .def_prop_rw("celsius", &Sim::get_celsius, &Sim::set_celsius)
+        .def_prop_rw("secondorder", &Sim::get_secondorder, &Sim::set_secondorder)
         .def_prop_ro("_ref_t", &sim_time_ref);
 
 }

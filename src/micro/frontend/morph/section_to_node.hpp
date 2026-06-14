@@ -11,6 +11,7 @@ namespace mind_micro_morph {
 struct NodeCoreSoA {
     std::vector<std::int32_t> parent_id{};
     std::vector<double> area{};
+    std::vector<double> diam{};
     std::vector<double> a{};
     std::vector<double> b{};
     std::vector<double> ri{};

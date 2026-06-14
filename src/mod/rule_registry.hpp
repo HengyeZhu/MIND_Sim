@@ -20,8 +20,6 @@ inline const char* rule_kind_name(AbiRuleKind kind) {
         return "MicroOutput";
     case AbiRuleKind::Region:
         return "Region";
-    case AbiRuleKind::NeuralField:
-        return "NeuralField";
     }
     return "unknown";
 }

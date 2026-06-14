@@ -3,6 +3,7 @@
 #include "coreneuron/coreneuron.hpp"
 #include "coreneuron/apps/corenrn_parameters.hpp"
 #include "coreneuron/io/mem_layout_util.hpp"
+#include "coreneuron/io/setup_fornetcon.hpp"
 #include "coreneuron/nrniv/nrniv_decl.h"
 #include "coreneuron/permute/cellorder.hpp"
 #include "coreneuron/sim/multicore.hpp"
@@ -20,6 +21,7 @@
 #include <cstdint>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -43,6 +45,52 @@ struct TemplateBuildScratch {
     std::int32_t tpl_soma_node{-1};
 };
 
+constexpr const char* kPythonRefPrefix = "_ref_";
+
+[[nodiscard]] bool starts_with_python_ref_prefix(const std::string& attr) {
+    return attr.starts_with(kPythonRefPrefix);
+}
+
+[[nodiscard]] std::string python_ref_payload(const std::string& attr) {
+    if (!starts_with_python_ref_prefix(attr)) {
+        throw std::runtime_error("variable reference attribute must start with _ref_");
+    }
+    auto payload = attr.substr(std::string(kPythonRefPrefix).size());
+    if (payload.empty()) {
+        throw std::runtime_error("variable reference attribute has an empty name");
+    }
+    return payload;
+}
+
+[[nodiscard]] bool is_python_visible_data_field(
+    const mind_micro_biophysical::MechanismMetadata& metadata,
+    std::size_t field_index) {
+    if (field_index >= metadata.fields.size() ||
+        field_index >= metadata.field_data_offsets.size() ||
+        metadata.field_data_offsets[field_index] < 0) {
+        return false;
+    }
+    if (metadata.name.ends_with("_ion")) {
+        return true;
+    }
+    return metadata.fields[field_index].python_visible;
+}
+
+[[nodiscard]] bool is_python_visible_data_field(
+    const mind_micro_biophysical::MechanismMetadata& metadata,
+    const std::string& field) {
+    const auto it = metadata.field_index_by_name.find(field);
+    if (it == metadata.field_index_by_name.end()) {
+        return false;
+    }
+    return is_python_visible_data_field(metadata, static_cast<std::size_t>(it->second));
+}
+
+struct MechanismFieldRef {
+    std::string mech{};
+    std::string field{};
+};
+
 struct PopulationLayout {
     int num_cells_total{0};
     std::vector<std::size_t> cell_template_id{};
@@ -52,8 +100,11 @@ struct PopulationLayout {
 constexpr double infinite_resistance_cutoff_Mohm = 1.0e29;
 
 [[nodiscard]] std::size_t checked_node_count(const mind_micro_morph::NodeCoreSoA& nodes) {
-    if (nodes.area.size() != nodes.parent_id.size() || nodes.a.size() != nodes.parent_id.size() ||
-        nodes.b.size() != nodes.parent_id.size() || nodes.ri.size() != nodes.parent_id.size() ||
+    if (nodes.area.size() != nodes.parent_id.size() ||
+        nodes.diam.size() != nodes.parent_id.size() ||
+        nodes.a.size() != nodes.parent_id.size() ||
+        nodes.b.size() != nodes.parent_id.size() ||
+        nodes.ri.size() != nodes.parent_id.size() ||
         nodes.a_scale.size() != nodes.parent_id.size()) {
         throw std::runtime_error("inconsistent morphology node data");
     }
@@ -87,6 +138,7 @@ void for_each_population_node(const std::vector<TemplateBuildScratch>& built,
                tpl_nodes.a[tnode],
                tpl_nodes.b[tnode],
                tpl_nodes.area[tnode],
+               tpl_nodes.diam[tnode],
                tpl_nodes.ri[tnode],
                tpl_nodes.a_scale[tnode]);
         }
@@ -387,6 +439,20 @@ std::size_t mechanism_data_size(const mind_sim::micro::sim::CoreMembList& ml) {
     return mechanism_data_size(ml.type, ml.ml._nodecount_padded);
 }
 
+std::size_t mechanism_data_index(int field_data_offset,
+                                 int array_size,
+                                 int padded_count,
+                                 std::size_t instance_index,
+                                 int array_index = 0) {
+    const auto base =
+        static_cast<std::size_t>(field_data_offset) * static_cast<std::size_t>(padded_count);
+    if (array_size <= 1) {
+        return base + instance_index;
+    }
+    return base + instance_index * static_cast<std::size_t>(array_size) +
+           static_cast<std::size_t>(array_index);
+}
+
 struct ThreadDataAppender {
     mind_sim::micro::sim::CoreNeuronThread& thread;
     std::size_t next_offset{0};
@@ -405,6 +471,17 @@ struct ThreadDataAppender {
     }
 
     void append(mind_sim::micro::sim::CoreMembList ml) {
+        auto& memb_func = coreneuron::corenrn.get_memb_func(ml.type);
+        if (memb_func.thread_size_ > 0) {
+            ml.thread.assign(static_cast<std::size_t>(memb_func.thread_size_),
+                             coreneuron::ThreadDatum{});
+            ml.bind(thread.data_storage.data());
+            if (memb_func.thread_mem_init_ != nullptr) {
+                memb_func.thread_mem_init_(ml.thread.data());
+            }
+        } else {
+            ml.thread.clear();
+        }
         thread.tml_storage.push_back(coreneuron::NrnThreadMembList{
             .next = nullptr,
             .ml = nullptr,
@@ -529,6 +606,81 @@ void build_tml_from_registered_execution_order(mind_sim::micro::sim::CoreNeuronT
     }
 }
 
+void build_before_after_lists(mind_sim::micro::sim::CoreNeuronThread& thread) {
+    for (int i = 0; i < BEFORE_AFTER_SIZE; ++i) {
+        thread.tbl[i] = nullptr;
+    }
+    thread.ba_storage.clear();
+
+    const auto& bamech = coreneuron::corenrn.get_bamech();
+    const auto memb_list_for_type = [&](int type) -> coreneuron::Memb_list* {
+        for (auto& ml: thread.memb_lists) {
+            if (ml.type == type) {
+                return &ml.ml;
+            }
+        }
+        return nullptr;
+    };
+
+    std::size_t ba_count = 0;
+    for (int bat = 0; bat < BEFORE_AFTER_SIZE; ++bat) {
+        for (const auto& tml: thread.tml_storage) {
+            if (memb_list_for_type(tml.index) == nullptr) {
+                continue;
+            }
+            for (auto* bam = bamech[bat]; bam != nullptr; bam = bam->next) {
+                if (bam->type == tml.index) {
+                    ++ba_count;
+                }
+            }
+        }
+    }
+    thread.ba_storage.reserve(ba_count);
+
+    for (int bat = 0; bat < BEFORE_AFTER_SIZE; ++bat) {
+        coreneuron::NrnThreadBAList* previous = nullptr;
+        for (const auto& tml: thread.tml_storage) {
+            auto* ml = memb_list_for_type(tml.index);
+            if (ml == nullptr) {
+                continue;
+            }
+            for (auto* bam = bamech[bat]; bam != nullptr; bam = bam->next) {
+                if (bam->type != tml.index) {
+                    continue;
+                }
+                thread.ba_storage.push_back(coreneuron::NrnThreadBAList{
+                    .ml = ml,
+                    .bam = bam,
+                    .next = nullptr,
+                });
+                auto* current = &thread.ba_storage.back();
+                if (previous == nullptr) {
+                    thread.tbl[bat] = current;
+                } else {
+                    previous->next = current;
+                }
+                previous = current;
+            }
+        }
+    }
+}
+
+void build_watch_type_list(mind_sim::micro::sim::CoreNeuronThread& thread) {
+    thread.watch_types_storage.clear();
+    auto& watch_check = coreneuron::corenrn.get_watch_check();
+    for (const auto& ml: thread.memb_lists) {
+        if (ml.type < 0 || static_cast<std::size_t>(ml.type) >= watch_check.size()) {
+            continue;
+        }
+        if (watch_check[static_cast<std::size_t>(ml.type)] != nullptr) {
+            thread.watch_types_storage.push_back(ml.type);
+        }
+    }
+    if (!thread.watch_types_storage.empty()) {
+        thread.watch_types_storage.push_back(0);
+    }
+}
+
 int resolve_original_node(const mind_micro_model::CellTemplateMorphLayout& morph,
                           int gid,
                           int section_index,
@@ -595,6 +747,11 @@ void MicroFrontendModel::set_celsius(double celsius) {
     runtime_backend_.reset();
 }
 
+void MicroFrontendModel::set_secondorder(int secondorder) {
+    core_neuron_data_->secondorder = secondorder;
+    runtime_backend_.reset();
+}
+
 void MicroFrontendModel::set_device(const std::string& device) {
     auto config = mind_sim::micro::sim::parse_micro_device(device);
 #ifndef MIND_SIM_ENABLE_GPU
@@ -631,6 +788,14 @@ int MicroFrontendModel::ion_register(std::string ion, double charge) {
 
 double MicroFrontendModel::ion_charge(const std::string& ion_mechanism) const {
     return mind_sim::micro::sim::core_ion_charge(ion_mechanism);
+}
+
+double MicroFrontendModel::nernst(double ci, double co, double charge) const {
+    return mind_sim::micro::sim::core_nernst(ci, co, charge, celsius());
+}
+
+double MicroFrontendModel::ghk(double v, double ci, double co, double charge) const {
+    return mind_sim::micro::sim::core_ghk(v, ci, co, charge, celsius());
 }
 
 void MicroFrontendModel::set_global_scalar(const std::string& name, double value) {
@@ -679,6 +844,7 @@ void MicroFrontendModel::build_morphology(std::vector<MorphologyTemplateSpec> te
     morph_parent_index_.assign(morph_layout_.nnode, -1);
     original_node_gid_.assign(morph_layout_.nnode, -1);
     morph_area_.assign(morph_layout_.nnode, 0.0);
+    morph_diam_.assign(morph_layout_.nnode, 0.0);
     axial_a_ra1_.assign(morph_layout_.nnode, 0.0);
     axial_b_ra1_.assign(morph_layout_.nnode, 0.0);
     axial_ri_ra1_.assign(morph_layout_.nnode, 0.0);
@@ -695,6 +861,7 @@ void MicroFrontendModel::build_morphology(std::vector<MorphologyTemplateSpec> te
                 double a,
                 double b,
                 double area,
+                double diam,
                 double ri,
                 double a_scale) {
                 original_node_gid_[original_index] = gid;
@@ -702,6 +869,7 @@ void MicroFrontendModel::build_morphology(std::vector<MorphologyTemplateSpec> te
                 axial_a_ra1_[original_index] = a;
                 axial_b_ra1_[original_index] = b;
                 morph_area_[original_index] = area;
+                morph_diam_[original_index] = diam;
                 axial_ri_ra1_[original_index] = ri;
                 axial_a_scale_[original_index] = a_scale;
             });
@@ -1236,7 +1404,7 @@ int MicroFrontendModel::event_target_connect(int source_insert_id,
     const auto post_idx = require_insert_index(post_insert_id);
     const int target_id = core_mechanism_builder_.inserts[post_idx].target_id;
     if (target_id < 0) {
-        throw std::runtime_error("event_target_connect target must be a point process");
+        throw std::runtime_error("event_target_connect target must be a point process or artificial cell");
     }
     return network_registry_.register_event_target_netcon(source_target_id, target_id, weight, delay);
 }
@@ -1271,6 +1439,15 @@ double MicroFrontendModel::netcon_weight(int connection_id, int array_index) con
 
 void MicroFrontendModel::set_netcon_weight(int connection_id, int array_index, double value) {
     network_registry_.set_netcon_weight(connection_id, array_index, value);
+    const int weight_offset = network_registry_.netcon_weight_offset(connection_id, array_index);
+    if (core_initialized_ && core_neuron_data_ && weight_offset >= 0) {
+        const auto offset = static_cast<std::size_t>(weight_offset);
+        for (auto& thread: core_neuron_data_->threads) {
+            if (offset < thread.weight_storage.size()) {
+                thread.weight_storage[offset] = value;
+            }
+        }
+    }
 }
 
 double MicroFrontendModel::netcon_delay(int connection_id) const {
@@ -1301,6 +1478,147 @@ int MicroFrontendModel::netcon_source_event_target_id(int connection_id) const {
     return network_registry_.get_netcon_source_event_target_id(connection_id);
 }
 
+int MicroFrontendModel::netcon_source_spike_input_id(int connection_id) const {
+    return network_registry_.get_netcon_source_spike_input_id(connection_id);
+}
+
+VariableRef MicroFrontendModel::location_variable_ref_from_python_attr(int gid,
+                                                                       int section_index,
+                                                                       double x,
+                                                                       const std::string& attr) {
+    if (!std::isfinite(x)) {
+        throw std::runtime_error("variable reference requires a located section, e.g. sec(0.5)");
+    }
+    const auto payload = python_ref_payload(attr);
+    VariableRef out;
+    out.gid = gid;
+    out.section_index = section_index;
+    out.x = x;
+    if (payload == "v") {
+        out.kind = VariableRef::Kind::LocationVoltage;
+        out.mech = "global";
+        out.var = "v";
+        return out;
+    }
+
+    if (!default_mechanism_metadata_loaded_) {
+        load_default_mechanism_metadata();
+    }
+    const auto& mechanisms = mechanism_catalog_.mechanisms();
+    const auto field_is_python_section_ref = [&](const mind_micro_biophysical::MechanismMetadata& metadata,
+                                                 const std::string& field) {
+        if (!is_python_visible_data_field(metadata, field)) {
+            return false;
+        }
+        for (const auto& binding : dparam_bindings_for_metadata(metadata.id)) {
+            if (binding.kind == mind_sim::micro::sim::CoreDParamKind::IonVariable &&
+                binding.mechanism_field == field) {
+                const auto field_it = metadata.field_index_by_name.find(field);
+                return field_it != metadata.field_index_by_name.end() &&
+                       metadata.fields[static_cast<std::size_t>(field_it->second)].role ==
+                           mind_micro_biophysical::MechanismFieldRole::Range;
+            }
+        }
+        return true;
+    };
+    const auto match_mechanism_suffix = [&]() -> std::optional<MechanismFieldRef> {
+        std::optional<MechanismFieldRef> best;
+        std::size_t best_mech_name_size = 0;
+        for (const auto& metadata : mechanisms) {
+            if (metadata.kind != mind_micro_biophysical::MechanismKind::Density ||
+                metadata.name.empty()) {
+                continue;
+            }
+            const std::string suffix = "_" + metadata.name;
+            if (payload.size() <= suffix.size() || !payload.ends_with(suffix)) {
+                continue;
+            }
+            const auto field = payload.substr(0, payload.size() - suffix.size());
+            if (!field_is_python_section_ref(metadata, field)) {
+                continue;
+            }
+            if (metadata.name.size() > best_mech_name_size) {
+                best = MechanismFieldRef{metadata.name, field};
+                best_mech_name_size = metadata.name.size();
+            }
+        }
+        return best;
+    };
+    const auto match_built_location_field = [&](bool ion_only) -> std::optional<MechanismFieldRef> {
+        if (core_neuron_data_->threads.empty()) {
+            return std::nullopt;
+        }
+        const int original_node = resolve_original_node(morph_layout_, gid, section_index, x);
+        auto& thread = core_neuron_data_->threads[static_cast<std::size_t>(
+            thread_for_original_node(original_node))];
+        const int node_index = runtime_node_for_original(original_node);
+        std::optional<MechanismFieldRef> match;
+        int match_count = 0;
+        for (const auto& memb_list : thread.memb_lists) {
+            if (memb_list.metadata_id < 0 ||
+                std::find(memb_list.nodeindices.begin(), memb_list.nodeindices.end(), node_index) ==
+                    memb_list.nodeindices.end()) {
+                continue;
+            }
+            const auto& metadata = mechanism_catalog_.require(memb_list.metadata_id);
+            const bool is_ion = metadata.name.ends_with("_ion");
+            if (metadata.kind != mind_micro_biophysical::MechanismKind::Density ||
+                is_ion != ion_only ||
+                !field_is_python_section_ref(metadata, payload)) {
+                continue;
+            }
+            match = MechanismFieldRef{metadata.name, payload};
+            ++match_count;
+        }
+        if (match_count > 1) {
+            throw std::runtime_error("ambiguous variable reference '_ref_" + payload +
+                                     "' at this location; use '_ref_" + payload +
+                                     "_<mechanism>'");
+        }
+        return match;
+    };
+    auto match = match_mechanism_suffix();
+    if (!match) {
+        match = match_built_location_field(true);
+    }
+    if (!match) {
+        throw std::runtime_error("unknown section variable reference attribute: " + attr);
+    }
+    out.kind = VariableRef::Kind::Location;
+    out.mech = std::move(match->mech);
+    out.var = std::move(match->field);
+    return out;
+}
+
+VariableRef MicroFrontendModel::object_variable_ref_from_python_attr(int insert_id,
+                                                                     const std::string& attr) {
+    const auto payload = python_ref_payload(attr);
+    const auto insert_index = require_insert_index(insert_id);
+    const auto& insert = core_mechanism_builder_.inserts[insert_index];
+    if (insert.placement == MechanismPlacementKind::SectionSet) {
+        throw std::runtime_error("object variable reference requires a point process or artificial cell");
+    }
+    const auto& metadata = mechanism_catalog_.require(insert.metadata_id);
+    std::string field = payload;
+    const std::string suffix = "_" + metadata.name;
+    if (payload.size() > suffix.size() && payload.ends_with(suffix)) {
+        const auto candidate = payload.substr(0, payload.size() - suffix.size());
+        if (is_python_visible_data_field(metadata, candidate)) {
+            field = candidate;
+        }
+    }
+    if (!is_python_visible_data_field(metadata, field)) {
+        throw std::runtime_error("unknown object variable reference attribute: " + attr);
+    }
+
+    VariableRef out;
+    out.kind = VariableRef::Kind::Mechanism;
+    out.insert_id = insert_id;
+    out.mech = metadata.name;
+    out.var = std::move(field);
+    return out;
+}
+
 double* MicroFrontendModel::resolve_variable_pointer(const VariableRef& ref, const char* action) const {
     require_morphology();
     if (core_neuron_data_->threads.empty()) {
@@ -1320,27 +1638,35 @@ double* MicroFrontendModel::resolve_variable_pointer(const VariableRef& ref, con
         return std::pair<mind_sim::micro::sim::CoreNeuronThread*, int>{&thread, node_index};
     };
 
-    auto resolve_field_offset = [](const mind_micro_biophysical::MechanismMetadata& metadata,
-                                   const std::string& var,
-                                   int array_index) {
+    struct ResolvedMechanismField {
+        int data_offset{-1};
+        int array_size{1};
+        int array_index{0};
+    };
+    auto resolve_field = [](const mind_micro_biophysical::MechanismMetadata& metadata,
+                            const std::string& var,
+                            int array_index) {
         const auto field_it = metadata.field_index_by_name.find(var);
         if (field_it == metadata.field_index_by_name.end()) {
             throw std::runtime_error("mechanism variable is not a CoreNEURON data field: " +
                                      metadata.name + "." + var);
         }
         const auto& field = metadata.fields[static_cast<std::size_t>(field_it->second)];
-        if (array_index >= field.array_size) {
+        const int resolved_array_index = std::max(array_index, 0);
+        if (resolved_array_index >= field.array_size) {
             throw std::runtime_error("mechanism variable array index is out of range for: " +
                                      metadata.name + "." + var);
         }
-        const int field_offset =
-            metadata.field_data_offsets[static_cast<std::size_t>(field_it->second)] +
-            std::max(array_index, 0);
+        const int field_offset = metadata.field_data_offsets[static_cast<std::size_t>(field_it->second)];
         if (field_offset < 0) {
             throw std::runtime_error("mechanism variable is not stored in CoreNEURON data: " +
                                      metadata.name + "." + var);
         }
-        return field_offset;
+        return ResolvedMechanismField{
+            .data_offset = field_offset,
+            .array_size = field.array_size,
+            .array_index = resolved_array_index,
+        };
     };
 
     if (ref.kind == VariableRef::Kind::LocationVoltage ||
@@ -1370,7 +1696,7 @@ double* MicroFrontendModel::resolve_variable_pointer(const VariableRef& ref, con
                                      " found no Memb_list for: " + ref.mech);
         }
         const auto& metadata = mechanism_catalog_.require(ref.mech);
-        const int field_offset = resolve_field_offset(metadata, ref.var, ref.array_index);
+        const auto field = resolve_field(metadata, ref.var, ref.array_index);
         const auto instance_it = std::find(
             ml_it->nodeindices.begin(),
             ml_it->nodeindices.end(),
@@ -1382,8 +1708,11 @@ double* MicroFrontendModel::resolve_variable_pointer(const VariableRef& ref, con
         }
         const auto instance_index = static_cast<std::size_t>(
             std::distance(ml_it->nodeindices.begin(), instance_it));
-        const auto padded_count = static_cast<std::size_t>(ml_it->ml._nodecount_padded);
-        const auto data_index = static_cast<std::size_t>(field_offset) * padded_count + instance_index;
+        const auto data_index = mechanism_data_index(field.data_offset,
+                                                     field.array_size,
+                                                     ml_it->ml._nodecount_padded,
+                                                     instance_index,
+                                                     field.array_index);
         return ml_it->ml.data + data_index;
     }
     if (ref.kind == VariableRef::Kind::Mechanism) {
@@ -1394,7 +1723,7 @@ double* MicroFrontendModel::resolve_variable_pointer(const VariableRef& ref, con
                                      " requires a point process or artificial cell");
         }
         const auto& metadata = mechanism_catalog_.require(insert.metadata_id);
-        const int field_offset = resolve_field_offset(metadata, ref.var, ref.array_index);
+        const auto field = resolve_field(metadata, ref.var, ref.array_index);
         if (insert_index >= insert_runtime_thread_.size() ||
             insert_runtime_thread_[insert_index] < 0) {
             throw std::runtime_error(std::string("object variable ") + action +
@@ -1411,9 +1740,11 @@ double* MicroFrontendModel::resolve_variable_pointer(const VariableRef& ref, con
                                      " found no Memb_list for: " + metadata.name);
         }
         const auto instance_index = insert_runtime_row_[insert_index];
-        const auto data_index = static_cast<std::size_t>(field_offset) *
-                                    static_cast<std::size_t>(ml_it->ml._nodecount_padded) +
-                                instance_index;
+        const auto data_index = mechanism_data_index(field.data_offset,
+                                                     field.array_size,
+                                                     ml_it->ml._nodecount_padded,
+                                                     instance_index,
+                                                     field.array_index);
         return ml_it->ml.data + data_index;
     }
     throw std::runtime_error(std::string(action) +
@@ -1640,6 +1971,7 @@ void MicroFrontendModel::reset_core_node_storage() {
         auto actual_a = nt.actual_a();
         auto actual_b = nt.actual_b();
         auto area = nt.actual_area();
+        auto diam = nt.actual_diam();
         for (std::size_t local = 0; local < originals.size(); ++local) {
             const int original = originals[local];
             const auto runtime = static_cast<std::size_t>(
@@ -1650,6 +1982,7 @@ void MicroFrontendModel::reset_core_node_storage() {
             actual_a[runtime] = axial_a_ra1_[static_cast<std::size_t>(original)];
             actual_b[runtime] = axial_b_ra1_[static_cast<std::size_t>(original)];
             area[runtime] = morph_area_[static_cast<std::size_t>(original)];
+            diam[runtime] = morph_diam_[static_cast<std::size_t>(original)];
         }
     }
 }
@@ -1763,6 +2096,10 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
         nt.pnt2presyn_ix_storage.clear();
         nt.pnt2presyn_ix_offsets.clear();
         nt.pnt2presyn_ix_ptrs.clear();
+        nt.ba_storage.clear();
+        for (int i = 0; i < BEFORE_AFTER_SIZE; ++i) {
+            nt.tbl[i] = nullptr;
+        }
         nt.shadow_rhs.clear();
         nt.shadow_d.clear();
         nt.truncate_mechanism_data();
@@ -2303,17 +2640,23 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
             throw std::runtime_error("compiled mechanism field offset count mismatch for " +
                                      metadata.name);
         }
+        const auto padded_count = static_cast<std::size_t>(ml.ml._nodecount_padded);
         for (std::size_t field_index = 0; field_index < metadata.fields.size(); ++field_index) {
             const auto& field = metadata.fields[field_index];
             const int field_data_offset = field_data_offsets[field_index];
             if (field_data_offset < 0) {
                 continue;
             }
-            for (int element = 0; element < field.array_size; ++element) {
-                const auto field_data_base =
-                    static_cast<std::size_t>(field_data_offset + element) *
-                    static_cast<std::size_t>(ml.ml._nodecount_padded);
-                std::fill_n(ml_data + field_data_base, row_order.size(), field.default_value);
+            const auto field_base = static_cast<std::size_t>(field_data_offset) * padded_count;
+            if (field.array_size <= 1) {
+                std::fill_n(ml_data + field_base, row_order.size(), field.default_value);
+                continue;
+            }
+            for (std::size_t row = 0; row < row_order.size(); ++row) {
+                const auto row_base = field_base + row * static_cast<std::size_t>(field.array_size);
+                std::fill_n(ml_data + row_base,
+                            static_cast<std::size_t>(field.array_size),
+                            field.default_value);
             }
         }
         for (std::size_t row = 0; row < row_order.size(); ++row) {
@@ -2335,11 +2678,16 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
                         supplied_value,
                         instance.section_index,
                         instance.segment_index);
-                    for (int element = 0; element < field.array_size; ++element) {
-                        const auto field_data_base =
-                            static_cast<std::size_t>(field_data_offset + element) *
-                            static_cast<std::size_t>(ml.ml._nodecount_padded);
-                        ml_data[field_data_base + row] = value;
+                    const auto field_base =
+                        static_cast<std::size_t>(field_data_offset) * padded_count;
+                    if (field.array_size <= 1) {
+                        ml_data[field_base + row] = value;
+                    } else {
+                        const auto row_base =
+                            field_base + row * static_cast<std::size_t>(field.array_size);
+                        std::fill_n(ml_data + row_base,
+                                    static_cast<std::size_t>(field.array_size),
+                                    value);
                     }
                     continue;
                 }
@@ -2443,6 +2791,11 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
                             nt.node_data_stride * 5 +
                             static_cast<std::size_t>(runtime_node >= 0 ? runtime_node : 0));
                         break;
+                    case mind_sim::micro::sim::CoreDParamKind::Diam:
+                        slot = static_cast<coreneuron::Datum>(
+                            nt.node_data_stride * 6 +
+                            static_cast<std::size_t>(runtime_node >= 0 ? runtime_node : 0));
+                        break;
                     case mind_sim::micro::sim::CoreDParamKind::PointProcess:
                         if (pntproc_base < 0) {
                             throw std::runtime_error("pntproc dparam binding on non-point mechanism");
@@ -2511,14 +2864,24 @@ void MicroFrontendModel::rebuild_core_mechanisms() {
                                                found_offset ? pnt_offset : 0);
             }
         }
+        for (const int type : coreneuron::corenrn.get_net_buf_send_type()) {
+            for (auto& ml : nt.memb_lists) {
+                if (ml.type == type) {
+                    ml.allocate_net_send_buffer(ml.ml.nodecount * 2);
+                }
+            }
+        }
     }
     {
         build_tml_from_registered_execution_order(nt);
-    }
+        build_before_after_lists(nt);
+        build_watch_type_list(nt);
     }
     {
         core_neuron_data_->bind();
     }
+}
+
 }
 
 void MicroFrontendModel::rebuild_core_network() {
@@ -2553,12 +2916,9 @@ void MicroFrontendModel::rebuild_core_network() {
 
     int max_visible_gid = -1;
     for (const auto& source : sources) {
-        if (source.source_kind == mind_micro_network::NetConSourceKind::RealCell) {
-            max_visible_gid = std::max(max_visible_gid, source.real_source.gid);
-        } else if (source.source_kind == mind_micro_network::NetConSourceKind::EventTarget) {
-            max_visible_gid =
-                std::max(max_visible_gid,
-                         network_registry_.event_target_gid(source.source_event_target_id));
+        if (source.source_kind == mind_micro_network::NetConSourceKind::RealCell ||
+            source.source_kind == mind_micro_network::NetConSourceKind::EventTarget) {
+            max_visible_gid = std::max(max_visible_gid, source.output_gid);
         }
     }
     constexpr int preferred_core_source_gid_base = 1000000000;
@@ -2643,7 +3003,7 @@ void MicroFrontendModel::rebuild_core_network() {
             coreneuron::PreSyn presyn;
             presyn.threshold_ = source.threshold;
             if (source.source_kind == mind_micro_network::NetConSourceKind::RealCell) {
-                presyn.gid_ = source.real_source.gid;
+                presyn.gid_ = source.output_gid;
                 presyn.thvar_index_ = runtime_node_for_original(resolve_cached_original_node(
                     source.real_source.gid,
                     source.real_source.section_index,
@@ -2653,7 +3013,7 @@ void MicroFrontendModel::rebuild_core_network() {
                 const int pntproc_index =
                     event_target_to_pntproc[static_cast<std::size_t>(source.source_event_target_id)];
                 presyn.pntsrc_ = nt.pntproc_storage.data() + pntproc_index;
-                presyn.gid_ = network_registry_.event_target_gid(source.source_event_target_id);
+                presyn.gid_ = source.output_gid;
             }
             source_slot_runtime[source_slot] = RuntimeRef{
                 .thread = tid,
@@ -2753,6 +3113,10 @@ void MicroFrontendModel::rebuild_core_network() {
         nt.n_presyn = static_cast<int>(nt.presyn_storage.size());
         nt.n_input_presyn = static_cast<int>(nt.input_presyns.size());
         nt.net_send_buffer.assign(static_cast<std::size_t>(nt.n_real_output), 0);
+    }
+    core_neuron_data_->bind();
+    for (auto& nt : core_neuron_data_->threads) {
+        coreneuron::setup_fornetcon_info(nt);
     }
     core_neuron_data_->bind();
 }

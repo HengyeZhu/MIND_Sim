@@ -68,13 +68,11 @@ MicroInputRule::MicroInputRule(std::string library_path, std::string rule_name)
     apply_ = entry.micro_input_apply;
     const auto& descriptor = *entry.descriptor;
     name_ = descriptor.name;
-    input_count_ = descriptor.target_input_count;
-    source_exposure_count_ = descriptor.source_exposure_count;
+    exposure_count_ = descriptor.read_source_count;
     state_count_ = descriptor.state_count;
     param_count_ = descriptor.param_count;
-    target_input_names_ = descriptor_names(descriptor.target_input_count, descriptor.target_input_names);
-    source_exposure_names_ =
-        descriptor_names(descriptor.source_exposure_count, descriptor.source_exposure_names);
+    exposure_names_ = descriptor_names(descriptor.read_source_count,
+                                       descriptor.read_source_exposure_names);
     state_names_ = descriptor_names(descriptor.state_count, descriptor.state_names);
     state_defaults_ = descriptor_defaults(descriptor.state_count, descriptor.state_defaults);
     param_names_ = descriptor_names(descriptor.param_count, descriptor.param_names);
@@ -85,12 +83,8 @@ const std::string& MicroInputRule::name() const noexcept {
     return name_;
 }
 
-int MicroInputRule::input_count() const noexcept {
-    return input_count_;
-}
-
-int MicroInputRule::source_exposure_count() const noexcept {
-    return source_exposure_count_;
+int MicroInputRule::exposure_count() const noexcept {
+    return exposure_count_;
 }
 
 int MicroInputRule::state_count() const noexcept {
@@ -105,12 +99,8 @@ const std::string& MicroInputRule::library_path() const noexcept {
     return library_->path();
 }
 
-const std::vector<std::string>& MicroInputRule::target_input_names() const noexcept {
-    return target_input_names_;
-}
-
-const std::vector<std::string>& MicroInputRule::source_exposure_names() const noexcept {
-    return source_exposure_names_;
+const std::vector<std::string>& MicroInputRule::exposure_names() const noexcept {
+    return exposure_names_;
 }
 
 const std::vector<std::string>& MicroInputRule::state_names() const noexcept {
@@ -140,11 +130,9 @@ void MicroInputRule::validate_params(const std::vector<double>& params) const {
     validate_params_size(params, param_count_, "MicroInputRule");
 }
 
-void MicroInputRule::apply(const std::vector<double>& input_trace_soa,
-                           const std::vector<double>& exposure_trace_soa,
+void MicroInputRule::apply(const std::vector<double>& exposure_trace_soa,
                            int sample_count,
                            double sample_dt,
-                           int network_input_count,
                            int network_exposure_count,
                            int roi_count,
                            int roi,
@@ -157,8 +145,7 @@ void MicroInputRule::apply(const std::vector<double>& input_trace_soa,
                            const std::vector<int>& source_indices,
                            const std::vector<int>& source_ids,
                            mind_sim::micro::sim::MicroEventTable& events,
-                           const std::vector<int>& target_input_offsets,
-                           const std::vector<int>& source_exposure_offsets) const {
+                           const std::vector<int>& exposure_offsets) const {
     const int source_count = static_cast<int>(source_indices.size());
     if (sample_count <= 0) {
         throw std::runtime_error("MicroInputRule sample_count must be positive");
@@ -166,18 +153,8 @@ void MicroInputRule::apply(const std::vector<double>& input_trace_soa,
     if (sample_dt <= 0.0) {
         throw std::runtime_error("MicroInputRule sample_dt must be positive");
     }
-    if (network_input_count <= 0) {
-        throw std::runtime_error("MicroInputRule network_input_count must be positive");
-    }
     if (network_exposure_count <= 0) {
         throw std::runtime_error("MicroInputRule network_exposure_count must be positive");
-    }
-    const auto expected_trace_size =
-        static_cast<std::size_t>(sample_count) *
-        static_cast<std::size_t>(network_input_count) *
-        static_cast<std::size_t>(roi_count);
-    if (input_trace_soa.size() != expected_trace_size) {
-        throw std::runtime_error("MicroInputRule input trace size mismatch");
     }
     const auto expected_exposure_trace_size =
         static_cast<std::size_t>(sample_count) *
@@ -203,11 +180,9 @@ void MicroInputRule::apply(const std::vector<double>& input_trace_soa,
         }
     }
     mind_sim::mod::AbiMicroInputContext context{
-        .input_count = network_input_count,
         .exposure_count = network_exposure_count,
         .roi_count = roi_count,
         .target_roi = roi,
-        .input_trace_soa = input_trace_soa.data(),
         .exposure_trace_soa = exposure_trace_soa.data(),
         .sample_count = sample_count,
         .sample_dt = sample_dt,
@@ -222,8 +197,7 @@ void MicroInputRule::apply(const std::vector<double>& input_trace_soa,
         .stop_time = stop_time,
         .rng_seed = rng_seed,
         .exchange_start_step = exchange_start_step,
-        .target_input_offsets = target_input_offsets.data(),
-        .source_exposure_offsets = source_exposure_offsets.data(),
+        .exposure_offsets = exposure_offsets.data(),
         .event_user_data = &events,
         .emit_event = append_micro_event,
     };
@@ -240,11 +214,11 @@ MicroOutputRule::MicroOutputRule(std::string library_path, std::string rule_name
     apply_ = entry.micro_output_apply;
     const auto& descriptor = *entry.descriptor;
     name_ = descriptor.name;
-    output_count_ = descriptor.source_exposure_count;
+    output_count_ = descriptor.write_target_count;
     state_count_ = descriptor.state_count;
     param_count_ = descriptor.param_count;
-    source_exposure_names_ =
-        descriptor_names(descriptor.source_exposure_count, descriptor.source_exposure_names);
+    exposure_names_ = descriptor_names(descriptor.write_target_count,
+                                       descriptor.write_target_exposure_names);
     state_names_ = descriptor_names(descriptor.state_count, descriptor.state_names);
     state_defaults_ = descriptor_defaults(descriptor.state_count, descriptor.state_defaults);
     param_names_ = descriptor_names(descriptor.param_count, descriptor.param_names);
@@ -271,8 +245,8 @@ const std::string& MicroOutputRule::library_path() const noexcept {
     return library_->path();
 }
 
-const std::vector<std::string>& MicroOutputRule::source_exposure_names() const noexcept {
-    return source_exposure_names_;
+const std::vector<std::string>& MicroOutputRule::exposure_names() const noexcept {
+    return exposure_names_;
 }
 
 const std::vector<std::string>& MicroOutputRule::state_names() const noexcept {
@@ -311,7 +285,7 @@ void MicroOutputRule::apply(const mind_sim::micro::sim::MicroSpikeTableView& spi
                             double stop_time,
                             int sample_count,
                             double sample_dt,
-                            const std::vector<int>& source_exposure_offsets) const {
+                            const std::vector<int>& exposure_offsets) const {
     mind_sim::mod::AbiSpikeTable spike_table{
         .time = spikes.time,
         .size = static_cast<int>(spikes.size()),
@@ -331,7 +305,7 @@ void MicroOutputRule::apply(const mind_sim::micro::sim::MicroSpikeTableView& spi
         .params = params.data(),
         .start_time = start_time,
         .stop_time = stop_time,
-        .source_exposure_offsets = source_exposure_offsets.data(),
+        .exposure_offsets = exposure_offsets.data(),
     };
     apply_(&context);
 }

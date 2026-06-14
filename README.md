@@ -58,7 +58,7 @@ MIND_Sim is designed for multiscale modeling, but it also supports micro-only an
 
 ### ROI-centered modeling
 
-At the macro scale, users load a labelled connectivity matrix, and MIND_Sim automatically creates one ROI object for each label. Each ROI can then choose the scale that is meaningful for the model: a detailed microcircuit, a neural field model, or a neural mass model. Different ROIs may use different equations, different exposed variables, and different coupling rules.
+At the macro scale, users load a labelled connectivity matrix, and MIND_Sim automatically creates one ROI object for each label. Each ROI can then choose the scale that is meaningful for the model: a detailed microcircuit or a neural mass model. Different ROIs may use different equations, different exposed variables, and different coupling rules.
 
 ### MOD-based model definitions
 
@@ -70,7 +70,7 @@ The current micro-macro transformation is event based. This follows the same gen
 
 ### Mapping microcircuits to ROIs
 
-A single microcircuit can own or contribute to any number of ROIs. This matters in connectome-based modeling because every ROI has its own exposures and inputs, even when several ROIs are represented by different parts or projections of the same detailed micro model. Instead of forcing one micro model to collapse into one macro node, MIND_Sim lets each ROI declare its own exposed variables and accepted inputs. Different subsets of the same micro simulation can therefore transform their spikes or states into different ROI-level values, and different ROI inputs can be routed back to different micro targets.
+A single microcircuit can contribute selected exposures for one or more ROIs. With this interface, connectome-based models can perform ROI-to-ROI coupling through exposures. Region equations, ROI-to-ROI coupling, and micro2macro transforms write ROI exposures according to the mechanisms attached to each ROI.
 
 ## Performance
 
@@ -80,12 +80,12 @@ For full cosimulation, runtime is usually dominated by the micro-scale simulatio
 
 | Workflow | Threads | Pre-run | Run | Speedup |
 | --- | ---: | ---: | ---: | ---: |
-| MIND_Sim async | 1 | 0.215s | 16.401s | 3.57x |
-| MIND_Sim async | 4 | 0.198s | 6.556s | 4.89x |
-| TVB+NEURON | 1 | 0.495s | 58.501s | 1.00x |
-| TVB+NEURON | 4 | 0.513s | 32.040s | 1.00x |
+| MIND_Sim async | 1 | 0.187s | 16.702s | 3.97x |
+| TVB+NEURON | 1 | 0.591s | 66.327s | 1.00x |
+| MIND_Sim async | 4 | 0.169s | 6.672s | 4.88x |
+| TVB+NEURON | 4 | 0.558s | 32.531s | 1.00x |
 
-For the same 1s runs, using the TVB+NEURON reference with TVB's official macro APIs, the maximum absolute differences between MIND_Sim and the reference are `1.28464e-06` for macro `x`, `1.4922e-09` for macro `z`, and `2.17177e-10 mV` for representative PYR, BAS, OLM, and PYR Adend3 voltage traces. The macro comparison includes the precision boundary between TVB's single-precision (`float32`) state/history storage and MIND_Sim's double-precision macro state. Spike sample indices are exactly equal for the representative PYR, BAS, and OLM cells. This is an example-level comparison, not a standardized benchmark.
+For the same 1s runs, using the TVB+NEURON reference with TVB's official macro APIs, the maximum absolute differences between MIND_Sim and the reference are `1.28464e-06` for macro `x`, `1.4922e-09` for macro `z`, and `8.98019e-11 mV` for representative PYR, BAS, OLM, and PYR Adend3 voltage traces. The macro comparison includes the precision boundary between TVB's single-precision (`float32`) state/history storage and MIND_Sim's double-precision macro state. Spike sample indices are exactly equal for the representative PYR, BAS, and OLM cells. This is an example-level comparison, not a standardized benchmark.
 
 A direct TVB+CoreNEURON baseline is not used because, in a short-window TVB loop, each `pc.psolve()` call repeatedly re-enters embedded CoreNEURON instead of keeping a resident CoreNEURON execution state. Profiling shows that the dominant overheads are NEURON-side model preparation and CoreNEURON-side model loading. These costs made TVB+CoreNEURON slower than TVB+NEURON by 3.68x with one thread and 5.65x with four threads. This motivates a co-simulation simulator built directly on CoreNEURON: MPI-level coupling alone cannot efficiently use CoreNEURON's GPU mode for future scaling.
 

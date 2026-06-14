@@ -1616,6 +1616,43 @@ void CodegenNeuronCppVisitor::print_mechanism_register_regular() {
                    stringutils::starts_with(semantic, "#") &&
                    stringutils::ends_with(semantic, "_ion")) {
             type = "int*";
+            const auto ion = std::find_if(info.ions.cbegin(), info.ions.cend(), [&](const auto& item) {
+                return item.is_style(name);
+            });
+            if (ion != info.ions.cend()) {
+                const int conc = ion->is_conc_written() ? 3 : int(ion->is_conc_read());
+                const int rev = ion->is_rev_written() ? 3 : int(ion->is_rev_read());
+                mech_register_args.push_back(fmt::format(
+                    "_nrn_mechanism_field<{}>{{\"{}\", \"{}\", \"\", {}, {}, {}, {}}} /* {} */",
+                    type,
+                    name,
+                    semantic,
+                    conc,
+                    rev,
+                    ion->is_interior_conc_written(),
+                    ion->is_exterior_conc_written(),
+                    i));
+                continue;
+            }
+        } else if (stringutils::ends_with(semantic, "_ion")) {
+            const auto ion = std::find_if(info.ions.cbegin(), info.ions.cend(), [&](const auto& item) {
+                return semantic == fmt::format("{}_ion", item.name);
+            });
+            if (ion != info.ions.cend()) {
+                const int conc = ion->is_conc_written() ? 3 : int(ion->is_conc_read());
+                const int rev = ion->is_rev_written() ? 3 : int(ion->is_rev_read());
+                mech_register_args.push_back(fmt::format(
+                    "_nrn_mechanism_field<{}>{{\"{}\", \"{}\", \"\", {}, {}, {}, {}}} /* {} */",
+                    type,
+                    name,
+                    semantic,
+                    conc,
+                    rev,
+                    ion->is_interior_conc_written(),
+                    ion->is_exterior_conc_written(),
+                    i));
+                continue;
+            }
         } else if (semantic == naming::FOR_NETCON_SEMANTIC) {
             type = "void*";
         }

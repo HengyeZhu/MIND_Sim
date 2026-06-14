@@ -40,6 +40,7 @@ def main() -> None:
     import mind_sim as ms
 
     ms.macro.load_mech(Path(__file__).resolve().parent / "mod")
+    pre_start = time.perf_counter()
     ms.macro.dt(0.1)
     ms.macro.exchange_window(0.5)
     rois = ms.macro.load_rois(args.connectivity_csv)
@@ -49,7 +50,6 @@ def main() -> None:
     roi_delays = rois.delays
     left_ca3_roi = rois.roi("Left-CA3")
 
-    pre_start = time.perf_counter()
     # Micro model
     micro = ms.Sim()
     micro.set_device("cpu")
@@ -104,6 +104,13 @@ def main() -> None:
     pyr_population = micro.population("PYR")
     bas_population = micro.population("BAS")
     olm_population = micro.population("OLM")
+    network = micro.network()
+    pyr_gid_begin = int(pyr_population.gid_begin)
+    bas_gid_begin = int(bas_population.gid_begin)
+    olm_gid_begin = int(olm_population.gid_begin)
+    pyr_indices = range(PYR_COUNT)
+    bas_indices = range(BAS_COUNT)
+    olm_indices = range(OLM_COUNT)
 
     for cell in pyr_population:
         cell.v_init = -65.0
@@ -141,7 +148,7 @@ def main() -> None:
         cell.group("soma")[0](0.5).insert("IClamp", **{"del": 0.2, "dur": 1.0e9, "amp": 0.1})
         soma = cell.group("soma")[0](0.5)
         sid = int(cell.gid)
-        micro.network().register_spike_source(sid, soma._ref_v, SPIKE_THRESHOLD_MV)
+        network.register_spike_source(sid, soma._ref_v, SPIKE_THRESHOLD_MV)
     for cell in bas_population:
         cell.v_init = -65.0
         soma = cell.group("soma")
@@ -151,7 +158,7 @@ def main() -> None:
         soma.insert("Nafbwb")
         soma.insert("Kdrbwb")
         sid = int(cell.gid)
-        micro.network().register_spike_source(sid, soma[0](0.5)._ref_v, SPIKE_THRESHOLD_MV)
+        network.register_spike_source(sid, soma[0](0.5)._ref_v, SPIKE_THRESHOLD_MV)
     for cell in olm_population:
         cell.v_init = -65.0
         soma = cell.group("soma")
@@ -166,7 +173,7 @@ def main() -> None:
         soma.insert("KCaolmw")
         soma[0](0.5).insert("IClamp", **{"del": 0.2, "dur": 1.0e9, "amp": -25e-3})
         sid = int(cell.gid)
-        micro.network().register_spike_source(sid, soma[0](0.5)._ref_v, SPIKE_THRESHOLD_MV)
+        network.register_spike_source(sid, soma[0](0.5)._ref_v, SPIKE_THRESHOLD_MV)
     macro_rng = np.random.default_rng(1234)
     propagation_labels = {
         "Left-CA1",
@@ -188,31 +195,29 @@ def main() -> None:
         else:
             x0 = -2.4
         x_initial = x0 + 0.02 * macro_rng.standard_normal()
-        initial_state = {"x": x_initial, "z": 0.0}
-        if roi.label != left_ca3_roi.label:
-            initial_x[roi_index] = x_initial
-            roi.use_macro(
-                "tvb_epileptor2d",
-                initial_state=initial_state,
-                params={
-                    "x0": x0,
-                    "a": 1.0,
-                    "b": 3.0,
-                    "c": 1.0,
-                    "d": 5.0,
-                    "r": 0.00035,
-                    "slope": 0.0,
-                    "kvf": 0.35,
-                    "ks": 0.0,
-                    "tt": 1.0,
-                    "i_ext": 3.1,
-                    "modification": 0.0,
-                },
-            )
-        else:
-            initial_x[roi_index] = 0.0
+        initial_x[roi_index] = 0.0 if roi.label == left_ca3_roi.label else x_initial
+        if roi.label == left_ca3_roi.label:
+            continue
+        roi.use_macro(
+            "tvb_epileptor2d",
+            initial_state={"x": initial_x[roi_index], "z": initial_z[roi_index]},
+            params={
+                "x0": x0,
+                "a": 1.0,
+                "b": 3.0,
+                "c": 1.0,
+                "d": 5.0,
+                "r": 0.00035,
+                "slope": 0.0,
+                "kvf": 0.35,
+                "ks": 0.0,
+                "tt": 1.0,
+                "i_ext": 3.1,
+                "modification": 0.0,
+            },
+        )
 
-    left_ca3_roi.use_micro()
+    left_ca3_roi.use_micro(exposures=["x", "ca3_input"])
     ca3_input_to_spikes_params = {
         "base_hz": 1.0,
         "gain_hz": 45.0,
@@ -233,8 +238,8 @@ def main() -> None:
             r=1.0,
             e=0.0,
         )
-        for pyr_local in conn_rng.sample(range(PYR_COUNT), 100):
-            micro.network().sid_connect(int(pyr_population.gid_begin) + int(pyr_local), target, 1.15 * 1.2e-3, 2.0)
+        for pyr_local in conn_rng.sample(pyr_indices, 100):
+            network.sid_connect(pyr_gid_begin + int(pyr_local), target, 1.15 * 1.2e-3, 2.0)
 
     for cell in olm_population:
         target = cell.group("soma")[0](0.5).insert(
@@ -246,11 +251,11 @@ def main() -> None:
             r=1.0,
             e=0.0,
         )
-        for pyr_local in conn_rng.sample(range(PYR_COUNT), 10):
-            micro.network().sid_connect(int(pyr_population.gid_begin) + int(pyr_local), target, 0.7e-3, 2.0)
+        for pyr_local in conn_rng.sample(pyr_indices, 10):
+            network.sid_connect(pyr_gid_begin + int(pyr_local), target, 0.7e-3, 2.0)
 
     for cell in pyr_population:
-        pyr_local_post = int(cell.gid) - int(pyr_population.gid_begin)
+        pyr_local_post = int(cell.gid) - pyr_gid_begin
         target = cell.group("Bdend")[0](1.0).insert(
             "MyExp2SynNMDABB",
             tau1=0.05,
@@ -260,51 +265,51 @@ def main() -> None:
             r=1.0,
             e=0.0,
         )
-        for pyr_local_pre in conn_rng.sample(range(PYR_COUNT), 25):
+        for pyr_local_pre in conn_rng.sample(pyr_indices, 25):
             if pyr_local_pre == pyr_local_post:
                 continue
-            micro.network().sid_connect(int(pyr_population.gid_begin) + int(pyr_local_pre), target, 0.004e-3, 2.0)
+            network.sid_connect(pyr_gid_begin + int(pyr_local_pre), target, 0.004e-3, 2.0)
 
     for cell in bas_population:
         target = cell.group("soma")[0](0.5).insert("MyExp2SynBB", tau1=0.05, tau2=5.3, e=0.0)
-        for pyr_local in conn_rng.sample(range(PYR_COUNT), 100):
-            micro.network().sid_connect(int(pyr_population.gid_begin) + int(pyr_local), target, 0.3 * 1.2e-3, 2.0)
+        for pyr_local in conn_rng.sample(pyr_indices, 100):
+            network.sid_connect(pyr_gid_begin + int(pyr_local), target, 0.3 * 1.2e-3, 2.0)
 
     for cell in olm_population:
         target = cell.group("soma")[0](0.5).insert("MyExp2SynBB", tau1=0.05, tau2=5.3, e=0.0)
-        for pyr_local in conn_rng.sample(range(PYR_COUNT), 10):
-            micro.network().sid_connect(int(pyr_population.gid_begin) + int(pyr_local), target, 0.3 * 1.2e-3, 2.0)
+        for pyr_local in conn_rng.sample(pyr_indices, 10):
+            network.sid_connect(pyr_gid_begin + int(pyr_local), target, 0.3 * 1.2e-3, 2.0)
 
     for cell in pyr_population:
-        pyr_local_post = int(cell.gid) - int(pyr_population.gid_begin)
+        pyr_local_post = int(cell.gid) - pyr_gid_begin
         target = cell.group("Bdend")[0](1.0).insert("MyExp2SynBB", tau1=0.05, tau2=5.3, e=0.0)
-        for pyr_local_pre in conn_rng.sample(range(PYR_COUNT), 25):
+        for pyr_local_pre in conn_rng.sample(pyr_indices, 25):
             if pyr_local_pre == pyr_local_post:
                 continue
-            micro.network().sid_connect(int(pyr_population.gid_begin) + int(pyr_local_pre), target, 0.5 * 0.04e-3, 2.0)
+            network.sid_connect(pyr_gid_begin + int(pyr_local_pre), target, 0.5 * 0.04e-3, 2.0)
 
     for cell in bas_population:
-        bas_local_post = int(cell.gid) - int(bas_population.gid_begin)
+        bas_local_post = int(cell.gid) - bas_gid_begin
         target = cell.group("soma")[0](0.5).insert("MyExp2SynBB", tau1=0.07, tau2=9.1, e=-80.0)
-        for bas_local_pre in conn_rng.sample(range(BAS_COUNT), 60):
+        for bas_local_pre in conn_rng.sample(bas_indices, 60):
             if bas_local_pre == bas_local_post:
                 continue
-            micro.network().sid_connect(int(bas_population.gid_begin) + int(bas_local_pre), target, 3.0 * 1.5e-3, 2.0)
+            network.sid_connect(bas_gid_begin + int(bas_local_pre), target, 3.0 * 1.5e-3, 2.0)
 
     for cell in pyr_population:
         target = cell.group("soma")[0](0.5).insert("MyExp2SynBB", tau1=0.07, tau2=9.1, e=-80.0)
-        for bas_local in conn_rng.sample(range(BAS_COUNT), 50):
-            micro.network().sid_connect(int(bas_population.gid_begin) + int(bas_local), target, 4.0 * 0.18e-3, 2.0)
+        for bas_local in conn_rng.sample(bas_indices, 50):
+            network.sid_connect(bas_gid_begin + int(bas_local), target, 4.0 * 0.18e-3, 2.0)
 
     for cell in olm_population:
         target = cell.group("soma")[0](0.5).insert("MyExp2SynBB", tau1=0.07, tau2=9.1, e=-80.0)
-        for bas_local in conn_rng.sample(range(BAS_COUNT), 17):
-            micro.network().sid_connect(int(bas_population.gid_begin) + int(bas_local), target, 0.05 * 4.0 * 0.18e-3, 2.0)
+        for bas_local in conn_rng.sample(bas_indices, 17):
+            network.sid_connect(bas_gid_begin + int(bas_local), target, 0.05 * 4.0 * 0.18e-3, 2.0)
 
     for cell in pyr_population:
         target = cell.group("Adend2")[0](0.5).insert("MyExp2SynBB", tau1=0.2, tau2=20.0, e=-80.0)
-        for olm_local in conn_rng.sample(range(OLM_COUNT), 10):
-            micro.network().sid_connect(int(olm_population.gid_begin) + int(olm_local), target, 0.08 * 4.0 * 3.0 * 6.0e-3, 2.0)
+        for olm_local in conn_rng.sample(olm_indices, 10):
+            network.sid_connect(olm_gid_begin + int(olm_local), target, 0.08 * 4.0 * 3.0 * 6.0e-3, 2.0)
     for cell in pyr_population:
         target = cell.group("Adend3")[0](0.5).insert("MyExp2SynBB", tau1=0.05, tau2=5.3, e=0.0)
         left_ca3_roi.macro2micro(
@@ -378,10 +383,10 @@ def main() -> None:
     adend3_voltage_trace = ms.Vector().record(pyr_population[0].group("Adend3")[0](0.5)._ref_v)
     voltage_time_trace = ms.Vector().record(micro._ref_t)
     micro.finitialize(-65.0)
+    simulator = ms.Simulator(rois)
     pre_run_s = time.perf_counter() - pre_start
 
     run_start = time.perf_counter()
-    simulator = ms.Simulator(rois)
     result = simulator.run(args.duration_ms)
     run_s = time.perf_counter() - run_start
 
@@ -414,7 +419,7 @@ def main() -> None:
         "connectivity_csv": str(args.connectivity_csv),
         "connectivity_format": "matrix_csv_v1",
         "ca3_micro_model": "ModelDB 186768 CA3, MIND Sim API/CoreNEURON rewrite",
-        "macro_model": "TVB built-in Epileptor2D equations implemented as a MOD mechanism",
+        "macro_model": "TVB built-in Epileptor2D equations implemented as a MOD mechanism for non-CA3 ROIs",
         "micro_backend": "CoreNEURON",
         "duration_ms": args.duration_ms,
         "dt_micro_ms": 0.025,
@@ -435,7 +440,7 @@ def main() -> None:
         "drive_delay_ms": 0.2,
         "connections": True,
         "initial_history": "explicit non-constant TVB-style chronological history with axes time,output,roi and outputs ['x', 'z']; history[-1] is the t=0 state",
-        "notes": "Left-CA3 ROI is replaced by population-specific PYR/BAS/OLM event-driven micro x output; macro input to Left-CA3 is transformed into external AMPA events on PYR Adend3 synapses. Left-CA3 z is not a transform output.",
+        "notes": "Left-CA3 ROI has no macro REGION owner. Its x exposure is produced by population-specific PYR/BAS/OLM event-driven micro2macro transforms; macro input to Left-CA3 is transformed into external AMPA events on PYR Adend3 synapses. Left-CA3 z is initialized for history layout compatibility and is not a transform output.",
         "voltage_recording": "representative PYR/BAS/OLM soma voltages in voltage_traces; fixed output key voltage remains PYR[0].soma; PYR[0].Adend3(0.5) voltage is in adend3_voltage",
         "voltage_trace_labels": voltage_labels,
         "spike_validation": "derive representative PYR/BAS/OLM soma spikes from recorded voltage threshold crossings; no spike array is exported",

@@ -91,7 +91,6 @@ def main() -> None:
     h.load_file("stdrun.hoc")
     TvbProfile.set_profile(TvbProfile.LIBRARY_PROFILE)
 
-    pre_start = time.perf_counter()
     mod_dir = Path(__file__).resolve().parent / "mod"
     args.workdir.mkdir(parents=True, exist_ok=True)
     if args.rebuild_mods:
@@ -100,6 +99,7 @@ def main() -> None:
     if not (mod_dir / "x86_64" / "libnrnmech.so").exists():
         subprocess.run(["nrnivmodl", "."], cwd=mod_dir, check=True)
     load_mechanisms(str(mod_dir))
+    pre_start = time.perf_counter()
 
     rows = []
     with args.connectivity_csv.open(newline="") as handle:
@@ -353,17 +353,23 @@ def main() -> None:
         cells.append(cell)
 
     source_netcons = []
+    pc_id = int(pc.id())
     for cell in cells:
         gid = int(cell["gid"])
         soma = cell["soma"]
         source = h.NetCon(soma(0.5)._ref_v, None, sec=soma)
         source.threshold = SPIKE_THRESHOLD_MV
         source.delay = 0.05
-        pc.set_gid2node(gid, int(pc.id()))
+        pc.set_gid2node(gid, pc_id)
         pc.cell(gid, source)
         source_netcons.append(source)
     recurrent_netcons = []
     conn_rng = random.Random(4321)
+    pyr_indices = range(PYR_COUNT)
+    bas_indices = range(BAS_COUNT)
+    olm_indices = range(OLM_COUNT)
+    bas_gid_begin = PYR_COUNT
+    olm_gid_begin = PYR_COUNT + BAS_COUNT
 
     for cell in bas_population:
         target = h.MyExp2SynNMDABB(cell["soma"](0.5))
@@ -374,7 +380,7 @@ def main() -> None:
         target.r = 1.0
         target.e = 0.0
         point_processes.append(target)
-        for pyr_local in conn_rng.sample(range(PYR_COUNT), 100):
+        for pyr_local in conn_rng.sample(pyr_indices, 100):
             netcon = pc.gid_connect(pyr_local, target)
             netcon.weight[0] = 1.15 * 1.2e-3
             netcon.delay = 2.0
@@ -389,7 +395,7 @@ def main() -> None:
         target.r = 1.0
         target.e = 0.0
         point_processes.append(target)
-        for pyr_local in conn_rng.sample(range(PYR_COUNT), 10):
+        for pyr_local in conn_rng.sample(pyr_indices, 10):
             netcon = pc.gid_connect(pyr_local, target)
             netcon.weight[0] = 0.7e-3
             netcon.delay = 2.0
@@ -405,7 +411,7 @@ def main() -> None:
         target.r = 1.0
         target.e = 0.0
         point_processes.append(target)
-        for pyr_local_pre in conn_rng.sample(range(PYR_COUNT), 25):
+        for pyr_local_pre in conn_rng.sample(pyr_indices, 25):
             if pyr_local_pre == pyr_local_post:
                 continue
             netcon = pc.gid_connect(pyr_local_pre, target)
@@ -419,7 +425,7 @@ def main() -> None:
         target.tau2 = 5.3
         target.e = 0.0
         point_processes.append(target)
-        for pyr_local in conn_rng.sample(range(PYR_COUNT), 100):
+        for pyr_local in conn_rng.sample(pyr_indices, 100):
             netcon = pc.gid_connect(pyr_local, target)
             netcon.weight[0] = 0.3 * 1.2e-3
             netcon.delay = 2.0
@@ -431,7 +437,7 @@ def main() -> None:
         target.tau2 = 5.3
         target.e = 0.0
         point_processes.append(target)
-        for pyr_local in conn_rng.sample(range(PYR_COUNT), 10):
+        for pyr_local in conn_rng.sample(pyr_indices, 10):
             netcon = pc.gid_connect(pyr_local, target)
             netcon.weight[0] = 0.3 * 1.2e-3
             netcon.delay = 2.0
@@ -444,7 +450,7 @@ def main() -> None:
         target.tau2 = 5.3
         target.e = 0.0
         point_processes.append(target)
-        for pyr_local_pre in conn_rng.sample(range(PYR_COUNT), 25):
+        for pyr_local_pre in conn_rng.sample(pyr_indices, 25):
             if pyr_local_pre == pyr_local_post:
                 continue
             netcon = pc.gid_connect(pyr_local_pre, target)
@@ -459,10 +465,10 @@ def main() -> None:
         target.tau2 = 9.1
         target.e = -80.0
         point_processes.append(target)
-        for bas_local_pre in conn_rng.sample(range(BAS_COUNT), 60):
+        for bas_local_pre in conn_rng.sample(bas_indices, 60):
             if bas_local_pre == bas_local_post:
                 continue
-            netcon = pc.gid_connect(PYR_COUNT + bas_local_pre, target)
+            netcon = pc.gid_connect(bas_gid_begin + bas_local_pre, target)
             netcon.weight[0] = 3.0 * 1.5e-3
             netcon.delay = 2.0
             recurrent_netcons.append(netcon)
@@ -473,8 +479,8 @@ def main() -> None:
         target.tau2 = 9.1
         target.e = -80.0
         point_processes.append(target)
-        for bas_local in conn_rng.sample(range(BAS_COUNT), 50):
-            netcon = pc.gid_connect(PYR_COUNT + bas_local, target)
+        for bas_local in conn_rng.sample(bas_indices, 50):
+            netcon = pc.gid_connect(bas_gid_begin + bas_local, target)
             netcon.weight[0] = 4.0 * 0.18e-3
             netcon.delay = 2.0
             recurrent_netcons.append(netcon)
@@ -485,8 +491,8 @@ def main() -> None:
         target.tau2 = 9.1
         target.e = -80.0
         point_processes.append(target)
-        for bas_local in conn_rng.sample(range(BAS_COUNT), 17):
-            netcon = pc.gid_connect(PYR_COUNT + bas_local, target)
+        for bas_local in conn_rng.sample(bas_indices, 17):
+            netcon = pc.gid_connect(bas_gid_begin + bas_local, target)
             netcon.weight[0] = 0.05 * 4.0 * 0.18e-3
             netcon.delay = 2.0
             recurrent_netcons.append(netcon)
@@ -497,8 +503,8 @@ def main() -> None:
         target.tau2 = 20.0
         target.e = -80.0
         point_processes.append(target)
-        for olm_local in conn_rng.sample(range(OLM_COUNT), 10):
-            netcon = pc.gid_connect(PYR_COUNT + BAS_COUNT + olm_local, target)
+        for olm_local in conn_rng.sample(olm_indices, 10):
+            netcon = pc.gid_connect(olm_gid_begin + olm_local, target)
             netcon.weight[0] = 0.08 * 4.0 * 3.0 * 6.0e-3
             netcon.delay = 2.0
             recurrent_netcons.append(netcon)

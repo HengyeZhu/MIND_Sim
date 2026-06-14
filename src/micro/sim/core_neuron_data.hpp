@@ -118,6 +118,7 @@ struct CoreMembList {
     std::vector<coreneuron::ThreadDatum> thread{};
     bool has_net_receive_buffer{false};
     CoreNetReceiveBufferStorage net_receive_buffer{};
+    std::unique_ptr<coreneuron::NetSendBuffer_t> net_send_buffer{};
     std::vector<int> permute_storage{};
     std::size_t thread_data_offset{std::numeric_limits<std::size_t>::max()};
 
@@ -146,6 +147,7 @@ struct CoreMembList {
         thread = std::move(other.thread);
         has_net_receive_buffer = other.has_net_receive_buffer;
         net_receive_buffer = std::move(other.net_receive_buffer);
+        net_send_buffer = std::move(other.net_send_buffer);
         permute_storage = std::move(other.permute_storage);
         thread_data_offset = other.thread_data_offset;
         ml = coreneuron::Memb_list{};
@@ -171,6 +173,7 @@ struct CoreMembList {
         ml._net_receive_buffer =
             has_net_receive_buffer && net_receive_buffer.active() ? &net_receive_buffer.buffer
                                                                   : nullptr;
+        ml._net_send_buffer = net_send_buffer.get();
     }
 
     void allocate_net_receive_buffer(int capacity, int pnt_offset = 0) {
@@ -179,6 +182,13 @@ struct CoreMembList {
         }
         has_net_receive_buffer = true;
         net_receive_buffer.allocate(capacity, pnt_offset);
+    }
+
+    void allocate_net_send_buffer(int capacity) {
+        if (capacity < 0) {
+            throw std::runtime_error("negative NET_SEND buffer capacity");
+        }
+        net_send_buffer = std::make_unique<coreneuron::NetSendBuffer_t>(std::max(1, capacity));
     }
 };
 
@@ -201,6 +211,8 @@ struct CoreNeuronThread: coreneuron::NrnThread {
     std::vector<int> pnt2presyn_ix_storage{};
     std::vector<std::size_t> pnt2presyn_ix_offsets{};
     std::vector<int*> pnt2presyn_ix_ptrs{};
+    std::vector<coreneuron::NrnThreadBAList> ba_storage{};
+    std::vector<int> watch_types_storage{};
 
     std::vector<int> v_parent_index{};
     std::vector<double> shadow_rhs{};
@@ -217,7 +229,7 @@ struct CoreNeuronThread: coreneuron::NrnThread {
     CoreNeuronThread(CoreNeuronThread&&) noexcept = default;
     CoreNeuronThread& operator=(CoreNeuronThread&&) noexcept = default;
 
-    static constexpr std::size_t node_data_slot_count = 6;
+    static constexpr std::size_t node_data_slot_count = 7;
 
     [[nodiscard]] std::size_t mechanism_data_begin() const noexcept {
         return node_data_stride * node_data_slot_count;
@@ -269,6 +281,12 @@ struct CoreNeuronThread: coreneuron::NrnThread {
     [[nodiscard]] std::span<const double> actual_area() const noexcept {
         return {data_storage.data() + 5 * node_data_stride, node_data_stride};
     }
+    [[nodiscard]] std::span<double> actual_diam() noexcept {
+        return {data_storage.data() + 6 * node_data_stride, node_data_stride};
+    }
+    [[nodiscard]] std::span<const double> actual_diam() const noexcept {
+        return {data_storage.data() + 6 * node_data_stride, node_data_stride};
+    }
 
     void bind_into(coreneuron::NrnThread& target, int mechanism_capacity) {
         double* const thread_data_base = data_storage.empty() ? nullptr : data_storage.data();
@@ -306,7 +324,6 @@ struct CoreNeuronThread: coreneuron::NrnThread {
         target._nidata = _nidata;
         target._idata = _idata;
         target._vecplay = _vecplay;
-        target._actual_diam = nullptr;
         target._sp13mat = _sp13mat;
         target._ecell_memb_list = _ecell_memb_list;
         target._ctime = _ctime;
@@ -317,7 +334,7 @@ struct CoreNeuronThread: coreneuron::NrnThread {
         target.compute_gpu = compute_gpu;
         target.stream_id = stream_id;
         target._net_send_buffer_cnt = _net_send_buffer_cnt;
-        target._watch_types = _watch_types;
+        target._watch_types = watch_types_storage.empty() ? nullptr : watch_types_storage.data();
         target.mapping = mapping;
         target.trajec_requests = trajec_requests;
         target._fornetcon_perm_indices_size = _fornetcon_perm_indices_size;
@@ -345,6 +362,7 @@ struct CoreNeuronThread: coreneuron::NrnThread {
         target._actual_b = node_data_stride == 0 ? nullptr : thread_data_base + 3 * node_data_stride;
         target._actual_v = node_data_stride == 0 ? nullptr : thread_data_base + 4 * node_data_stride;
         target._actual_area = node_data_stride == 0 ? nullptr : thread_data_base + 5 * node_data_stride;
+        target._actual_diam = node_data_stride == 0 ? nullptr : thread_data_base + 6 * node_data_stride;
         target._shadow_rhs = shadow_rhs.empty() ? nullptr : shadow_rhs.data();
         target._shadow_d = shadow_d.empty() ? nullptr : shadow_d.data();
         target._data = data_storage.empty() ? nullptr : data_storage.data();
@@ -387,6 +405,7 @@ struct CoreNeuronData {
     MicroDeviceConfig device_config{};
     double dt{0.025};
     double celsius{6.3};
+    int secondorder{0};
     bool gpu_device_runtime_active{false};
     int gpu_runtime_ref_count{0};
     double effective_mindelay{10.0};

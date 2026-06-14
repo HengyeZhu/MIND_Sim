@@ -201,6 +201,7 @@ void MicroRuntime::bind_core_globals() {
 #endif
     coreneuron::dt = core_data_->dt;
     coreneuron::celsius = core_data_->celsius;
+    coreneuron::secondorder = core_data_->secondorder;
     coreneuron::rev_dt = static_cast<int>(std::llround(1.0 / core_data_->dt));
     coreneuron::t = first_thread._t;
     coreneuron::mk_netcvode();
@@ -232,6 +233,7 @@ void MicroRuntime::ensure_core_globals_bound() {
     coreneuron::nrn_threads = core_data_->nrn_threads();
     coreneuron::dt = core_data_->dt;
     coreneuron::celsius = core_data_->celsius;
+    coreneuron::secondorder = core_data_->secondorder;
     coreneuron::rev_dt = static_cast<int>(std::llround(1.0 / core_data_->dt));
     coreneuron::t = core_data_->threads.front()._t;
 #ifdef _OPENMP
@@ -437,6 +439,9 @@ void MicroRuntime::finitialize(double voltage) {
     ensure_registered_mechanisms();
     initialize_private_mechanism_storage();
     private_mechanism_storage_checked_ = true;
+    if (!uses_gpu()) {
+        coreneuron::allocate_data_in_mechanism_nrn_init();
+    }
     ensure_device_runtime_ready();
     coreneuron::spikevec_time.clear();
     coreneuron::spikevec_gid.clear();

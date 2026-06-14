@@ -1,8 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from decimal import Decimal
 
 from . import _native
+
+
+_macro_dt: float | None = None
+
+
+def _set_macro_dt(value: float) -> None:
+    global _macro_dt
+    _macro_dt = value
 
 
 def _values(values: Mapping[str, float] | None) -> dict[str, float]:
@@ -19,10 +28,6 @@ class ROI:
         self._index = int(index)
         self.label = str(label)
         self.name = self.label
-
-    def dc_input(self, values: Mapping[str, float]) -> "ROI":
-        self._network._builder.set_dc_input(self._index, _values(values))
-        return self
 
     def record(self, output: str, /) -> "ROI":
         self._network._builder.record(self._index, output)
@@ -95,47 +100,12 @@ class ROI:
         )
         return self
 
-    def use_micro(self) -> "ROI":
-        self._network._builder.use_micro(self._index)
+    def use_micro(self, *, exposures: Iterable[str]) -> "ROI":
+        self._network._builder.use_micro(self._index, [str(name) for name in exposures])
         return self
 
     def __repr__(self) -> str:
         return f"<mind_sim.ROI name={self.label!r}>"
-
-
-class NeuralField:
-    def __init__(
-        self,
-        name: str,
-        rule=None,
-        *,
-        local=None,
-        initial_state: Mapping[str, float] | None = None,
-        params: Mapping[str, float] | None = None,
-    ):
-        self.name = str(name)
-        self.rule = None
-        self.local_data = local
-        self.initial_state = initial_state
-        self.params = params
-        if rule is not None:
-            self.use(rule, initial_state=initial_state, params=params)
-
-    def use(
-        self,
-        rule,
-        *,
-        initial_state: Mapping[str, float] | None = None,
-        params: Mapping[str, float] | None = None,
-    ) -> "NeuralField":
-        self.rule = str(rule)
-        self.initial_state = initial_state
-        self.params = params
-        return self
-
-    def local(self, local) -> "NeuralField":
-        self.local_data = local
-        return self
 
 
 class Network:
@@ -190,26 +160,6 @@ class Network:
         )
         return self
 
-    def use_neural_field(self, field: NeuralField, *, node_map) -> "Network":
-        if field.local_data is None:
-            self._builder.use_neural_field(
-                field.name,
-                str(field.rule),
-                node_map,
-                _values(field.initial_state),
-                _values(field.params),
-            )
-        else:
-            self._builder.use_neural_field(
-                field.name,
-                str(field.rule),
-                node_map,
-                field.local_data,
-                _values(field.initial_state),
-                _values(field.params),
-            )
-        return self
-
     def _build_native(self):
         return self._builder.build()
 
@@ -226,10 +176,18 @@ class MacroSimulator:
     def __init__(self, rois: Network):
         self._native = _native.MacroRuntime(rois._build_native())
 
-    def run(self, t_stop: float):
+    def run(self, t_stop: float | None = None, *, n_steps: int | None = None):
+        if n_steps is not None:
+            if t_stop is not None:
+                raise TypeError("run accepts either t_stop or n_steps, not both")
+            if not isinstance(n_steps, int) or isinstance(n_steps, bool):
+                raise TypeError("n_steps must be an integer")
+            if _macro_dt is None:
+                raise RuntimeError("run(n_steps=...) requires ms.macro.dt(...)")
+            t_stop = float(Decimal(str(n_steps)) * Decimal(str(_macro_dt)))
+        if t_stop is None:
+            raise TypeError("run requires t_stop or n_steps")
         return self._native.run(float(t_stop))
 
 
 Connectivity = _native.Connectivity
-LocalConnectivity = _native.LocalConnectivity
-NodeToRoiMap = _native.NodeToRoiMap

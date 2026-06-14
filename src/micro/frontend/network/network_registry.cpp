@@ -307,6 +307,7 @@ int NetworkRegistry::intern_real_event_source_slot_(const RealNetConSourceKey& s
     EventSourceSlot slot{};
     slot.source_kind = NetConSourceKind::RealCell;
     slot.real_source = source_key;
+    slot.output_gid = source_key.gid;
     slot.threshold = threshold.value_or(10.0);
     event_source_slots_.push_back(std::move(slot));
     event_real_source_slot_index_by_key_.emplace(source_key, source_slot);
@@ -352,6 +353,7 @@ int NetworkRegistry::intern_event_target_event_source_slot_(int source_event_tar
     EventSourceSlot slot{};
     slot.source_kind = NetConSourceKind::EventTarget;
     slot.source_event_target_id = source_event_target_id;
+    slot.output_gid = event_target_gid(source_event_target_id);
     slot.threshold = threshold.value_or(10.0);
     event_source_slots_.push_back(std::move(slot));
     event_event_target_source_slot_index_by_id_.emplace(source_event_target_id, source_slot);
@@ -795,6 +797,12 @@ double NetworkRegistry::get_netcon_weight(int connection_id, int array_index) co
     return event_edge_weights_[static_cast<std::size_t>(edge.weight_offset + resolved_index)];
 }
 
+int NetworkRegistry::netcon_weight_offset(int connection_id, int array_index) const {
+    const auto& edge = event_edge_for_connection_(connection_id);
+    const int resolved_index = normalize_weight_index(array_index, static_cast<std::size_t>(edge.weight_count));
+    return edge.weight_offset + resolved_index;
+}
+
 void NetworkRegistry::set_netcon_weight(int connection_id, int array_index, double value) {
     if (!std::isfinite(value)) {
         throw std::runtime_error("connection weight must be finite");
@@ -840,6 +848,11 @@ int NetworkRegistry::get_netcon_source_event_target_id(int connection_id) const 
     return source.source_kind == NetConSourceKind::EventTarget ? source.source_event_target_id : -1;
 }
 
+int NetworkRegistry::get_netcon_source_spike_input_id(int connection_id) const {
+    const auto& source = event_source_slot_for_connection_(connection_id);
+    return source.source_kind == NetConSourceKind::SpikeInput ? source.spike_input_id : -1;
+}
+
 RealNetConSourceKey NetworkRegistry::get_real_netcon_source_key(int connection_id) const {
     const auto& source = event_source_slot_for_connection_(connection_id);
     if (source.source_kind != NetConSourceKind::RealCell) {
@@ -871,6 +884,12 @@ int NetworkRegistry::register_spike_source(int sid,
         .loc = source_loc,
     };
     const int source_slot = intern_real_event_source_slot_(source_key, threshold, false);
+    auto& source = event_source_slots_[static_cast<std::size_t>(source_slot)];
+    if (source.explicit_output_gid) {
+        throw std::runtime_error("spike source location is already registered");
+    }
+    source.output_gid = sid;
+    source.explicit_output_gid = true;
     const auto sid_index = static_cast<std::size_t>(sid);
     if (source_slot_by_sid_.size() <= sid_index) {
         source_slot_by_sid_.resize(sid_index + 1, -1);

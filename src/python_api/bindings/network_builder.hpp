@@ -38,27 +38,15 @@ class NetworkBuilder {
                              std::vector<double> values,
                              mind_sim::macro::frontend::Network::InitialHistoryLayout layout);
 
-    void set_dc_input(int roi_index, std::unordered_map<std::string, double> values);
     void use_region(int roi_index,
                     std::string library_path,
                     std::unordered_map<std::string, double> initial_state,
                     std::unordered_map<std::string, double> params);
-    void use_neural_field(std::string name,
-                          std::string library_path,
-                          mind_sim::macro::frontend::NodeToRoiMap node_map,
-                          mind_sim::macro::frontend::LocalConnectivity local,
-                          std::unordered_map<std::string, double> initial_state,
-                          std::unordered_map<std::string, double> params);
-    void use_neural_field(std::string name,
-                          std::string library_path,
-                          mind_sim::macro::frontend::NodeToRoiMap node_map,
-                          std::unordered_map<std::string, double> initial_state,
-                          std::unordered_map<std::string, double> params);
     void macro2macro(int source_roi,
                      int target_roi,
                      std::string library_path,
                      std::unordered_map<std::string, double> params);
-    void use_micro(int roi_index);
+    void use_micro(int roi_index, std::vector<std::string> exposures);
     void macro2micro(int roi_index,
                      std::string library_path,
                      const PointProcessView& target,
@@ -87,15 +75,6 @@ class NetworkBuilder {
         std::unordered_map<std::string, double> params{};
     };
 
-    struct FieldConfig {
-        std::string name{};
-        std::shared_ptr<mind_sim::macro::sim::NeuralFieldRule> rule{};
-        mind_sim::macro::frontend::NodeToRoiMap node_map;
-        mind_sim::macro::frontend::LocalConnectivity local;
-        std::unordered_map<std::string, double> state{};
-        std::unordered_map<std::string, double> params{};
-    };
-
     struct MacroToMacroConfig {
         int source{-1};
         int target{-1};
@@ -118,6 +97,7 @@ class NetworkBuilder {
         Sim* micro{nullptr};
         std::vector<int> gid_range_begins{};
         std::vector<int> gid_range_ends{};
+        std::vector<std::string> exposures{};
     };
 
     struct MicroInputConfig {
@@ -144,10 +124,8 @@ class NetworkBuilder {
     mind_sim::macro::frontend::Connectivity connectivity_;
     std::optional<std::vector<int>> recorded_rois_{};
     std::optional<std::vector<std::string>> recorded_outputs_{};
-    std::vector<std::unordered_map<std::string, double>> dc_inputs_{};
     std::optional<InitialHistoryConfig> initial_history_{};
     std::vector<RegionConfig> regions_{};
-    std::vector<FieldConfig> fields_{};
     std::vector<MacroToMacroConfig> macro_to_macro_{};
     std::vector<MicroBindingConfig> micro_bindings_{};
     std::vector<MicroInputConfig> micro_inputs_{};

@@ -8,7 +8,7 @@ NEURON {
 
 MIND {
     ROLE MACRO2MICRO
-    TARGET_INPUT ca3_input
+    READ_SOURCE ca3_input
 }
 
 PARAMETER {
