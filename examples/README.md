@@ -12,7 +12,7 @@ cd MIND_Sim
 conda create -n mind_sim python=3.11 -y
 conda activate mind_sim
 conda install -c conda-forge cmake ninja bison flex -y
-pip install -e .
+pip install .
 ```
 
 Compile the MIND_Sim mechanisms:

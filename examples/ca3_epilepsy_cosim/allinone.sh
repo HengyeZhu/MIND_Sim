@@ -12,7 +12,6 @@ OUTDIR="${OUTDIR:-${SCRIPT_DIR}/outputs/allinone_${DURATION_MS}ms}"
 RUN_EXPERIMENTS="${RUN_EXPERIMENTS:-1}"
 RUN_COMPARE="${RUN_COMPARE:-1}"
 REBUILD_MECHS="${REBUILD_MECHS:-1}"
-MIND_NRNIVMODL="${MIND_NRNIVMODL:-mind_nrnivmodl}"
 
 MIND_SCRIPT="${SCRIPT_DIR}/mind_sim/run_vep_ca3_cosim.py"
 TVB_NEURON_SCRIPT="${SCRIPT_DIR}/neuron_tvb/run_tvb_neuron_ca3_cosim.py"
@@ -85,15 +84,72 @@ require_library() {
   ldd "${library}" | tee "${log}"
 }
 
+require_mind_sim_install() {
+  local prefix="${CONDA_PREFIX:-}"
+  if [[ -z "${prefix}" ]]; then
+    echo "error: no active conda environment" >&2
+    exit 1
+  fi
+
+  local compiler_path
+  compiler_path="$(command -v mind_nrnivmodl || true)"
+  if [[ -z "${compiler_path}" ]]; then
+    echo "error: mind_nrnivmodl was not found in ${MIND_ENV}" >&2
+    echo "install MIND_Sim in the ${MIND_ENV} environment with: conda activate ${MIND_ENV}; pip install ." >&2
+    exit 1
+  fi
+  case "${compiler_path}" in
+    "${prefix}/bin/"*) ;;
+    *)
+      echo "error: mind_nrnivmodl is not from the active conda environment: ${compiler_path}" >&2
+      echo "expected it under: ${prefix}/bin" >&2
+      exit 1
+      ;;
+  esac
+
+  local paths_file="${LOGDIR}/mind_sim_install_paths.txt"
+  python - <<'PY' > "${paths_file}"
+from pathlib import Path
+import mind_sim
+import mind_sim._native as native
+
+print(Path(mind_sim.__file__).resolve())
+print(Path(native.__file__).resolve())
+PY
+
+  local package_path native_path
+  package_path="$(sed -n '1p' "${paths_file}")"
+  native_path="$(sed -n '2p' "${paths_file}")"
+  rm -f "${paths_file}"
+
+  case "${package_path}" in
+    "${prefix}/"*) ;;
+    *)
+      echo "error: mind_sim is not imported from the active conda environment: ${package_path}" >&2
+      echo "install MIND_Sim in the ${MIND_ENV} environment with: conda activate ${MIND_ENV}; pip install ." >&2
+      exit 1
+      ;;
+  esac
+  case "${native_path}" in
+    "${prefix}/"*) ;;
+    *)
+      echo "error: mind_sim._native is not imported from the active conda environment: ${native_path}" >&2
+      echo "install MIND_Sim in the ${MIND_ENV} environment with: conda activate ${MIND_ENV}; pip install ." >&2
+      exit 1
+      ;;
+  esac
+
+}
+
 prepare_mind_mechanisms() {
   local mod_dir="${SCRIPT_DIR}/mind_sim/mod"
 
   echo
   echo "== MIND_Sim mechanisms, NVHPC =="
   conda activate "${MIND_ENV}"
-  require_executable "${MIND_NRNIVMODL}"
+  require_mind_sim_install
   clean_mod_builds "${mod_dir}"
-  "${MIND_NRNIVMODL}" "${mod_dir}" 2>&1 | tee "${LOGDIR}/mind_nrnivmodl.log"
+  mind_nrnivmodl "${mod_dir}" 2>&1 | tee "${LOGDIR}/mind_nrnivmodl.log"
   require_nvhpc_library "${mod_dir}/x86_64/libcorenrnmech.so" "${LOGDIR}/mind_nrnivmodl.ldd.log"
   conda deactivate
 }
@@ -132,6 +188,7 @@ run_mind() {
   echo
   echo "== MIND_Sim async, ${threads} thread(s) =="
   conda activate "${MIND_ENV}"
+  require_mind_sim_install
   unset MIND_SIM_FORCE_SERIAL_PIPELINE
   python "${MIND_SCRIPT}" \
     --connectivity-csv "${CONNECTIVITY_CSV}" \
