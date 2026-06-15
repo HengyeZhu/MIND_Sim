@@ -93,11 +93,12 @@ The CA3 all-in-one script uses TVB+NEURON as the reference. A direct TVB+CoreNEU
 
 ### Frontend Build
 
-The [HL23 frontend acceleration example](https://github.com/HengyeZhu/MIND_Sim/tree/main/examples/hl23_frontend_acceleration) compares MIND_Sim's Python frontend with a CoreNEURON baseline. The following timings are for 100ms simulation time on CPU.
+The [HL23 frontend acceleration example](https://github.com/HengyeZhu/MIND_Sim/tree/main/examples/hl23_frontend_acceleration) compares MIND_Sim's Python frontend with a CoreNEURON baseline. The following timings are for 100ms simulation time.
 
 | Workflow | Threads | Pre-run | Run |
 | --- | ---: | ---: | ---: |
-| MIND_Sim frontend | 4 | 0.751s | 97.715s |
+| MIND_Sim frontend (CPU) | 4 | 0.751s | 97.715s |
+| MIND_Sim frontend (GPU) | GPU | 0.992s | 19.054s |
 | CoreNEURON | 4 | 16.001s | 102.338s |
 
 For the same 100ms run, the maximum absolute voltage difference is `1.88621e-07 mV` across the recorded soma traces. Spike times are exactly equal.
