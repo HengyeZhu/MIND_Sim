@@ -76,7 +76,9 @@ A single microcircuit can contribute selected exposures for one or more ROIs. Wi
 
 By rewriting the NEURON simulator frontend in C++, MIND_Sim improves micro-network construction speed by more than 10x. This has been observed across multiple models.
 
-For full cosimulation, runtime is usually dominated by the micro-scale simulation itself. Therefore, although MIND_Sim provides an overlap pipeline, its benefit is limited in this example because macro simulation and transformation together take only a small fraction of the total runtime. The [CA3 epilepsy co-simulation example](https://github.com/HengyeZhu/MIND_Sim/tree/main/examples/ca3_epilepsy_cosim) compares MIND_Sim with a TVB+NEURON. The following timings are for 1s simulation time.
+### Cosim
+
+For full cosimulation, runtime is usually dominated by the micro-scale simulation itself. Therefore, although MIND_Sim provides an overlap pipeline, its benefit is limited in this example because macro simulation and transformation together take only a small fraction of the total runtime. The [CA3 epilepsy co-simulation example](https://github.com/HengyeZhu/MIND_Sim/tree/main/examples/ca3_epilepsy_cosim) compares MIND_Sim with a TVB+NEURON reference. The following timings are for 1s simulation time.
 
 | Workflow | Threads | Pre-run | Run | Speedup |
 | --- | ---: | ---: | ---: | ---: |
@@ -87,7 +89,20 @@ For full cosimulation, runtime is usually dominated by the micro-scale simulatio
 
 For the same 1s runs, using the TVB+NEURON reference with TVB's official macro APIs, the maximum absolute differences between MIND_Sim and the reference are `1.28464e-06` for macro `x`, `1.4922e-09` for macro `z`, and `8.98019e-11 mV` for representative PYR, BAS, OLM, and PYR Adend3 voltage traces. The macro comparison includes the precision boundary between TVB's single-precision (`float32`) state/history storage and MIND_Sim's double-precision macro state. Spike sample indices are exactly equal for the representative PYR, BAS, and OLM cells. This is an example-level comparison, not a standardized benchmark.
 
-A direct TVB+CoreNEURON baseline is not used because, in a short-window TVB loop, each `pc.psolve()` call repeatedly re-enters embedded CoreNEURON instead of keeping a resident CoreNEURON execution state. Profiling shows that the dominant overheads are NEURON-side model preparation and CoreNEURON-side model loading. These costs made TVB+CoreNEURON slower than TVB+NEURON by 3.68x with one thread and 5.65x with four threads. This motivates a co-simulation simulator built directly on CoreNEURON: MPI-level coupling alone cannot efficiently use CoreNEURON's GPU mode for future scaling.
+The CA3 all-in-one script uses TVB+NEURON as the reference. A direct TVB+CoreNEURON baseline is not used in the table because, in a short-window TVB loop, each `pc.psolve()` call repeatedly pays NEURON-side model preparation and CoreNEURON-side model loading costs. These costs made TVB+CoreNEURON slower than TVB+NEURON by 3.68x with one thread and 5.65x with four threads. This motivates a co-simulation simulator built directly on CoreNEURON: MPI-level coupling alone cannot efficiently use CoreNEURON's GPU mode for future scaling.
+
+### Frontend Build
+
+The [HL23 frontend acceleration example](https://github.com/HengyeZhu/MIND_Sim/tree/main/examples/hl23_frontend_acceleration) compares MIND_Sim's Python frontend with a CoreNEURON baseline. The following timings are for 100ms simulation time on CPU.
+
+| Workflow | Threads | Pre-run | Run |
+| --- | ---: | ---: | ---: |
+| MIND_Sim frontend | 4 | 0.751s | 97.715s |
+| CoreNEURON | 4 | 16.001s | 102.338s |
+
+For the same 100ms run, the maximum absolute voltage difference is `1.88621e-07 mV` across the recorded soma traces. Spike times are exactly equal.
+
+Frontend modeling speedup depends on two main factors. More biophysically detailed neuron models benefit more from MIND_Sim's faster frontend construction. Networks with heavier connection construction benefit less, because connection setup is still limited by loop-based creation patterns.
 
 ## Acknowledgements
 
