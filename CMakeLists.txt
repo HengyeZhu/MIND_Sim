@@ -728,6 +728,9 @@ target_compile_definitions(mind_nrnivmodl PRIVATE
   MIND_SIM_MOD_CXX_FLAGS="${MIND_SIM_MOD_CXX_FLAGS}"
   MIND_SIM_MOD_LINK_FLAGS="${MIND_SIM_MOD_LINK_FLAGS}"
 )
+if(MIND_SIM_ENABLE_GPU)
+  target_compile_definitions(mind_nrnivmodl PRIVATE MIND_SIM_ENABLE_GPU=1)
+endif()
 install(TARGETS nmodl RUNTIME DESTINATION mind_sim/bin)
 install(TARGETS mind_nrnivmodl RUNTIME DESTINATION mind_sim/bin)
 

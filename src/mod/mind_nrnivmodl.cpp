@@ -791,7 +791,7 @@ void validate_micro_output_net_receive_ast(const JsonValue& ast) {
 
 void compile_object_file(const fs::path& source_path, const fs::path& object_path) {
     fs::create_directories(object_path.parent_path());
-    run({
+    std::vector<std::string> command{
         shell_quote(MIND_SIM_CXX_COMPILER),
         "-std=c++20",
         "-O2",
@@ -813,11 +813,17 @@ void compile_object_file(const fs::path& source_path, const fs::path& object_pat
         "-DDISABLE_HOC_EXP",
         "-DNET_RECEIVE_BUFFERING=0",
         "-DNRN_PRCELLSTATE=0",
+#if defined(MIND_SIM_ENABLE_GPU)
+        "-DCORENEURON_ENABLE_GPU",
+        "-DR123_USE_INTRIN_H=0",
+        "-DEIGEN_DONT_VECTORIZE=1",
+#endif
         "-c",
         shell_quote(source_path),
         "-o",
         shell_quote(object_path),
-    });
+    };
+    run(command);
 }
 
 void link_shared_library(const std::vector<fs::path>& objects, const fs::path& library_path) {
@@ -906,7 +912,7 @@ struct NmodlGenerated {
                                                const fs::path& scratch_dir) {
     fs::create_directories(generated_dir);
     fs::create_directories(scratch_dir);
-    run_in_dir(mod.parent_path(), {
+    std::vector<std::string> command{
         shell_quote(resolved_nmodl_path()),
         shell_quote(mod.filename()),
         "-o",
@@ -914,14 +920,20 @@ struct NmodlGenerated {
         "--scratch",
         shell_quote(scratch_dir),
         "--coreneuron",
+#if defined(MIND_SIM_ENABLE_GPU)
+        "acc",
+        "--oacc",
+#else
         "host",
         "--c",
+#endif
         "passes",
         "--json-ast",
         "--inline",
         "codegen",
         "--force",
-    }, false);
+    };
+    run_in_dir(mod.parent_path(), command, false);
 
     const std::string name = mod.stem().string();
     const fs::path generated_cpp = generated_dir / (name + ".cpp");
