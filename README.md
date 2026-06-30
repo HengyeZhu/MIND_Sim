@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/1222268213.svg)](https://doi.org/10.5281/zenodo.21073036)
+
 <p align="center">
   <img
     alt="MIND_Sim logo"
