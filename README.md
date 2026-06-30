@@ -1,5 +1,3 @@
-[![DOI](https://zenodo.org/badge/1222268213.svg)](https://doi.org/10.5281/zenodo.21073036)
-
 <p align="center">
   <img
     alt="MIND_Sim logo"
@@ -11,6 +9,12 @@
 <h3 align="center">
   MIND_Sim is designed for studying Multiscale Integrative Neuronal Dynamics
 </h3>
+
+<p align="center">
+  <a href="https://doi.org/10.5281/zenodo.21073036">
+    <img src="https://zenodo.org/badge/1222268213.svg" alt="DOI">
+  </a>
+</p>
 
 <p align="center">
   <a href="#installation">Installation</a> •
