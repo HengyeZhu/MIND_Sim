@@ -24,6 +24,42 @@ struct MicroEventTable {
         time.resize(count);
         index.resize(count);
     }
+
+    [[nodiscard]] bool is_sorted_by_time_index() const {
+        for (std::size_t i = 1; i < time.size(); ++i) {
+            if (time[i - 1] > time[i]) {
+                return false;
+            }
+            if (time[i - 1] == time[i] && index[i - 1] > index[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void sort_by_time_index() {
+        if (is_sorted_by_time_index()) {
+            return;
+        }
+        std::vector<std::size_t> order(time.size());
+        std::iota(order.begin(), order.end(), std::size_t{0});
+        std::stable_sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
+            if (time[lhs] == time[rhs]) {
+                return index[lhs] < index[rhs];
+            }
+            return time[lhs] < time[rhs];
+        });
+        std::vector<double> sorted_time;
+        std::vector<int> sorted_index;
+        sorted_time.reserve(time.size());
+        sorted_index.reserve(index.size());
+        for (std::size_t item: order) {
+            sorted_time.push_back(time[item]);
+            sorted_index.push_back(index[item]);
+        }
+        time.swap(sorted_time);
+        index.swap(sorted_index);
+    }
 };
 
 struct MicroSpikeTableView {

@@ -1,5 +1,6 @@
 # CMake / native build outputs
 /build/
+/build*/
 /cmake-build-*/
 /CMakeFiles/
 /CMakeCache.txt
@@ -13,12 +14,15 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
+dist/
+wheelhouse/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 
 # Local environments
 .venv/
+.wheel-test-venv/
 venv/
 env/
 .env

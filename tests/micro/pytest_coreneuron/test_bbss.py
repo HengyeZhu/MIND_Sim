@@ -6,7 +6,7 @@ import mind_sim as ms
 
 
 def _run_layered_network(chunks):
-    sim = ms.Sim()
+    sim = ms.micro.sim()
     sim.set_device("cpu")
     sim.set_num_threads(1)
     sim.set_dt(0.025)

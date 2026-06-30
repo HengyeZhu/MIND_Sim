@@ -1,0 +1,13 @@
+Deprecated
+docutils
+h5py
+mako
+matplotlib
+networkx
+neuron
+numba
+numexpr
+numpy
+scipy
+six
+traitlets

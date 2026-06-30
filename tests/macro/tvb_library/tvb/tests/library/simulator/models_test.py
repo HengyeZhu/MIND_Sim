@@ -19,12 +19,12 @@ def macro_mod_dir():
     lib = MOD_DIR / "x86_64" / "libcorenrnmech.so"
     mod_mtime = max(path.stat().st_mtime for path in MOD_DIR.glob("*.mod"))
     if not lib.exists() or lib.stat().st_mtime < mod_mtime:
-        subprocess.run(["mind_nrnivmodl", str(MOD_DIR)], check=True)
+        subprocess.run(["mind-nrnivmodl", str(MOD_DIR)], check=True)
     return MOD_DIR
 
 
 def _configure_macro_runtime(macro_mod_dir, dt):
-    ms.macro.load_mech(macro_mod_dir)
+    ms.load_mech(macro_mod_dir)
     ms.macro.dt(dt)
     ms.macro.exchange_window(dt)
 
@@ -364,7 +364,7 @@ class TestModels:
             weights=weights,
             delays=np.zeros((2, 2)),
         )
-        for roi in rois.rois():
+        for roi in rois:
             roi.use_macro(model, initial_state=states[roi.label], params=params or {})
             for output in outputs:
                 roi.record(output)
@@ -374,7 +374,8 @@ class TestModels:
             [[[states["A"][output], states["B"][output]] for output in outputs]],
             dtype=float,
         )
-        rois.initial_history(history, outputs=outputs, layout="time_output_roi")
+        for roi_index, roi in enumerate(rois):
+            roi.initial_history(history[:, :, roi_index], outputs=outputs)
         return rois
 
     @staticmethod
@@ -384,7 +385,7 @@ class TestModels:
             weights=np.zeros((2, 2)),
             delays=np.zeros((2, 2)),
         )
-        for roi in rois.rois():
+        for roi in rois:
             roi_params = dict(params or {})
             if constant_params is not None:
                 roi_params.update(constant_params[roi.label])
@@ -395,7 +396,8 @@ class TestModels:
             [[[states[label][output] for label in ("A", "B")] for output in outputs]],
             dtype=float,
         )
-        rois.initial_history(history, outputs=outputs, layout="time_output_roi")
+        for roi_index, roi in enumerate(rois):
+            roi.initial_history(history[:, :, roi_index], outputs=outputs)
         return rois
 
     @staticmethod
@@ -1320,7 +1322,7 @@ class TestModels:
             weights=np.zeros((4, 4)),
             delays=np.zeros((4, 4)),
         )
-        for roi in rois.rois():
+        for roi in rois:
             roi_params = dict(params)
             roi_params["c_0"] = coupling_values[roi.label]
             roi.use_macro("tvb_k_ion_exchange", initial_state=states[roi.label], params=roi_params)
@@ -1330,7 +1332,8 @@ class TestModels:
             [[[states[label][output] for label in labels] for output in outputs]],
             dtype=float,
         )
-        rois.initial_history(history, outputs=outputs, layout="time_output_roi")
+        for roi_index, roi in enumerate(rois):
+            roi.initial_history(history[:, :, roi_index], outputs=outputs)
 
         cube = _records_cube(ms.macro.Simulator(rois).run(n_steps=1))
         initial = np.array([[states[label][output] for output in outputs] for label in labels])

@@ -3,7 +3,7 @@ from tests.micro.nmodl.transpiler.usecases.useion.style_ion import useion_mod_di
 
 
 def test_valence():
-    sim = ms.Sim()
-    sim.load_mech(str(useion_mod_dir()))
+    ms.load_mech(useion_mod_dir())
+    sim = ms.micro.sim()
 
     assert sim.ion_charge("K_ion") == 222.0

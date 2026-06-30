@@ -18,6 +18,10 @@ MacroRuntime::MacroRuntime(mind_sim::macro::frontend::Network network)
     }
 }
 
+double MacroRuntime::dt() const noexcept {
+    return network_.dt();
+}
+
 mind_sim::macro::sim::MacroSimulationResult MacroRuntime::run(double t_stop) {
     return run(t_stop, network_.dt());
 }

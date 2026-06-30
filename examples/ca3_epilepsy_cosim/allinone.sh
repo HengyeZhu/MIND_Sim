@@ -26,11 +26,6 @@ TVB_4="${TVB_4:-${OUTDIR}/tvb_neuron_${DURATION_MS}ms_4thread.npz}"
 
 mkdir -p "${OUTDIR}" "${LOGDIR}" "${PLOTDIR}"
 
-if ! command -v conda >/dev/null 2>&1; then
-  echo "error: conda is required on PATH" >&2
-  exit 1
-fi
-
 CONDA_BASE="$(conda info --base)"
 # shellcheck source=/dev/null
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
@@ -43,114 +38,14 @@ clean_mod_builds() {
          "${mod_dir}/arm64"
 }
 
-require_executable() {
-  local executable="$1"
-  if [[ "${executable}" == */* ]]; then
-    if [[ -x "${executable}" ]]; then
-      return
-    fi
-  elif command -v "${executable}" >/dev/null 2>&1; then
-    return
-  fi
-  if [[ "${executable}" == */* ]]; then
-    echo "error: executable not found: ${executable}" >&2
-  else
-    echo "error: command not found: ${executable}" >&2
-  fi
-  exit 1
-}
-
-require_nvhpc_library() {
-  local library="$1"
-  local log="$2"
-  if [[ ! -f "${library}" ]]; then
-    echo "error: mechanism library was not generated: ${library}" >&2
-    exit 1
-  fi
-  ldd "${library}" | tee "${log}"
-  if ! ldd "${library}" | grep -Eq 'libnvc|libnvomp|libnvhpc|libacc'; then
-    echo "error: ${library} is not linked against the NVHPC runtime" >&2
-    exit 1
-  fi
-}
-
-require_library() {
-  local library="$1"
-  local log="$2"
-  if [[ ! -f "${library}" ]]; then
-    echo "error: mechanism library was not generated: ${library}" >&2
-    exit 1
-  fi
-  ldd "${library}" | tee "${log}"
-}
-
-require_mind_sim_install() {
-  local prefix="${CONDA_PREFIX:-}"
-  if [[ -z "${prefix}" ]]; then
-    echo "error: no active conda environment" >&2
-    exit 1
-  fi
-
-  local compiler_path
-  compiler_path="$(command -v mind_nrnivmodl || true)"
-  if [[ -z "${compiler_path}" ]]; then
-    echo "error: mind_nrnivmodl was not found in ${MIND_ENV}" >&2
-    echo "install MIND_Sim in the ${MIND_ENV} environment with: conda activate ${MIND_ENV}; pip install ." >&2
-    exit 1
-  fi
-  case "${compiler_path}" in
-    "${prefix}/bin/"*) ;;
-    *)
-      echo "error: mind_nrnivmodl is not from the active conda environment: ${compiler_path}" >&2
-      echo "expected it under: ${prefix}/bin" >&2
-      exit 1
-      ;;
-  esac
-
-  local paths_file="${LOGDIR}/mind_sim_install_paths.txt"
-  python - <<'PY' > "${paths_file}"
-from pathlib import Path
-import mind_sim
-import mind_sim._native as native
-
-print(Path(mind_sim.__file__).resolve())
-print(Path(native.__file__).resolve())
-PY
-
-  local package_path native_path
-  package_path="$(sed -n '1p' "${paths_file}")"
-  native_path="$(sed -n '2p' "${paths_file}")"
-  rm -f "${paths_file}"
-
-  case "${package_path}" in
-    "${prefix}/"*) ;;
-    *)
-      echo "error: mind_sim is not imported from the active conda environment: ${package_path}" >&2
-      echo "install MIND_Sim in the ${MIND_ENV} environment with: conda activate ${MIND_ENV}; pip install ." >&2
-      exit 1
-      ;;
-  esac
-  case "${native_path}" in
-    "${prefix}/"*) ;;
-    *)
-      echo "error: mind_sim._native is not imported from the active conda environment: ${native_path}" >&2
-      echo "install MIND_Sim in the ${MIND_ENV} environment with: conda activate ${MIND_ENV}; pip install ." >&2
-      exit 1
-      ;;
-  esac
-
-}
-
 prepare_mind_mechanisms() {
   local mod_dir="${SCRIPT_DIR}/mind_sim/mod"
 
   echo
-  echo "== MIND_Sim mechanisms, NVHPC =="
+  echo "== MIND_Sim mechanisms =="
   conda activate "${MIND_ENV}"
-  require_mind_sim_install
   clean_mod_builds "${mod_dir}"
-  mind_nrnivmodl "${mod_dir}" 2>&1 | tee "${LOGDIR}/mind_nrnivmodl.log"
-  require_nvhpc_library "${mod_dir}/x86_64/libcorenrnmech.so" "${LOGDIR}/mind_nrnivmodl.ldd.log"
+  mind-nrnivmodl "${mod_dir}" 2>&1 | tee "${LOGDIR}/mind-nrnivmodl.log"
   conda deactivate
 }
 
@@ -160,13 +55,11 @@ prepare_tvb_neuron_mechanisms() {
   echo
   echo "== TVB+NEURON mechanisms =="
   conda activate "${TVB_ENV}"
-  require_executable nrnivmodl
   clean_mod_builds "${mod_dir}"
   (
     cd "${mod_dir}"
     nrnivmodl .
   ) 2>&1 | tee "${LOGDIR}/tvb_neuron_nrnivmodl.log"
-  require_library "${mod_dir}/x86_64/libnrnmech.so" "${LOGDIR}/tvb_neuron_nrnivmodl.ldd.log"
   conda deactivate
 }
 
@@ -188,8 +81,6 @@ run_mind() {
   echo
   echo "== MIND_Sim async, ${threads} thread(s) =="
   conda activate "${MIND_ENV}"
-  require_mind_sim_install
-  unset MIND_SIM_FORCE_SERIAL_PIPELINE
   python "${MIND_SCRIPT}" \
     --connectivity-csv "${CONNECTIVITY_CSV}" \
     --duration-ms "${DURATION_MS}" \

@@ -54,7 +54,8 @@ void Network::configure_macro_to_micro_rule(
     std::vector<double> input_params,
     std::vector<int> macro2micro_indices,
     std::vector<int> macro2micro_source_ids,
-    std::vector<int> exposure_offsets) {
+    std::vector<int> exposure_offsets,
+    std::uint64_t rng_stream_id) {
     if (!input_rule) {
         throw std::runtime_error("micro input connection requires MicroInputRule");
     }
@@ -80,12 +81,15 @@ void Network::configure_macro_to_micro_rule(
         throw std::runtime_error("MicroInputRule exposure offset count does not match rule");
     }
     auto& binding = require_micro_binding(roi_value.index);
-    binding.input_rule = std::move(input_rule);
-    binding.input_state = std::move(input_state);
-    binding.input_params = std::move(input_params);
-    binding.macro2micro_indices = std::move(macro2micro_indices);
-    binding.macro2micro_source_ids = std::move(macro2micro_source_ids);
-    binding.exposure_offsets = std::move(exposure_offsets);
+    binding.input_transforms.push_back(MicroInputTransform{
+        .rule = std::move(input_rule),
+        .state = std::move(input_state),
+        .params = std::move(input_params),
+        .macro2micro_indices = std::move(macro2micro_indices),
+        .macro2micro_source_ids = std::move(macro2micro_source_ids),
+        .exposure_offsets = std::move(exposure_offsets),
+        .rng_stream_id = rng_stream_id,
+    });
 }
 
 void Network::configure_micro_output_rule(

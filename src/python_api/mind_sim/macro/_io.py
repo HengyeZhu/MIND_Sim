@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .. import _native
-from .._network import Network, _set_macro_dt
+from .._network import Network
 
 
 def load_rois(
@@ -21,14 +21,8 @@ def load_rois(
     return Network(labels=list(labels), weights=weights, delays=delays)
 
 
-def load_mech(directory: str | Path) -> None:
-    _native._macro_config.load_mech(str(directory))
-
-
 def dt(value: float) -> None:
-    dt_value = float(value)
-    _native._macro_config.dt(dt_value)
-    _set_macro_dt(dt_value)
+    _native._macro_config.dt(float(value))
 
 
 def exchange_window(value: float) -> None:

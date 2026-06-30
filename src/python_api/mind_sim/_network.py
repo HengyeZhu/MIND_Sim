@@ -1,21 +1,21 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from decimal import Decimal
 
 from . import _native
 
 
-_macro_dt: float | None = None
-
-
-def _set_macro_dt(value: float) -> None:
-    global _macro_dt
-    _macro_dt = value
-
-
 def _values(values: Mapping[str, float] | None) -> dict[str, float]:
     return {str(name): float(value) for name, value in dict(values or {}).items()}
+
+
+def _output_names(outputs) -> list[str]:
+    if outputs is None:
+        return []
+    if isinstance(outputs, str):
+        return [outputs]
+    return [str(name) for name in outputs]
 
 
 def _apply_macro_config(builder) -> None:
@@ -27,7 +27,6 @@ class ROI:
         self._network = network
         self._index = int(index)
         self.label = str(label)
-        self.name = self.label
 
     def record(self, output: str, /) -> "ROI":
         self._network._builder.record(self._index, output)
@@ -49,9 +48,9 @@ class ROI:
         return self
 
     def insert(self, source, mechanism, *, params: Mapping[str, float] | None = None) -> "ROI":
-        source_roi = self._network._builder.roi(str(source))
+        source_index = self._network._roi_index(source)
         self._network._builder.macro2macro(
-            int(source_roi.index),
+            source_index,
             self._index,
             str(mechanism),
             _values(params),
@@ -100,8 +99,17 @@ class ROI:
         )
         return self
 
-    def use_micro(self, *, exposures: Iterable[str]) -> "ROI":
-        self._network._builder.use_micro(self._index, [str(name) for name in exposures])
+    def use_micro(self, micro, *, exposures: Iterable[str]) -> "ROI":
+        self._network._builder.use_micro(self._index, micro, [str(name) for name in exposures])
+        return self
+
+    def initial_history(self, history, *, outputs, layout: str = "time_output") -> "ROI":
+        self._network._builder.set_roi_initial_history(
+            self._index,
+            history,
+            _output_names(outputs),
+            str(layout),
+        )
         return self
 
     def __repr__(self) -> str:
@@ -123,6 +131,7 @@ class Network:
         self._builder = _native._NetworkBuilder(connectivity)
         _apply_macro_config(self._builder)
         self._rois = [ROI(self, roi.index, roi.label) for roi in self._builder.rois()]
+        self._roi_by_label = {roi.label: roi for roi in self._rois}
 
     @property
     def labels(self) -> list[str]:
@@ -137,14 +146,24 @@ class Network:
         return self._connectivity.delays
 
     def roi(self, name: str) -> ROI:
-        roi = self._builder.roi(str(name))
-        return self._roi_from_native(roi)
+        label = str(name)
+        try:
+            return self._roi_by_label[label]
+        except KeyError as exc:
+            raise KeyError(f"unknown ROI label: {label}") from exc
 
-    def _roi_from_native(self, roi) -> ROI:
-        return self._rois[int(roi.index)]
+    def _roi_index(self, roi) -> int:
+        if isinstance(roi, ROI):
+            if roi._network is not self:
+                raise ValueError("ROI belongs to a different Network")
+            return roi._index
+        return self.roi(str(roi))._index
 
-    def rois(self) -> list[ROI]:
-        return list(self._rois)
+    def __iter__(self) -> Iterator[ROI]:
+        return iter(self._rois)
+
+    def __len__(self) -> int:
+        return len(self._rois)
 
     def roi_count(self) -> int:
         return int(self._builder.roi_count())
@@ -152,21 +171,13 @@ class Network:
     def min_positive_delay(self) -> float:
         return float(self._builder.min_positive_delay())
 
-    def initial_history(self, history, *, outputs=None, layout: str = "time_output_roi") -> "Network":
-        self._builder.set_initial_history(
-            history,
-            list(outputs) if outputs is not None else [],
-            str(layout),
-        )
-        return self
-
     def _build_native(self):
         return self._builder.build()
 
 
 class Simulator:
-    def __init__(self, rois: Network):
-        self._native = _native.Simulator(rois._build_native())
+    def __init__(self, rois: Network, macro2micro_seed: int = 1):
+        self._native = _native.Simulator(rois._build_native(), macro2micro_seed)
 
     def run(self, t_stop: float):
         return self._native.run(float(t_stop))
@@ -182,9 +193,7 @@ class MacroSimulator:
                 raise TypeError("run accepts either t_stop or n_steps, not both")
             if not isinstance(n_steps, int) or isinstance(n_steps, bool):
                 raise TypeError("n_steps must be an integer")
-            if _macro_dt is None:
-                raise RuntimeError("run(n_steps=...) requires ms.macro.dt(...)")
-            t_stop = float(Decimal(str(n_steps)) * Decimal(str(_macro_dt)))
+            t_stop = float(Decimal(str(n_steps)) * Decimal(str(self._native.dt())))
         if t_stop is None:
             raise TypeError("run requires t_stop or n_steps")
         return self._native.run(float(t_stop))

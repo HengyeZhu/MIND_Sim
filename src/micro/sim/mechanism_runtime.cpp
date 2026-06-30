@@ -262,7 +262,7 @@ struct MechanismArtifactPath {
     } else {
         throw std::runtime_error(
             "could not find CoreNEURON mechanism library libcorenrnmech.so under mechanism path: " +
-            path.string() + "; run nrnivmodl -coreneuron and mind_nrnivmodl on the MOD directory first");
+            path.string() + "; run nrnivmodl -coreneuron and mind-nrnivmodl on the MOD directory first");
     }
 
     return MechanismArtifactPath{

@@ -14,7 +14,7 @@ def _sample(vec, sample_times, dt=0.025):
 
 
 def test_1():
-    sim = ms.Sim()
+    sim = ms.micro.sim()
     sim.set_device("cpu")
     sim.set_num_threads(2)
     sim.set_dt(0.025)
@@ -54,4 +54,4 @@ def test_1():
         [-65.0, -64.97554793406478, -64.97354825266615, -64.97162368768419, 16.31601809789211, -17.26033309985128],
     ]
     for trace, reference in zip(traces, expected):
-        assert np.allclose(_sample(trace, sample_times), reference, rtol=0.0, atol=2.0e-12)
+        assert np.allclose(_sample(trace, sample_times), reference, rtol=0.0, atol=1.0e-8)

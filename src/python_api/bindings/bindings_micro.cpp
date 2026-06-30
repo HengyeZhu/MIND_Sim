@@ -5,43 +5,25 @@
 
 namespace mind_sim::python_api::bindings {
 
-std::vector<Sim*>& default_micro_registry() {
-    static std::vector<Sim*> registry;
-    return registry;
+MicroConfig& micro_config() {
+    static MicroConfig config;
+    return config;
 }
 
 Sim::Sim() {
-    register_default_micro(this);
+    micro_config().apply(*this);
 }
 
-Sim::~Sim() {
-    unregister_default_micro(this);
-}
-
-void register_default_micro(Sim* sim) {
-    if (sim == nullptr) {
-        return;
-    }
-    auto& registry = default_micro_registry();
-    if (std::find(registry.begin(), registry.end(), sim) == registry.end()) {
-        registry.push_back(sim);
+void MicroConfig::load_mech(std::string directory) {
+    if (std::find(mech_dirs_.begin(), mech_dirs_.end(), directory) == mech_dirs_.end()) {
+        mech_dirs_.push_back(std::move(directory));
     }
 }
 
-void unregister_default_micro(Sim* sim) {
-    auto& registry = default_micro_registry();
-    registry.erase(std::remove(registry.begin(), registry.end(), sim), registry.end());
-}
-
-Sim& default_micro() {
-    auto& registry = default_micro_registry();
-    if (registry.empty()) {
-        throw std::runtime_error("ROI.use_micro() requires one ms.Sim() to exist");
+void MicroConfig::apply(Sim& sim) const {
+    for (const auto& directory: mech_dirs_) {
+        sim.load_mech(directory);
     }
-    if (registry.size() != 1) {
-        throw std::runtime_error("ROI.use_micro() requires exactly one ms.Sim()");
-    }
-    return *registry.front();
 }
 
 void bind_micro(nb::module_& m) {
@@ -477,14 +459,6 @@ void bind_micro(nb::module_& m) {
         .def("record", nb::overload_cast<const VariableRefView&>(&VectorView::record), nb::arg("ref"))
         .def("record", nb::overload_cast<const TimeRefView&>(&VectorView::record), nb::arg("ref"))
         .def("to_python", &VectorView::to_python)
-        .def("save_h5",
-             [](const VectorView& vec, const std::string& path, const std::string& name) {
-                 mind_sim::io::save_vector_h5(vec.buffer ? vec.buffer->samples : std::vector<double>{},
-                                                path,
-                                                name);
-             },
-             nb::arg("path"),
-             nb::arg("name") = "values")
         .def("size", &VectorView::size)
         .def("__len__", &VectorView::size)
         .def("__getitem__",
@@ -496,6 +470,10 @@ void bind_micro(nb::module_& m) {
                  return "<mind_sim.Vector size=" + std::to_string(vec.size()) + ">";
              });
 
+    nb::class_<MicroConfig>(m, "_MicroConfig")
+        .def("load_mech", &MicroConfig::load_mech, nb::arg("directory"));
+    m.attr("_micro_config") = nb::cast(&micro_config());
+
     nb::class_<Sim>(m, "Sim")
         .def(nb::init<>())
         .def_rw("name", &Sim::name)
@@ -504,18 +482,20 @@ void bind_micro(nb::module_& m) {
         .def("get_dt", &Sim::get_dt)
         .def("set_num_threads", &Sim::set_num_threads)
         .def("get_num_threads", &Sim::get_num_threads)
-        .def("load_mech", &Sim::load_mech)
         .def("ion_register", &Sim::ion_register, nb::arg("ion"), nb::arg("charge"))
         .def("ion_charge", &Sim::ion_charge, nb::arg("ion_mechanism"))
         .def("nernst", &Sim::nernst, nb::arg("ci"), nb::arg("co"), nb::arg("charge"))
         .def("ghk", &Sim::ghk, nb::arg("v"), nb::arg("ci"), nb::arg("co"), nb::arg("charge"))
-        .def("get_loaded_mech_paths", &Sim::get_loaded_mech_paths)
         .def("__getattr__",
              [](const Sim& sim, const std::string& key) {
                  if (key == "name") {
                      return nb::cast(sim.name);
                  }
-                 return nb::cast(sim.get_global(key));
+                 try {
+                     return nb::cast(sim.get_global(key));
+                 } catch (const std::exception&) {
+                     throw nb::attribute_error(("Sim has no attribute '" + key + "'").c_str());
+                 }
              })
         .def("__setattr__",
              [](Sim& sim, const std::string& key, nb::handle value) {

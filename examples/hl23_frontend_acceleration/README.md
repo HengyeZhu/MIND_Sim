@@ -14,11 +14,30 @@ Default performance settings:
 For performance comparisons, compile both MIND_Sim and CoreNEURON with NVHPC.
 This enables compiler-side automatic optimization even when the benchmark runs
 on CPU.
+The script uses `nvc` and `nvc++` for the CoreNEURON comparison. Make those
+compilers available on `PATH`, or set `NVHPC_CC=/path/to/nvc` and
+`NVHPC_CXX=/path/to/nvc++`. Set `NVHPC_LIB_DIR` only if the NVHPC runtime
+libraries are not already available to the dynamic linker.
+
+## Model Assets
+
+The SWC morphologies and generated HOC templates are included. Download the
+upstream Human L2/3 model:
+
+```text
+https://github.com/KantYao/Human-L2-3-Cortical-Microcircuit
+```
+
+Copy the upstream MOD files from `L23Net/mod/` into:
+
+```text
+examples/hl23_frontend_acceleration/assets/mod/
+```
 
 ## Run
 
 ```bash
-cd /home/gluciferd/MIND_Sim
+cd MIND_Sim
 bash examples/hl23_frontend_acceleration/allinone.sh
 ```
 

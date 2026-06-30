@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <ctime>
 #include <map>
 #include <optional>
@@ -50,13 +51,20 @@ extern const std::regex regex_special_chars;
 
 namespace {
 
+enum class MindRole {
+    Region,
+    MacroToMacro,
+    MacroToMicro,
+    MicroToMacro,
+};
+
 struct MindEndpointBinding {
     std::string exposure;
     std::string variable;
 };
 
 struct MindSpec {
-    std::string role;
+    MindRole role{MindRole::Region};
     std::vector<std::string> exposures;
     std::vector<MindEndpointBinding> read_source;
     std::vector<MindEndpointBinding> read_target;
@@ -80,6 +88,57 @@ struct MindRenderData {
     int field_count = 0;
     int datum_count = 0;
 };
+
+struct MindRegistrationNames {
+    std::vector<std::string> state_names;
+    std::vector<std::string> param_names;
+    std::vector<std::string> read_source_exposures;
+    std::vector<std::string> read_source_variables;
+    std::vector<std::string> read_target_exposures;
+    std::vector<std::string> read_target_variables;
+    std::vector<std::string> write_source_exposures;
+    std::vector<std::string> write_source_variables;
+    std::vector<std::string> write_target_exposures;
+    std::vector<std::string> write_target_variables;
+};
+
+std::string mind_upper(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::toupper(c));
+    });
+    return value;
+}
+
+MindRole mind_role_from_string(const std::string& value) {
+    const auto role = mind_upper(value);
+    if (role == "REGION") {
+        return MindRole::Region;
+    }
+    if (role == "MACRO2MACRO") {
+        return MindRole::MacroToMacro;
+    }
+    if (role == "MACRO2MICRO") {
+        return MindRole::MacroToMicro;
+    }
+    if (role == "MICRO2MACRO") {
+        return MindRole::MicroToMacro;
+    }
+    throw std::runtime_error("unsupported MIND ROLE " + value);
+}
+
+const char* mind_role_name(MindRole role) {
+    switch (role) {
+    case MindRole::Region:
+        return "REGION";
+    case MindRole::MacroToMacro:
+        return "MACRO2MACRO";
+    case MindRole::MacroToMicro:
+        return "MACRO2MICRO";
+    case MindRole::MicroToMacro:
+        return "MICRO2MACRO";
+    }
+    return "REGION";
+}
 
 std::string coreneuron_field_role(const std::shared_ptr<symtab::Symbol>& symbol) {
     if (symbol->has_any_property(NmodlType::range_var)) {
@@ -211,7 +270,7 @@ std::vector<std::string> mind_binding_variables(const std::vector<MindEndpointBi
     return out;
 }
 
-MindSpec mind_spec_from_parts(const std::string& role,
+MindSpec mind_spec_from_parts(MindRole role,
                               std::vector<std::string> exposures,
                               const std::vector<std::string>& source_records,
                               const std::vector<std::string>& target_records) {
@@ -233,20 +292,15 @@ std::optional<MindSpec> mind_spec_from_ast(const ast::Program& node) {
     if (block == nullptr) {
         throw std::runtime_error("MIND block AST node has unexpected type");
     }
-    auto role = block->get_role()->eval();
+    const auto role = mind_role_from_string(block->get_role()->eval());
     auto source_records = mind_string_values(block->get_source_exposures());
     auto target_records = mind_string_values(block->get_target_exposures());
     auto exposures = std::vector<std::string>{};
-    if (role == "REGION") {
+    if (role == MindRole::Region) {
         exposures = std::move(source_records);
         source_records.clear();
     }
-    auto spec = mind_spec_from_parts(role, std::move(exposures), source_records, target_records);
-    if (spec.role != "REGION" && spec.role != "MACRO2MACRO" && spec.role != "MACRO2MICRO" &&
-        spec.role != "MICRO2MACRO") {
-        throw std::runtime_error("unsupported MIND ROLE " + spec.role);
-    }
-    return spec;
+    return mind_spec_from_parts(role, std::move(exposures), source_records, target_records);
 }
 
 std::vector<std::string> mind_names_of(const std::vector<MindVariable>& values) {
@@ -310,11 +364,6 @@ std::string mind_default_array(const std::string& symbol,
     return out.str();
 }
 
-template <typename T>
-const char* mind_array_ref(const std::vector<T>& values, const char* symbol) {
-    return values.empty() ? "nullptr" : symbol;
-}
-
 std::string mind_offset_map(const std::string& symbol,
                             const std::vector<std::string>& names,
                             const std::map<std::string, int>& offsets) {
@@ -334,89 +383,121 @@ std::string mind_offset_map(const std::string& symbol,
     return out.str();
 }
 
-std::string mind_role_kind(const std::string& role) {
-    if (role == "REGION") {
-        return "Region";
+const char* mind_apply_context_type(MindRole role) {
+    switch (role) {
+    case MindRole::Region:
+        return "mind_sim::mod::RegionContext";
+    case MindRole::MacroToMacro:
+        return "mind_sim::mod::MacroToMacroContext";
+    case MindRole::MacroToMicro:
+        return "mind_sim::mod::MicroInputContext";
+    case MindRole::MicroToMacro:
+        return "mind_sim::mod::MicroOutputContext";
     }
-    if (role == "MACRO2MACRO") {
-        return "MacroToMacro";
-    }
-    if (role == "MACRO2MICRO") {
-        return "MicroInput";
-    }
-    if (role == "MICRO2MACRO") {
-        return "MicroOutput";
-    }
-    throw std::runtime_error("unsupported MIND ROLE " + role);
+    return "mind_sim::mod::RegionContext";
 }
 
-const char* mind_apply_context_type(const std::string& role) {
-    if (role == "REGION") {
-        return "mind_sim::mod::AbiRegionContext";
-    }
-    if (role == "MACRO2MACRO") {
-        return "mind_sim::mod::AbiMacroToMacroContext";
-    }
-    if (role == "MACRO2MICRO") {
-        return "mind_sim::mod::AbiMicroInputContext";
-    }
-    if (role == "MICRO2MACRO") {
-        return "mind_sim::mod::AbiMicroOutputContext";
-    }
-    throw std::runtime_error("unsupported MIND ROLE " + role);
+std::string mind_list_expr(std::size_t count, const std::string& symbol) {
+    return "mind_sim::mod::NameList{" + std::to_string(count) + ", " +
+           (count == 0 ? "nullptr" : symbol) + "}";
 }
 
-std::string mind_render_descriptor(const MindRenderData& data) {
-    const auto state_names = mind_names_of(data.states);
-    const auto param_names = mind_names_of(data.params);
-    const auto kind = mind_role_kind(data.spec.role);
-    const auto read_source_exposures = mind_binding_exposures(data.spec.read_source);
-    const auto read_source_variables = mind_binding_variables(data.spec.read_source);
-    const auto read_target_exposures = mind_binding_exposures(data.spec.read_target);
-    const auto read_target_variables = mind_binding_variables(data.spec.read_target);
-    const auto write_source_exposures = mind_binding_exposures(data.spec.write_source);
-    const auto write_source_variables = mind_binding_variables(data.spec.write_source);
-    const auto write_target_exposures = mind_binding_exposures(data.spec.write_target);
-    const auto write_target_variables = mind_binding_variables(data.spec.write_target);
+std::string mind_binding_expr(std::size_t count,
+                              const std::string& exposure_symbol,
+                              const std::string& variable_symbol) {
+    return "mind_sim::mod::BindingList{" + std::to_string(count) + ", " +
+           (count == 0 ? "nullptr" : exposure_symbol) + ", " +
+           (count == 0 ? "nullptr" : variable_symbol) + "}";
+}
+
+std::string mind_value_expr(std::size_t count,
+                            const std::string& names_symbol,
+                            const std::string& defaults_symbol) {
+    return "mind_sim::mod::ValueList{" + std::to_string(count) + ", " +
+           (count == 0 ? "nullptr" : names_symbol) + ", " +
+           (count == 0 ? "nullptr" : defaults_symbol) + "}";
+}
+
+MindRegistrationNames mind_registration_names(const MindRenderData& data) {
+    return MindRegistrationNames{
+        .state_names = mind_names_of(data.states),
+        .param_names = mind_names_of(data.params),
+        .read_source_exposures = mind_binding_exposures(data.spec.read_source),
+        .read_source_variables = mind_binding_variables(data.spec.read_source),
+        .read_target_exposures = mind_binding_exposures(data.spec.read_target),
+        .read_target_variables = mind_binding_variables(data.spec.read_target),
+        .write_source_exposures = mind_binding_exposures(data.spec.write_source),
+        .write_source_variables = mind_binding_variables(data.spec.write_source),
+        .write_target_exposures = mind_binding_exposures(data.spec.write_target),
+        .write_target_variables = mind_binding_variables(data.spec.write_target),
+    };
+}
+
+std::string mind_render_registration_data(const MindRenderData& data,
+                                          const MindRegistrationNames& names) {
     std::ostringstream out;
     out << mind_name_array("kExposureNames", data.spec.exposures);
-    out << mind_name_array("kReadSourceExposureNames", read_source_exposures);
-    out << mind_name_array("kReadSourceVariableNames", read_source_variables);
-    out << mind_name_array("kReadTargetExposureNames", read_target_exposures);
-    out << mind_name_array("kReadTargetVariableNames", read_target_variables);
-    out << mind_name_array("kWriteSourceExposureNames", write_source_exposures);
-    out << mind_name_array("kWriteSourceVariableNames", write_source_variables);
-    out << mind_name_array("kWriteTargetExposureNames", write_target_exposures);
-    out << mind_name_array("kWriteTargetVariableNames", write_target_variables);
-    out << mind_name_array("kParamNames", param_names);
-    out << mind_name_array("kStateNames", state_names);
+    out << mind_name_array("kReadSourceExposureNames", names.read_source_exposures);
+    out << mind_name_array("kReadSourceVariableNames", names.read_source_variables);
+    out << mind_name_array("kReadTargetExposureNames", names.read_target_exposures);
+    out << mind_name_array("kReadTargetVariableNames", names.read_target_variables);
+    out << mind_name_array("kWriteSourceExposureNames", names.write_source_exposures);
+    out << mind_name_array("kWriteSourceVariableNames", names.write_source_variables);
+    out << mind_name_array("kWriteTargetExposureNames", names.write_target_exposures);
+    out << mind_name_array("kWriteTargetVariableNames", names.write_target_variables);
+    out << mind_name_array("kParamNames", names.param_names);
+    out << mind_name_array("kStateNames", names.state_names);
     out << mind_default_array("kParamDefaults", data.params);
     out << mind_default_array("kStateDefaults", data.states);
-    out << "\nconstexpr mind_sim::mod::AbiRuleDescriptor kDescriptor{\n";
-    out << "    .abi_version = mind_sim::mod::kModAbiVersion,\n";
-    out << "    .kind = static_cast<int>(mind_sim::mod::AbiRuleKind::" << kind << "),\n";
-    out << "    .name = " << mind_cpp_string(data.model) << ",\n";
-    out << "    .exposure_count = " << data.spec.exposures.size() << ",\n";
-    out << "    .exposure_names = " << mind_array_ref(data.spec.exposures, "kExposureNames") << ",\n";
-    out << "    .read_source_count = " << data.spec.read_source.size() << ",\n";
-    out << "    .read_source_exposure_names = " << mind_array_ref(read_source_exposures, "kReadSourceExposureNames") << ",\n";
-    out << "    .read_source_variable_names = " << mind_array_ref(read_source_variables, "kReadSourceVariableNames") << ",\n";
-    out << "    .read_target_count = " << data.spec.read_target.size() << ",\n";
-    out << "    .read_target_exposure_names = " << mind_array_ref(read_target_exposures, "kReadTargetExposureNames") << ",\n";
-    out << "    .read_target_variable_names = " << mind_array_ref(read_target_variables, "kReadTargetVariableNames") << ",\n";
-    out << "    .write_source_count = " << data.spec.write_source.size() << ",\n";
-    out << "    .write_source_exposure_names = " << mind_array_ref(write_source_exposures, "kWriteSourceExposureNames") << ",\n";
-    out << "    .write_source_variable_names = " << mind_array_ref(write_source_variables, "kWriteSourceVariableNames") << ",\n";
-    out << "    .write_target_count = " << data.spec.write_target.size() << ",\n";
-    out << "    .write_target_exposure_names = " << mind_array_ref(write_target_exposures, "kWriteTargetExposureNames") << ",\n";
-    out << "    .write_target_variable_names = " << mind_array_ref(write_target_variables, "kWriteTargetVariableNames") << ",\n";
-    out << "    .param_count = " << param_names.size() << ",\n";
-    out << "    .param_names = " << mind_array_ref(param_names, "kParamNames") << ",\n";
-    out << "    .param_defaults = " << mind_array_ref(data.params, "kParamDefaults") << ",\n";
-    out << "    .state_count = " << state_names.size() << ",\n";
-    out << "    .state_names = " << mind_array_ref(state_names, "kStateNames") << ",\n";
-    out << "    .state_defaults = " << mind_array_ref(data.states, "kStateDefaults") << ",\n";
-    out << "};\n";
+    return out.str();
+}
+
+std::string mind_render_registrar_call(const MindRenderData& data,
+                                       const std::string& rule_namespace,
+                                       const std::string& apply_symbol,
+                                       const MindRegistrationNames& names) {
+    const std::string ns = rule_namespace + "::";
+    std::ostringstream out;
+    switch (data.spec.role) {
+    case MindRole::Region:
+        out << "    registrar->register_region(\n";
+        out << "        registrar->user_data,\n";
+        out << "        " << mind_cpp_string(data.model) << ",\n";
+        out << "        " << mind_list_expr(data.spec.exposures.size(), ns + "kExposureNames") << ",\n";
+        out << "        " << mind_value_expr(names.state_names.size(), ns + "kStateNames", ns + "kStateDefaults") << ",\n";
+        out << "        " << mind_value_expr(names.param_names.size(), ns + "kParamNames", ns + "kParamDefaults") << ",\n";
+        out << "        ::" << apply_symbol << ");\n";
+        break;
+    case MindRole::MacroToMacro:
+        out << "    registrar->register_macro_to_macro(\n";
+        out << "        registrar->user_data,\n";
+        out << "        " << mind_cpp_string(data.model) << ",\n";
+        out << "        " << mind_binding_expr(data.spec.read_source.size(), ns + "kReadSourceExposureNames", ns + "kReadSourceVariableNames") << ",\n";
+        out << "        " << mind_binding_expr(data.spec.read_target.size(), ns + "kReadTargetExposureNames", ns + "kReadTargetVariableNames") << ",\n";
+        out << "        " << mind_binding_expr(data.spec.write_source.size(), ns + "kWriteSourceExposureNames", ns + "kWriteSourceVariableNames") << ",\n";
+        out << "        " << mind_binding_expr(data.spec.write_target.size(), ns + "kWriteTargetExposureNames", ns + "kWriteTargetVariableNames") << ",\n";
+        out << "        " << mind_value_expr(names.param_names.size(), ns + "kParamNames", ns + "kParamDefaults") << ",\n";
+        out << "        ::" << apply_symbol << ");\n";
+        break;
+    case MindRole::MacroToMicro:
+        out << "    registrar->register_micro_input(\n";
+        out << "        registrar->user_data,\n";
+        out << "        " << mind_cpp_string(data.model) << ",\n";
+        out << "        " << mind_binding_expr(data.spec.read_source.size(), ns + "kReadSourceExposureNames", ns + "kReadSourceVariableNames") << ",\n";
+        out << "        " << mind_value_expr(names.state_names.size(), ns + "kStateNames", ns + "kStateDefaults") << ",\n";
+        out << "        " << mind_value_expr(names.param_names.size(), ns + "kParamNames", ns + "kParamDefaults") << ",\n";
+        out << "        ::" << apply_symbol << ");\n";
+        break;
+    case MindRole::MicroToMacro:
+        out << "    registrar->register_micro_output(\n";
+        out << "        registrar->user_data,\n";
+        out << "        " << mind_cpp_string(data.model) << ",\n";
+        out << "        " << mind_binding_expr(data.spec.write_target.size(), ns + "kWriteTargetExposureNames", ns + "kWriteTargetVariableNames") << ",\n";
+        out << "        " << mind_value_expr(names.state_names.size(), ns + "kStateNames", ns + "kStateDefaults") << ",\n";
+        out << "        " << mind_value_expr(names.param_names.size(), ns + "kParamNames", ns + "kParamDefaults") << ",\n";
+        out << "        ::" << apply_symbol << ");\n";
+        break;
+    }
     return out.str();
 }
 
@@ -597,7 +678,7 @@ void CodegenCoreneuronCppVisitor::setup(const ast::Program& node) {
         mind_rule_write_target_bindings.clear();
         return;
     }
-    mind_rule_role = spec->role;
+    mind_rule_role = mind_role_name(spec->role);
     mind_rule_exposures = spec->exposures;
     mind_rule_read_source_bindings = mind_export_bindings(spec->read_source);
     mind_rule_read_target_bindings = mind_export_bindings(spec->read_target);
@@ -1464,7 +1545,7 @@ std::string CodegenCoreneuronCppVisitor::get_variable_name(const std::string& na
 void CodegenCoreneuronCppVisitor::print_standard_includes() {
     printer->add_newline();
     printer->add_multi_line(R"CODE(
-        #include "mod/abi.hpp"
+        #include "mod/rule_api.hpp"
         #include <algorithm>
         #include <cstdint>
         #include <math.h>
@@ -3645,23 +3726,21 @@ void CodegenCoreneuronCppVisitor::print_g_unused() const {
 
 namespace {
 
-std::string mind_render_region(const MindRenderData& data) {
-    const auto state_names = mind_names_of(data.states);
-    const auto param_names = mind_names_of(data.params);
+std::string mind_render_region(const MindRenderData& data, const MindRegistrationNames& names) {
     if (!data.spec.read_source.empty() || !data.spec.read_target.empty() ||
         !data.spec.write_source.empty() || !data.spec.write_target.empty()) {
         throw std::runtime_error("MIND REGION uses EXPOSURE only");
     }
     auto required = data.spec.exposures;
-    required.insert(required.end(), state_names.begin(), state_names.end());
-    required.insert(required.end(), param_names.begin(), param_names.end());
+    required.insert(required.end(), names.state_names.begin(), names.state_names.end());
+    required.insert(required.end(), names.param_names.begin(), names.param_names.end());
     mind_require_offsets(data.data_offsets, required, "macro");
 
     std::ostringstream out;
     out << mind_offset_map("kExposureFieldOffsets", data.spec.exposures, data.data_offsets);
-    out << mind_offset_map("kStateFieldOffsets", state_names, data.data_offsets);
-    out << mind_offset_map("kParamFieldOffsets", param_names, data.data_offsets);
-    out << "\nvoid apply(const mind_sim::mod::AbiRegionContext* ctx) {\n";
+    out << mind_offset_map("kStateFieldOffsets", names.state_names, data.data_offsets);
+    out << mind_offset_map("kParamFieldOffsets", names.param_names, data.data_offsets);
+    out << "\nvoid apply(const mind_sim::mod::RegionContext* ctx) {\n";
     out << "    const int count = ctx->owner_count;\n";
     out << "    kScratch.resize(count);\n";
     out << "    kScratch.nt._dt = ctx->dt;\n";
@@ -3672,11 +3751,11 @@ std::string mind_render_region(const MindRenderData& data) {
     out << "            set_field(kScratch, kExposureFieldOffsets[i], count, unit,\n";
     out << "                      ctx->exposure_soa[ctx->exposure_offsets[i] + roi]);\n";
     out << "        }\n";
-    out << "        for (int i = 0; i < " << state_names.size() << "; ++i) {\n";
+    out << "        for (int i = 0; i < " << names.state_names.size() << "; ++i) {\n";
     out << "            set_field(kScratch, kStateFieldOffsets[i], count, unit,\n";
     out << "                      ctx->state_soa[(i * count) + unit]);\n";
     out << "        }\n";
-    out << "        for (int i = 0; i < " << param_names.size() << "; ++i) {\n";
+    out << "        for (int i = 0; i < " << names.param_names.size() << "; ++i) {\n";
     out << "            set_field(kScratch, kParamFieldOffsets[i], count, unit,\n";
     out << "                      ctx->params_soa[(i * count) + unit]);\n";
     out << "        }\n";
@@ -3684,7 +3763,7 @@ std::string mind_render_region(const MindRenderData& data) {
     out << "    coreneuron::nrn_state_" << data.model << "(&kScratch.nt, &kScratch.ml, 0);\n";
     out << "    for (int unit = 0; unit < count; ++unit) {\n";
     out << "        const int roi = ctx->roi_indices[unit];\n";
-    out << "        for (int i = 0; i < " << state_names.size() << "; ++i) {\n";
+    out << "        for (int i = 0; i < " << names.state_names.size() << "; ++i) {\n";
     out << "            ctx->state_soa[(i * count) + unit] = get_field(kScratch, kStateFieldOffsets[i], count, unit);\n";
     out << "        }\n";
     out << "        for (int i = 0; i < " << data.spec.exposures.size() << "; ++i) {\n";
@@ -3696,26 +3775,22 @@ std::string mind_render_region(const MindRenderData& data) {
     return out.str();
 }
 
-std::string mind_render_macro_to_macro(const MindRenderData& data) {
-    const auto param_names = mind_names_of(data.params);
-    const auto read_source_variables = mind_binding_variables(data.spec.read_source);
-    const auto read_target_variables = mind_binding_variables(data.spec.read_target);
-    const auto write_source_variables = mind_binding_variables(data.spec.write_source);
-    const auto write_target_variables = mind_binding_variables(data.spec.write_target);
-    auto required = read_source_variables;
-    required.insert(required.end(), read_target_variables.begin(), read_target_variables.end());
-    required.insert(required.end(), write_source_variables.begin(), write_source_variables.end());
-    required.insert(required.end(), write_target_variables.begin(), write_target_variables.end());
-    required.insert(required.end(), param_names.begin(), param_names.end());
+std::string mind_render_macro_to_macro(const MindRenderData& data,
+                                       const MindRegistrationNames& names) {
+    auto required = names.read_source_variables;
+    required.insert(required.end(), names.read_target_variables.begin(), names.read_target_variables.end());
+    required.insert(required.end(), names.write_source_variables.begin(), names.write_source_variables.end());
+    required.insert(required.end(), names.write_target_variables.begin(), names.write_target_variables.end());
+    required.insert(required.end(), names.param_names.begin(), names.param_names.end());
     mind_require_offsets(data.data_offsets, required, "macro-to-macro");
 
     std::ostringstream out;
-    out << mind_offset_map("kReadSourceFieldOffsets", read_source_variables, data.data_offsets);
-    out << mind_offset_map("kReadTargetFieldOffsets", read_target_variables, data.data_offsets);
-    out << mind_offset_map("kWriteSourceFieldOffsets", write_source_variables, data.data_offsets);
-    out << mind_offset_map("kWriteTargetFieldOffsets", write_target_variables, data.data_offsets);
-    out << mind_offset_map("kParamFieldOffsets", param_names, data.data_offsets);
-    out << "\nvoid apply(const mind_sim::mod::AbiMacroToMacroContext* ctx) {\n";
+    out << mind_offset_map("kReadSourceFieldOffsets", names.read_source_variables, data.data_offsets);
+    out << mind_offset_map("kReadTargetFieldOffsets", names.read_target_variables, data.data_offsets);
+    out << mind_offset_map("kWriteSourceFieldOffsets", names.write_source_variables, data.data_offsets);
+    out << mind_offset_map("kWriteTargetFieldOffsets", names.write_target_variables, data.data_offsets);
+    out << mind_offset_map("kParamFieldOffsets", names.param_names, data.data_offsets);
+    out << "\nvoid apply(const mind_sim::mod::MacroToMacroContext* ctx) {\n";
     out << R"(    std::vector<int> edge_indices;
     std::vector<int> target_indices;
     for (int target_pos = 0; target_pos < ctx->target_count; ++target_pos) {
@@ -3760,7 +3835,7 @@ std::string mind_render_macro_to_macro(const MindRenderData& data) {
     out << "        for (int i = 0; i < " << data.spec.write_target.size() << "; ++i) {\n";
     out << "            set_field(kScratch, kWriteTargetFieldOffsets[i], count, unit, 0.0);\n";
     out << "        }\n";
-    out << "        for (int i = 0; i < " << param_names.size() << "; ++i) {\n";
+    out << "        for (int i = 0; i < " << names.param_names.size() << "; ++i) {\n";
     out << "            set_field(kScratch, kParamFieldOffsets[i], count, unit, ctx->params[i]);\n";
     out << "        }\n";
     const std::map<std::string, std::string> edge_values{
@@ -3795,33 +3870,31 @@ std::string mind_render_macro_to_macro(const MindRenderData& data) {
     return out.str();
 }
 
-std::string mind_render_micro_output(const MindRenderData& data) {
-    const auto state_names = mind_names_of(data.states);
-    const auto param_names = mind_names_of(data.params);
+std::string mind_render_micro_output(const MindRenderData& data,
+                                     const MindRegistrationNames& names) {
     if (!data.spec.exposures.empty() || !data.spec.read_source.empty() || !data.spec.read_target.empty() ||
         !data.spec.write_source.empty()) {
         throw std::runtime_error("MIND MICRO2MACRO uses WRITE_TARGET only");
     }
-    const auto write_target_variables = mind_binding_variables(data.spec.write_target);
-    auto required = write_target_variables;
-    required.insert(required.end(), state_names.begin(), state_names.end());
-    required.insert(required.end(), param_names.begin(), param_names.end());
+    auto required = names.write_target_variables;
+    required.insert(required.end(), names.state_names.begin(), names.state_names.end());
+    required.insert(required.end(), names.param_names.begin(), names.param_names.end());
     mind_require_offsets(data.data_offsets, required, "micro output");
 
     std::ostringstream out;
-    out << mind_offset_map("kWriteTargetFieldOffsets", write_target_variables, data.data_offsets);
-    out << mind_offset_map("kStateFieldOffsets", state_names, data.data_offsets);
-    out << mind_offset_map("kParamFieldOffsets", param_names, data.data_offsets);
-    out << "\nvoid apply(const mind_sim::mod::AbiMicroOutputContext* ctx) {\n";
+    out << mind_offset_map("kWriteTargetFieldOffsets", names.write_target_variables, data.data_offsets);
+    out << mind_offset_map("kStateFieldOffsets", names.state_names, data.data_offsets);
+    out << mind_offset_map("kParamFieldOffsets", names.param_names, data.data_offsets);
+    out << "\nvoid apply(const mind_sim::mod::MicroOutputContext* ctx) {\n";
     out << R"(    constexpr int count = 1;
     kScratch.resize(count);
     kScratch.nt._dt = ctx->stop_time - ctx->start_time;
     kScratch.nt._t = ctx->start_time;
 )";
-    out << "    for (int i = 0; i < " << state_names.size() << "; ++i) {\n";
+    out << "    for (int i = 0; i < " << names.state_names.size() << "; ++i) {\n";
     out << "        set_field(kScratch, kStateFieldOffsets[i], count, 0, ctx->state[i]);\n";
     out << "    }\n";
-    out << "    for (int i = 0; i < " << param_names.size() << "; ++i) {\n";
+    out << "    for (int i = 0; i < " << names.param_names.size() << "; ++i) {\n";
     out << "        set_field(kScratch, kParamFieldOffsets[i], count, 0, ctx->params[i]);\n";
     out << "    }\n";
     out << "    auto* const inst = static_cast<coreneuron::" << data.model << "_Instance*>(kScratch.ml.instance);\n";
@@ -3872,7 +3945,7 @@ std::string mind_render_micro_output(const MindRenderData& data) {
     out << "                get_field(kScratch, kWriteTargetFieldOffsets[i], count, 0);\n";
     out << "        }\n";
     out << "    }\n";
-    out << "    for (int i = 0; i < " << state_names.size() << "; ++i) {\n";
+    out << "    for (int i = 0; i < " << names.state_names.size() << "; ++i) {\n";
     out << "        ctx->state[i] = get_field(kScratch, kStateFieldOffsets[i], count, 0);\n";
     out << "    }\n";
     out << "    for (int i = 0; i < " << data.spec.write_target.size() << "; ++i) {\n";
@@ -3883,17 +3956,15 @@ std::string mind_render_micro_output(const MindRenderData& data) {
     return out.str();
 }
 
-std::string mind_render_micro_input(const MindRenderData& data) {
-    const auto state_names = mind_names_of(data.states);
-    const auto param_names = mind_names_of(data.params);
+std::string mind_render_micro_input(const MindRenderData& data,
+                                    const MindRegistrationNames& names) {
     if (!data.spec.exposures.empty() || !data.spec.read_target.empty() ||
         !data.spec.write_source.empty() || !data.spec.write_target.empty()) {
         throw std::runtime_error("MIND MACRO2MICRO uses READ_SOURCE only");
     }
-    const auto read_source_variables = mind_binding_variables(data.spec.read_source);
-    auto required = read_source_variables;
-    required.insert(required.end(), state_names.begin(), state_names.end());
-    required.insert(required.end(), param_names.begin(), param_names.end());
+    auto required = names.read_source_variables;
+    required.insert(required.end(), names.state_names.begin(), names.state_names.end());
+    required.insert(required.end(), names.param_names.begin(), names.param_names.end());
     mind_require_offsets(data.data_offsets, required, "micro input");
     const int random_datum_offset =
         data.datum_semantic_offsets.find(naming::RANDOM_SEMANTIC) != data.datum_semantic_offsets.end()
@@ -3903,10 +3974,10 @@ std::string mind_render_micro_input(const MindRenderData& data) {
     const auto nrn_threads_symbol = "nrn_threads_for_mind_macro2micro_" + data.safe;
     const auto runtime_namespace = "coreneuron::mind_macro2micro_runtime_" + data.safe;
     std::ostringstream out;
-    out << mind_offset_map("kReadSourceFieldOffsets", read_source_variables, data.data_offsets);
-    out << mind_offset_map("kStateFieldOffsets", state_names, data.data_offsets);
-    out << mind_offset_map("kParamFieldOffsets", param_names, data.data_offsets);
-    out << "\nvoid apply(const mind_sim::mod::AbiMicroInputContext* ctx) {\n";
+    out << mind_offset_map("kReadSourceFieldOffsets", names.read_source_variables, data.data_offsets);
+    out << mind_offset_map("kStateFieldOffsets", names.state_names, data.data_offsets);
+    out << mind_offset_map("kParamFieldOffsets", names.param_names, data.data_offsets);
+    out << "\nvoid apply(const mind_sim::mod::MicroInputContext* ctx) {\n";
     out << R"(    const int count = ctx->source_count;
     if (count <= 0) {
         return;
@@ -3926,24 +3997,26 @@ std::string mind_render_micro_input(const MindRenderData& data) {
     if (random_datum_offset >= 0) {
         out << R"(    const auto seed_low = static_cast<std::uint32_t>(ctx->rng_seed & 0xffffffffULL);
     const auto seed_high = static_cast<std::uint32_t>((ctx->rng_seed >> 32) & 0xffffffffULL);
+    const auto stream_low = static_cast<std::uint32_t>(ctx->rng_stream_id & 0xffffffffULL);
+    const auto stream_high = static_cast<std::uint32_t>((ctx->rng_stream_id >> 32) & 0xffffffffULL);
     const auto roi_id = static_cast<std::uint32_t>(ctx->target_roi);
     if (ctx->source_ids == nullptr) {
         throw std::runtime_error("macro2micro source id mapping is null");
     }
     for (int source = 0; source < count; ++source) {
         auto* const rng = kScratch.random_states[static_cast<std::size_t>(source)];
-        rng->c.v[1] = seed_high ^ roi_id;
-        rng->c.v[2] = seed_low;
+        rng->c.v[1] = seed_high ^ roi_id ^ stream_high;
+        rng->c.v[2] = seed_low ^ stream_low;
         rng->c.v[3] = static_cast<std::uint32_t>(ctx->source_ids[source]);
     }
 )";
     }
-    out << "    for (int i = 0; i < " << state_names.size() << "; ++i) {\n";
+    out << "    for (int i = 0; i < " << names.state_names.size() << "; ++i) {\n";
     out << "        for (int source = 0; source < count; ++source) {\n";
     out << "            set_field(kScratch, kStateFieldOffsets[i], count, source, ctx->state[(i * count) + source]);\n";
     out << "        }\n";
     out << "    }\n";
-    out << "    for (int i = 0; i < " << param_names.size() << "; ++i) {\n";
+    out << "    for (int i = 0; i < " << names.param_names.size() << "; ++i) {\n";
     out << "        for (int source = 0; source < count; ++source) {\n";
     out << "            set_field(kScratch, kParamFieldOffsets[i], count, source, ctx->params[i]);\n";
     out << "        }\n";
@@ -4029,7 +4102,7 @@ std::string mind_render_micro_input(const MindRenderData& data) {
     out << "    " << runtime_namespace << "::gContext = nullptr;\n";
     out << "    " << runtime_namespace << "::gQueue = nullptr;\n";
     out << "    coreneuron::" << nrn_threads_symbol << " = saved_nrn_threads;\n";
-    out << "    for (int i = 0; i < " << state_names.size() << "; ++i) {\n";
+    out << "    for (int i = 0; i < " << names.state_names.size() << "; ++i) {\n";
     out << "        for (int source = 0; source < count; ++source) {\n";
     out << "            ctx->state[(i * count) + source] = get_field(kScratch, kStateFieldOffsets[i], count, source);\n";
     out << "        }\n";
@@ -4040,34 +4113,37 @@ std::string mind_render_micro_input(const MindRenderData& data) {
 
 std::string mind_render_exports(const MindRenderData& data) {
     const auto rule_namespace = "mind_rule_" + data.safe;
-    const auto descriptor_symbol = "mind_rule_descriptor_" + data.safe;
+    const auto registration_symbol = "mind_rule_reg_" + data.safe;
     const auto apply_symbol = "mind_rule_apply_" + data.safe;
+    const auto names = mind_registration_names(data);
     std::ostringstream out;
-    out << "#if defined(_WIN32)\n";
-    out << "#define MIND_RULE_EXPORT __declspec(dllexport)\n";
-    out << "#else\n";
-    out << "#define MIND_RULE_EXPORT __attribute__((visibility(\"default\")))\n";
-    out << "#endif\n\n";
+    out << "extern \"C\" void " << apply_symbol << "(const "
+        << mind_apply_context_type(data.spec.role) << "* ctx);\n\n";
     out << "namespace " << rule_namespace << " {\n";
-    out << mind_render_descriptor(data);
+    out << mind_render_registration_data(data, names);
     out << mind_render_common(data);
-    if (data.spec.role == "REGION") {
-        out << mind_render_region(data);
-    } else if (data.spec.role == "MACRO2MACRO") {
-        out << mind_render_macro_to_macro(data);
-    } else if (data.spec.role == "MICRO2MACRO") {
-        out << mind_render_micro_output(data);
-    } else if (data.spec.role == "MACRO2MICRO") {
-        out << mind_render_micro_input(data);
+    switch (data.spec.role) {
+    case MindRole::Region:
+        out << mind_render_region(data, names);
+        break;
+    case MindRole::MacroToMacro:
+        out << mind_render_macro_to_macro(data, names);
+        break;
+    case MindRole::MicroToMacro:
+        out << mind_render_micro_output(data, names);
+        break;
+    case MindRole::MacroToMicro:
+        out << mind_render_micro_input(data, names);
+        break;
     }
     out << "}  // namespace " << rule_namespace << "\n\n";
-    out << "extern \"C\" MIND_RULE_EXPORT const mind_sim::mod::AbiRuleDescriptor* "
-        << descriptor_symbol << "() {\n";
-    out << "    return &" << rule_namespace << "::kDescriptor;\n";
-    out << "}\n\n";
     out << "extern \"C\" MIND_RULE_EXPORT void " << apply_symbol << "(const "
         << mind_apply_context_type(data.spec.role) << "* ctx) {\n";
     out << "    " << rule_namespace << "::apply(ctx);\n";
+    out << "}\n\n";
+    out << "extern \"C\" MIND_RULE_EXPORT void " << registration_symbol
+        << "(mind_sim::mod::RuleRegistrar* registrar) {\n";
+    out << mind_render_registrar_call(data, rule_namespace, apply_symbol, names);
     out << "}\n";
     return out.str();
 }
@@ -4089,7 +4165,7 @@ MindRenderData CodegenCoreneuronCppVisitor_mind_render_data(
     data.model = model;
     data.safe = mind_cpp_identifier(model);
     data.spec = MindSpec{
-        .role = role,
+        .role = mind_role_from_string(role),
         .exposures = exposures,
         .read_source = mind_import_bindings(read_source_bindings),
         .read_target = mind_import_bindings(read_target_bindings),
@@ -4130,7 +4206,7 @@ MindRenderData CodegenCoreneuronCppVisitor_mind_render_data(
 }
 
 void CodegenCoreneuronCppVisitor::print_mind_rule_codegen_in_namespace() {
-    if (!has_mind_rule || mind_rule_role != "MACRO2MICRO") {
+    if (!has_mind_rule || mind_role_from_string(mind_rule_role) != MindRole::MacroToMicro) {
         return;
     }
     if (!info.artificial_cell) {
@@ -4164,7 +4240,7 @@ void CodegenCoreneuronCppVisitor::print_mind_rule_codegen_in_namespace() {
             }
         };
 
-        thread_local const mind_sim::mod::AbiMicroInputContext* gContext = nullptr;
+        thread_local const mind_sim::mod::MicroInputContext* gContext = nullptr;
         thread_local std::vector<ScheduledSelfEvent>* gQueue = nullptr;
         thread_local std::vector<ScheduledSelfEvent> gScratchQueue;
 

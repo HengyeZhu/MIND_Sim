@@ -10,7 +10,7 @@ def _sample(vec, sample_times, dt=0.025):
 
 
 def test_netcvode_cover():
-    sim = ms.Sim()
+    sim = ms.micro.sim()
     sim.set_device("cpu")
     sim.set_num_threads(1)
     sim.set_dt(0.025)

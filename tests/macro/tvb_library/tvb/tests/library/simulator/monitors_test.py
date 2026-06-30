@@ -17,12 +17,12 @@ def macro_mod_dir():
     lib = MOD_DIR / "x86_64" / "libcorenrnmech.so"
     mod_mtime = max(path.stat().st_mtime for path in MOD_DIR.glob("*.mod"))
     if not lib.exists() or lib.stat().st_mtime < mod_mtime:
-        subprocess.run(["mind_nrnivmodl", str(MOD_DIR)], check=True)
+        subprocess.run(["mind-nrnivmodl", str(MOD_DIR)], check=True)
     return MOD_DIR
 
 
 def _configure_macro_runtime(macro_mod_dir, dt):
-    ms.macro.load_mech(macro_mod_dir)
+    ms.load_mech(macro_mod_dir)
     ms.macro.dt(dt)
     ms.macro.exchange_window(dt)
 
@@ -45,11 +45,11 @@ class TestMonitors:
             weights=[[0.0, 0.0], [0.0, 0.0]],
             delays=[[0.0, 0.0], [0.0, 0.0]],
         )
-        for roi in rois.rois():
+        for roi in rois:
             roi.use_macro("tvb_epileptor2d", initial_state={"x": -1.0, "z": 0.0})
             roi.record("x")
             roi.record("z")
-        rois.initial_history(np.array([[[-1.0, -1.0], [0.0, 0.0]]]), outputs=["x", "z"])
+            roi.initial_history(np.array([[-1.0, 0.0]]), outputs=["x", "z"])
 
         result = ms.macro.Simulator(rois).run(n_steps=2)
         cube = _records_cube(result)

@@ -48,8 +48,15 @@ namespace fs = std::filesystem;
 
 namespace {
 
+enum class MindRole {
+    Region,
+    MacroToMacro,
+    MacroToMicro,
+    MicroToMacro,
+};
+
 struct MindSpec {
-    std::string role;
+    MindRole role{MindRole::Region};
 };
 
 struct Args {
@@ -322,6 +329,23 @@ void write_text(const fs::path& path, const std::string& text) {
     return value;
 }
 
+[[nodiscard]] MindRole mind_role_from_string(const std::string& value) {
+    const auto role = upper(value);
+    if (role == "REGION") {
+        return MindRole::Region;
+    }
+    if (role == "MACRO2MACRO") {
+        return MindRole::MacroToMacro;
+    }
+    if (role == "MACRO2MICRO") {
+        return MindRole::MacroToMicro;
+    }
+    if (role == "MICRO2MACRO") {
+        return MindRole::MicroToMacro;
+    }
+    throw std::runtime_error("unsupported MIND ROLE " + value);
+}
+
 [[nodiscard]] std::string shell_quote(const fs::path& path) {
     std::string text = path.string();
     std::string out{"'"};
@@ -349,8 +373,58 @@ void write_text(const fs::path& path, const std::string& text) {
     return out;
 }
 
+[[nodiscard]] std::optional<std::string> env_value(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return std::nullopt;
+    }
+    return std::string{value};
+}
+
+[[nodiscard]] std::optional<fs::path> find_on_path(const std::string& name) {
+    if (name.empty() || name.find('/') != std::string::npos) {
+        return std::nullopt;
+    }
+    const char* path_env = std::getenv("PATH");
+    if (path_env == nullptr) {
+        return std::nullopt;
+    }
+    std::stringstream stream{path_env};
+    std::string dir;
+    while (std::getline(stream, dir, ':')) {
+        fs::path candidate = dir.empty() ? fs::path{"."} / name : fs::path{dir} / name;
+        std::error_code ec;
+        if (fs::is_regular_file(candidate, ec)) {
+            return candidate;
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::string cxx_compiler_command() {
+    if (auto value = env_value("MIND_SIM_CXX")) {
+        return *value;
+    }
+
+    const fs::path configured{MIND_SIM_CXX_COMPILER};
+    std::error_code ec;
+    if (configured.has_parent_path() && fs::is_regular_file(configured, ec)) {
+        return shell_quote(configured);
+    }
+    if (auto found = find_on_path(configured.filename().string())) {
+        return shell_quote(*found);
+    }
+    if (!configured.has_parent_path() && !configured.empty()) {
+        return configured.string();
+    }
+    if (auto value = env_value("CXX")) {
+        return *value;
+    }
+    return "c++";
+}
+
 [[nodiscard]] bool using_nvhpc_compiler() {
-    const std::string compiler = MIND_SIM_CXX_COMPILER;
+    const std::string compiler = cxx_compiler_command();
     return compiler.find("nvc++") != std::string::npos || compiler.find("pgc++") != std::string::npos;
 }
 
@@ -587,12 +661,7 @@ void collect_named_children(const JsonValue& value,
         throw std::runtime_error("MIND block AST has no ROLE");
     }
     MindSpec spec;
-    spec.role = upper(names.front());
-    if (spec.role != "REGION" && spec.role != "MACRO2MACRO" && spec.role != "MACRO2MICRO" &&
-        spec.role != "MICRO2MACRO") {
-        throw std::runtime_error("MIND block AST is not structured or has unsupported ROLE " +
-                                 spec.role);
-    }
+    spec.role = mind_role_from_string(names.front());
     return spec;
 }
 
@@ -736,32 +805,50 @@ void validate_micro_output_net_receive_ast(const JsonValue& ast) {
     return {};
 }
 
+[[nodiscard]] bool configured_path_is_placeholder(const fs::path& path) {
+    const std::string text = path.string();
+    return text.empty() || text == ".";
+}
+
 [[nodiscard]] fs::path resolved_nmodl_path() {
     if (auto path = existing_file_or_empty(current_executable_dir() / "nmodl"); !path.empty()) {
         return path;
     }
-    if (auto path = existing_file_or_empty(fs::path{MIND_SIM_NMODL_PATH}); !path.empty()) {
-        return path;
+    const fs::path configured{MIND_SIM_NMODL_PATH};
+    if (!configured_path_is_placeholder(configured)) {
+        if (configured.has_parent_path()) {
+            if (auto path = existing_file_or_empty(configured); !path.empty()) {
+                return path;
+            }
+        } else if (auto path = find_on_path(configured.string())) {
+            return *path;
+        }
     }
     throw std::runtime_error("could not locate MIND-aware nmodl executable");
 }
 
 [[nodiscard]] fs::path resolved_source_include_dir() {
-    if (auto path = existing_or_empty(fs::path{MIND_SIM_SOURCE_DIR} / "src"); !path.empty()) {
-        return path;
-    }
     if (auto path = existing_or_empty(packaged_root_dir() / "include" / "src"); !path.empty()) {
         return path;
+    }
+    const fs::path configured{MIND_SIM_SOURCE_DIR};
+    if (!configured_path_is_placeholder(configured)) {
+        if (auto path = existing_or_empty(configured / "src"); !path.empty()) {
+            return path;
+        }
     }
     throw std::runtime_error("could not locate MIND_Sim source include directory");
 }
 
 [[nodiscard]] fs::path resolved_mechanism_include_dir() {
-    if (auto path = existing_or_empty(fs::path{MIND_SIM_MECHANISM_INCLUDE_DIR}); !path.empty()) {
-        return path;
-    }
     if (auto path = existing_or_empty(packaged_root_dir() / "include" / "src" / "micro" / "sim"); !path.empty()) {
         return path;
+    }
+    const fs::path configured{MIND_SIM_MECHANISM_INCLUDE_DIR};
+    if (!configured_path_is_placeholder(configured)) {
+        if (auto path = existing_or_empty(configured); !path.empty()) {
+            return path;
+        }
     }
     throw std::runtime_error("could not locate MIND_Sim mechanism include directory");
 }
@@ -776,15 +863,18 @@ void validate_micro_output_net_receive_ast(const JsonValue& ast) {
 }
 
 [[nodiscard]] fs::path resolved_eigen_include_dir() {
-    if (auto path = existing_or_empty(fs::path{MIND_SIM_SOURCE_DIR} / "src" / "mod" /
-                                      "neuron" / "external" / "eigen");
-        !path.empty()) {
-        return path;
-    }
     if (auto path = existing_or_empty(packaged_root_dir() / "include" / "src" / "mod" /
                                       "neuron" / "external" / "eigen");
         !path.empty()) {
         return path;
+    }
+    const fs::path configured{MIND_SIM_SOURCE_DIR};
+    if (!configured_path_is_placeholder(configured)) {
+        if (auto path = existing_or_empty(configured / "src" / "mod" / "neuron" /
+                                          "external" / "eigen");
+            !path.empty()) {
+            return path;
+        }
     }
     throw std::runtime_error("could not locate Eigen include directory");
 }
@@ -792,7 +882,7 @@ void validate_micro_output_net_receive_ast(const JsonValue& ast) {
 void compile_object_file(const fs::path& source_path, const fs::path& object_path) {
     fs::create_directories(object_path.parent_path());
     std::vector<std::string> command{
-        shell_quote(MIND_SIM_CXX_COMPILER),
+        cxx_compiler_command(),
         "-std=c++20",
         "-O2",
         "-fPIC",
@@ -832,7 +922,7 @@ void link_shared_library(const std::vector<fs::path>& objects, const fs::path& l
     }
     fs::create_directories(library_path.parent_path());
     std::vector<std::string> command{
-        shell_quote(MIND_SIM_CXX_COMPILER),
+        cxx_compiler_command(),
         "-shared",
         "-fPIC",
         "-o",
@@ -853,27 +943,8 @@ struct StandardModUnit {
 };
 
 struct MindRuleUnit {
-    fs::path mod;
-    std::string role;
-    std::string descriptor_symbol;
-    std::string apply_symbol;
+    std::string registration_symbol;
 };
-
-[[nodiscard]] const char* apply_context_type(const std::string& role) {
-    if (role == "REGION") {
-        return "mind_sim::mod::AbiRegionContext";
-    }
-    if (role == "MACRO2MACRO") {
-        return "mind_sim::mod::AbiMacroToMacroContext";
-    }
-    if (role == "MACRO2MICRO") {
-        return "mind_sim::mod::AbiMicroInputContext";
-    }
-    if (role == "MICRO2MACRO") {
-        return "mind_sim::mod::AbiMicroOutputContext";
-    }
-    throw std::runtime_error("unsupported MIND ROLE " + role);
-}
 
 void write_modl_reg_source(const fs::path& path, const std::vector<StandardModUnit>& units) {
     std::ostringstream out;
@@ -951,47 +1022,18 @@ struct NmodlGenerated {
     };
 }
 
-void write_rule_registry_source(const fs::path& path, const std::vector<MindRuleUnit>& rules) {
+void write_rule_registration_source(const fs::path& path, const std::vector<MindRuleUnit>& rules) {
     std::ostringstream out;
-    out << "#include \"mod/abi.hpp\"\n\n";
-    out << "#if defined(_WIN32)\n";
-    out << "#define MIND_RULE_EXPORT __declspec(dllexport)\n";
-    out << "#else\n";
-    out << "#define MIND_RULE_EXPORT __attribute__((visibility(\"default\")))\n";
-    out << "#endif\n\n";
+    out << "#include \"mod/rule_api.hpp\"\n\n";
     for (const auto& rule : rules) {
-        out << "extern \"C\" const mind_sim::mod::AbiRuleDescriptor* "
-            << rule.descriptor_symbol << "();\n";
-        out << "extern \"C\" void " << rule.apply_symbol << "(const "
-            << apply_context_type(rule.role) << "*);\n";
+        out << "extern \"C\" void " << rule.registration_symbol
+            << "(mind_sim::mod::RuleRegistrar*);\n";
     }
-    out << "\nnamespace {\n";
-    if (!rules.empty()) {
-        out << "const mind_sim::mod::AbiRuleEntry kRules[] = {\n";
-        for (const auto& rule : rules) {
-            out << "    {\n";
-            out << "        .descriptor = " << rule.descriptor_symbol << "(),\n";
-            out << "        .macro_to_macro_apply = "
-                << (rule.role == "MACRO2MACRO" ? rule.apply_symbol : "nullptr") << ",\n";
-            out << "        .micro_input_apply = "
-                << (rule.role == "MACRO2MICRO" ? rule.apply_symbol : "nullptr") << ",\n";
-            out << "        .micro_output_apply = "
-                << (rule.role == "MICRO2MACRO" ? rule.apply_symbol : "nullptr") << ",\n";
-            out << "        .region_apply = "
-                << (rule.role == "REGION" ? rule.apply_symbol : "nullptr") << ",\n";
-            out << "    },\n";
-        }
-        out << "};\n\n";
+    out << "\nextern \"C\" MIND_RULE_EXPORT void mind_rule_reg("
+           "mind_sim::mod::RuleRegistrar* registrar) {\n";
+    for (const auto& rule : rules) {
+        out << "    " << rule.registration_symbol << "(registrar);\n";
     }
-    out << "const mind_sim::mod::AbiRuleRegistry kRegistry{\n";
-    out << "    .abi_version = mind_sim::mod::kModAbiVersion,\n";
-    out << "    .rule_count = " << rules.size() << ",\n";
-    out << "    .rules = " << (rules.empty() ? "nullptr" : "kRules") << ",\n";
-    out << "};\n";
-    out << "}  // namespace\n\n";
-    out << "extern \"C\" MIND_RULE_EXPORT const mind_sim::mod::AbiRuleRegistry* "
-           "mind_rule_registry() {\n";
-    out << "    return &kRegistry;\n";
     out << "}\n";
     write_text(path, out.str());
 }
@@ -1022,21 +1064,17 @@ void compile_mods(const fs::path& source, const fs::path& output_dir) {
         fs::path source_cpp = generated.generated_cpp;
         if (contains_mind_block_ast(generated.ast)) {
             const MindSpec spec = parse_mind_block_ast(generated.ast);
-            if (spec.role == "MACRO2MICRO") {
+            if (spec.role == MindRole::MacroToMicro) {
                 validate_micro_input_net_receive_ast(generated.ast);
-            } else if (spec.role == "MICRO2MACRO") {
+            } else if (spec.role == MindRole::MicroToMacro) {
                 validate_micro_output_net_receive_ast(generated.ast);
             }
 
             const auto neuron = parse_neuron_block_ast(generated.ast);
             const std::string safe = cpp_identifier(neuron.mechanism);
-            const std::string descriptor_symbol = "mind_rule_descriptor_" + safe;
-            const std::string apply_symbol = "mind_rule_apply_" + safe;
+            const std::string registration_symbol = "mind_rule_reg_" + safe;
             rules.push_back(MindRuleUnit{
-                .mod = mod,
-                .role = spec.role,
-                .descriptor_symbol = descriptor_symbol,
-                .apply_symbol = apply_symbol,
+                .registration_symbol = registration_symbol,
             });
         }
 
@@ -1051,11 +1089,11 @@ void compile_mods(const fs::path& source, const fs::path& output_dir) {
     compile_object_file(modl_reg_cpp, modl_reg_object);
     objects.push_back(modl_reg_object);
 
-    const fs::path registry_cpp = generated_dir / "mind_rule_registry.cpp";
-    const fs::path registry_object = object_dir / "mind_rule_registry.o";
-    write_rule_registry_source(registry_cpp, rules);
-    compile_object_file(registry_cpp, registry_object);
-    objects.push_back(registry_object);
+    const fs::path rule_reg_cpp = generated_dir / "mind_rule_reg.cpp";
+    const fs::path rule_reg_object = object_dir / "mind_rule_reg.o";
+    write_rule_registration_source(rule_reg_cpp, rules);
+    compile_object_file(rule_reg_cpp, rule_reg_object);
+    objects.push_back(rule_reg_object);
 
     const fs::path library_path = output_dir / "libcorenrnmech.so";
     link_shared_library(objects, library_path);
@@ -1065,7 +1103,7 @@ void compile_mods(const fs::path& source, const fs::path& output_dir) {
 [[nodiscard]] Args parse_args(int argc, char** argv) {
     Args args;
     if (argc != 2) {
-        throw std::runtime_error("usage: mind_nrnivmodl MOD_DIR_OR_FILE");
+        throw std::runtime_error("usage: mind-nrnivmodl MOD_DIR_OR_FILE");
     }
     args.source = argv[1];
     return args;
@@ -1082,7 +1120,7 @@ int main(int argc, char** argv) {
         compile_mods(source, output_dir);
         return 0;
     } catch (const std::exception& exc) {
-        std::cerr << "mind_nrnivmodl: " << exc.what() << '\n';
+        std::cerr << "mind-nrnivmodl: " << exc.what() << '\n';
         return 1;
     }
 }

@@ -14,7 +14,7 @@ namespace mind_sim::macro::sim {
 namespace {
 
 std::string region_rule_signature(const mind_sim::macro::sim::RegionRule& rule) {
-    return rule.library_path() + "|" + std::to_string(rule.exposure_count()) + "|" +
+    return rule.library_path() + "|" + rule.name() + "|" + std::to_string(rule.exposure_count()) + "|" +
            std::to_string(rule.state_count()) + "|" + std::to_string(rule.param_count());
 }
 
@@ -45,6 +45,7 @@ std::vector<PendingMacroToMacroGroup> group_macro_to_macro_projections(
             groups.end(),
 	            [&](const PendingMacroToMacroGroup& group) {
 	                return group.rule->library_path() == projection.rule->library_path() &&
+                           group.rule->name() == projection.rule->name() &&
 	                       group.params == projection.params &&
 	                       group.read_source_offsets == projection.read_source_offsets &&
 	                       group.read_target_offsets == projection.read_target_offsets &&

@@ -5,12 +5,9 @@
 #include "micro/sim/recording.hpp"
 
 #include <algorithm>
-#include <chrono>
-#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -36,94 +33,6 @@ int integer_step_count(double value, double unit) {
 
 double canonical_micro_time(double time, double dt_micro) {
     return static_cast<double>(std::llround(time / dt_micro)) * dt_micro;
-}
-
-bool env_flag_enabled(const char* name) {
-    const char* value = std::getenv(name);
-    if (value == nullptr) {
-        return false;
-    }
-    std::string text(value);
-    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-    });
-    return text == "1" || text == "true" || text == "on" || text == "yes";
-}
-
-using ProfileClock = std::chrono::steady_clock;
-
-template <typename Fn>
-void measure_if(bool enabled, double& seconds, Fn&& fn) {
-    if (!enabled) {
-        fn();
-        return;
-    }
-    const auto start = ProfileClock::now();
-    fn();
-    seconds += std::chrono::duration<double>(ProfileClock::now() - start).count();
-}
-
-struct SerialProfile {
-    bool enabled{false};
-    double transform_seconds{0.0};
-    double micro_seconds{0.0};
-    double macro_seconds{0.0};
-    int exchange_windows{0};
-    int macro_steps{0};
-};
-
-struct AsyncProfile {
-    bool enabled{false};
-    double prepare_input_seconds{0.0};
-    double submit_seconds{0.0};
-    double wait_micro_seconds{0.0};
-    double output_transform_seconds{0.0};
-    double macro_seconds{0.0};
-    double macro_input_seconds{0.0};
-    int exchange_windows{0};
-    int macro_steps{0};
-};
-
-void report_serial_profile(const SerialProfile& profile) {
-    if (!profile.enabled) {
-        return;
-    }
-    const double total =
-        profile.transform_seconds + profile.micro_seconds + profile.macro_seconds;
-    std::cerr
-        << "MIND Sim serial profile: "
-        << "transform_s=" << profile.transform_seconds
-        << ", micro_s=" << profile.micro_seconds
-        << ", macro_s=" << profile.macro_seconds
-        << ", profiled_total_s=" << total
-        << ", exchange_windows=" << profile.exchange_windows
-        << ", macro_steps=" << profile.macro_steps
-        << ".\n";
-}
-
-void report_async_profile(const AsyncProfile& profile) {
-    if (!profile.enabled) {
-        return;
-    }
-    const double total =
-        profile.prepare_input_seconds +
-        profile.submit_seconds +
-        profile.wait_micro_seconds +
-        profile.output_transform_seconds +
-        profile.macro_seconds +
-        profile.macro_input_seconds;
-    std::cerr
-        << "MIND Sim async profile: "
-        << "prepare_input_s=" << profile.prepare_input_seconds
-        << ", submit_s=" << profile.submit_seconds
-        << ", wait_micro_s=" << profile.wait_micro_seconds
-        << ", output_transform_s=" << profile.output_transform_seconds
-        << ", macro_s=" << profile.macro_seconds
-        << ", macro_input_s=" << profile.macro_input_seconds
-        << ", profiled_total_s=" << total
-        << ", exchange_windows=" << profile.exchange_windows
-        << ", macro_steps=" << profile.macro_steps
-        << ".\n";
 }
 
 double infer_micro_dt(const mind_sim::macro::frontend::Network& network) {
@@ -230,11 +139,13 @@ void append_events(mind_sim::micro::sim::MicroEventTable& target,
     if (target.size() == 0) {
         target.time.swap(source.time);
         target.index.swap(source.index);
+        target.sort_by_time_index();
         return;
     }
     target.time.insert(target.time.end(), source.time.begin(), source.time.end());
     target.index.insert(target.index.end(), source.index.begin(), source.index.end());
     source.clear();
+    target.sort_by_time_index();
 }
 
 void prepare_micro_events_for_exchange(
@@ -268,6 +179,7 @@ void prepare_micro_events_for_exchange(
     struct BindingTrace {
         int circuit_index{-1};
         int binding_index{-1};
+        int input_index{-1};
         int exposure_count{0};
         std::vector<int> exposure_offsets{};
         std::vector<double> trace_soa{};
@@ -277,25 +189,32 @@ void prepare_micro_events_for_exchange(
         auto& circuit = micro_circuits[static_cast<std::size_t>(circuit_index)];
         for (int binding_index = 0; binding_index < static_cast<int>(circuit.bindings.size()); ++binding_index) {
             auto& binding = circuit.bindings[static_cast<std::size_t>(binding_index)];
-            if (!binding.input_rule) {
-                continue;
+            for (int input_index = 0;
+                 input_index < static_cast<int>(binding.input_transforms.size());
+                 ++input_index) {
+                auto& input =
+                    binding.input_transforms[static_cast<std::size_t>(input_index)];
+                if (!input.rule) {
+                    continue;
+                }
+                const int rule_exposure_count = input.rule->exposure_count();
+                BindingTrace trace{
+                    .circuit_index = circuit_index,
+                    .binding_index = binding_index,
+                    .input_index = input_index,
+                    .exposure_count = rule_exposure_count,
+                };
+                trace.exposure_offsets.reserve(static_cast<std::size_t>(rule_exposure_count));
+                for (int exposure = 0; exposure < rule_exposure_count; ++exposure) {
+                    trace.exposure_offsets.push_back(exposure * roi_count);
+                }
+                trace.trace_soa.assign(
+                    static_cast<std::size_t>(sample_count) *
+                        static_cast<std::size_t>(rule_exposure_count) *
+                        static_cast<std::size_t>(roi_count),
+                    0.0);
+                binding_traces.push_back(std::move(trace));
             }
-            const int rule_exposure_count = binding.input_rule->exposure_count();
-            BindingTrace trace{
-                .circuit_index = circuit_index,
-                .binding_index = binding_index,
-                .exposure_count = rule_exposure_count,
-            };
-            trace.exposure_offsets.reserve(static_cast<std::size_t>(rule_exposure_count));
-            for (int exposure = 0; exposure < rule_exposure_count; ++exposure) {
-                trace.exposure_offsets.push_back(exposure * roi_count);
-            }
-            trace.trace_soa.assign(
-                static_cast<std::size_t>(sample_count) *
-                    static_cast<std::size_t>(rule_exposure_count) *
-                    static_cast<std::size_t>(roi_count),
-                0.0);
-            binding_traces.push_back(std::move(trace));
         }
     }
     if (binding_traces.empty()) {
@@ -327,6 +246,8 @@ void prepare_micro_events_for_exchange(
             const auto& binding =
                 micro_circuits[static_cast<std::size_t>(trace.circuit_index)]
                     .bindings[static_cast<std::size_t>(trace.binding_index)];
+            const auto& input =
+                binding.input_transforms[static_cast<std::size_t>(trace.input_index)];
             const int roi = binding.roi_index;
             const auto sample_base =
                 static_cast<std::size_t>(sample) *
@@ -336,7 +257,7 @@ void prepare_micro_events_for_exchange(
                 trace.trace_soa[sample_base +
                                 static_cast<std::size_t>(exposure * roi_count + roi)] =
                     sample_exposure_soa[static_cast<std::size_t>(
-                        binding.exposure_offsets[static_cast<std::size_t>(exposure)] + roi)];
+                        input.exposure_offsets[static_cast<std::size_t>(exposure)] + roi)];
             }
         }
     }
@@ -345,23 +266,25 @@ void prepare_micro_events_for_exchange(
     for (auto& trace: binding_traces) {
         auto& circuit = micro_circuits[static_cast<std::size_t>(trace.circuit_index)];
         auto& binding = circuit.bindings[static_cast<std::size_t>(trace.binding_index)];
+        auto& input = binding.input_transforms[static_cast<std::size_t>(trace.input_index)];
         auto& events = prepared_events[static_cast<std::size_t>(trace.circuit_index)];
-        binding.input_rule->apply(trace.trace_soa,
-                                  sample_count,
-                                  dt_macro,
-                                  trace.exposure_count,
-                                  roi_count,
-                                  binding.roi_index,
-                                  binding.input_state,
-                                  binding.input_params,
-                                  exchange_start_time,
-                                  exchange_stop_time,
-                                  macro2micro_seed,
-                                  exchange_start,
-                                  binding.macro2micro_indices,
-                                  binding.macro2micro_source_ids,
-                                  events,
-                                  trace.exposure_offsets);
+        input.rule->apply(trace.trace_soa,
+                          sample_count,
+                          dt_macro,
+                          trace.exposure_count,
+                          roi_count,
+                          binding.roi_index,
+                          input.state,
+                          input.params,
+                          exchange_start_time,
+                          exchange_stop_time,
+                          macro2micro_seed,
+                          input.rng_stream_id,
+                          exchange_start,
+                          input.macro2micro_indices,
+                          input.macro2micro_source_ids,
+                          events,
+                          trace.exposure_offsets);
     }
 }
 
@@ -678,13 +601,6 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
         check_micro_input_trace_ahead(micro_macro_to_macro_evaluation, exchange_step_count_);
     bool use_micro_pipeline =
         !micro_circuits.empty() && trace_ahead_safety.safe;
-    const bool force_serial_pipeline = env_flag_enabled("MIND_SIM_FORCE_SERIAL_PIPELINE");
-    if (use_micro_pipeline && force_serial_pipeline) {
-        use_micro_pipeline = false;
-        std::cerr
-            << "MIND Sim: async micro pipeline disabled by MIND_SIM_FORCE_SERIAL_PIPELINE; "
-            << "running serial exchange windows.\n";
-    }
     if (!micro_circuits.empty() && !trace_ahead_safety.safe) {
         std::cerr
             << "MIND Sim: async micro pipeline disabled; running serial exchange windows. "
@@ -698,23 +614,6 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
             << trace_ahead_safety.source_roi
             << ".\n";
     }
-    const bool serial_profile_requested = env_flag_enabled("MIND_SIM_SERIAL_PROFILE");
-    if (serial_profile_requested && use_micro_pipeline) {
-        std::cerr
-            << "MIND Sim: serial profiling requested but async micro pipeline is active; "
-            << "set MIND_SIM_FORCE_SERIAL_PIPELINE=1 to profile serial exchange windows.\n";
-    }
-    SerialProfile serial_profile{
-        .enabled = serial_profile_requested && !use_micro_pipeline && !micro_circuits.empty(),
-    };
-    const bool async_profile_requested = env_flag_enabled("MIND_SIM_ASYNC_PROFILE");
-    if (async_profile_requested && !use_micro_pipeline) {
-        std::cerr
-            << "MIND Sim: async profiling requested but async micro pipeline is inactive.\n";
-    }
-    AsyncProfile async_profile{
-        .enabled = async_profile_requested && use_micro_pipeline && !micro_circuits.empty(),
-    };
     const auto prepare_micro_output_trace = [&](int sample_count) {
         micro_output_trace_soa.resize(static_cast<std::size_t>(sample_count) * output_stride);
         for (int sample = 0; sample < sample_count; ++sample) {
@@ -737,139 +636,113 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
     const auto submit_micro_window = [&](double window_start_time,
                                          double window_stop_time,
                                          std::vector<mind_sim::micro::sim::MicroEventTable>& events) {
-        measure_if(async_profile.enabled, async_profile.submit_seconds, [&]() {
-            for (std::size_t circuit = 0; circuit < micro_runtimes.size(); ++circuit) {
-                append_events(micro_runtimes[circuit]->scheduled_events(), events[circuit]);
-            }
-            for (std::size_t circuit = 0; circuit < micro_runtimes.size(); ++circuit) {
-                micro_tokens[circuit] =
-                    micro_runtimes[circuit]->submit_window(window_start_time, window_stop_time);
-            }
-        });
+        for (std::size_t circuit = 0; circuit < micro_runtimes.size(); ++circuit) {
+            append_events(micro_runtimes[circuit]->scheduled_events(), events[circuit]);
+        }
+        for (std::size_t circuit = 0; circuit < micro_runtimes.size(); ++circuit) {
+            micro_tokens[circuit] =
+                micro_runtimes[circuit]->submit_window(window_start_time, window_stop_time);
+        }
     };
 
     const auto finish_micro_window = [&](double window_start_time, double window_stop_time) {
-        if (async_profile.enabled) {
-            ++async_profile.exchange_windows;
-        }
         const int sample_count = integer_step_count(window_stop_time - window_start_time, dt_macro_);
-        measure_if(async_profile.enabled, async_profile.output_transform_seconds, [&]() {
-            prepare_micro_output_trace(sample_count);
-        });
+        prepare_micro_output_trace(sample_count);
         for (int circuit_index = 0; circuit_index < static_cast<int>(micro_circuits.size()); ++circuit_index) {
             auto& circuit = micro_circuits[static_cast<std::size_t>(circuit_index)];
-            mind_sim::micro::sim::MicroSpikeTableView spikes;
-            measure_if(async_profile.enabled, async_profile.wait_micro_seconds, [&]() {
-                spikes = micro_runtimes[static_cast<std::size_t>(circuit_index)]->finish_window(
-                    micro_tokens[static_cast<std::size_t>(circuit_index)]);
-            });
-            measure_if(async_profile.enabled, async_profile.output_transform_seconds, [&]() {
-                bind_spike_views(
-                    spikes,
-                    circuit,
-                    micro_pending_spikes[static_cast<std::size_t>(circuit_index)],
-                    micro_transform_spikes[static_cast<std::size_t>(circuit_index)],
-                    micro_transform_views[static_cast<std::size_t>(circuit_index)],
-                    dt_micro_,
-                    window_start_time,
-                    window_stop_time);
-                for (int binding_index = 0; binding_index < static_cast<int>(circuit.bindings.size()); ++binding_index) {
-                    auto& binding = circuit.bindings[static_cast<std::size_t>(binding_index)];
-                    auto& transform_views =
-                        micro_transform_views[static_cast<std::size_t>(circuit_index)][static_cast<std::size_t>(binding_index)];
-                    for (int transform_index = 0;
-                         transform_index < static_cast<int>(binding.output_transforms.size());
-                         ++transform_index) {
-                        auto& transform = binding.output_transforms[static_cast<std::size_t>(transform_index)];
-                        const auto spike_view = transform_views[static_cast<std::size_t>(transform_index)];
-                        transform.rule->apply(spike_view,
-                                              micro_output_soa,
-                                              micro_output_trace_soa,
-                                              roi_count,
-                                              exposure_count,
-                                              binding.roi_index,
-                                              transform.state,
-                                              transform.params,
-                                              window_start_time,
-                                              window_stop_time,
-                                              sample_count,
-                                              dt_macro_,
-                                              transform.exposure_offsets);
-                    }
+            auto spikes = micro_runtimes[static_cast<std::size_t>(circuit_index)]->finish_window(
+                micro_tokens[static_cast<std::size_t>(circuit_index)]);
+            bind_spike_views(
+                spikes,
+                circuit,
+                micro_pending_spikes[static_cast<std::size_t>(circuit_index)],
+                micro_transform_spikes[static_cast<std::size_t>(circuit_index)],
+                micro_transform_views[static_cast<std::size_t>(circuit_index)],
+                dt_micro_,
+                window_start_time,
+                window_stop_time);
+            for (int binding_index = 0; binding_index < static_cast<int>(circuit.bindings.size()); ++binding_index) {
+                auto& binding = circuit.bindings[static_cast<std::size_t>(binding_index)];
+                auto& transform_views =
+                    micro_transform_views[static_cast<std::size_t>(circuit_index)][static_cast<std::size_t>(binding_index)];
+                for (int transform_index = 0;
+                     transform_index < static_cast<int>(binding.output_transforms.size());
+                     ++transform_index) {
+                    auto& transform = binding.output_transforms[static_cast<std::size_t>(transform_index)];
+                    const auto spike_view = transform_views[static_cast<std::size_t>(transform_index)];
+                    transform.rule->apply(spike_view,
+                                          micro_output_soa,
+                                          micro_output_trace_soa,
+                                          roi_count,
+                                          exposure_count,
+                                          binding.roi_index,
+                                          transform.state,
+                                          transform.params,
+                                          window_start_time,
+                                          window_stop_time,
+                                          sample_count,
+                                          dt_macro_,
+                                          transform.exposure_offsets);
                 }
-            });
+            }
         }
 
-        measure_if(async_profile.enabled, async_profile.output_transform_seconds, [&]() {
-            for (const auto offset: micro_output_offsets) {
-                current_exposure_soa[offset] = micro_output_soa[offset];
-            }
-        });
+        for (const auto offset: micro_output_offsets) {
+            current_exposure_soa[offset] = micro_output_soa[offset];
+        }
     };
 
     const auto run_micro_window_synchronously = [&](double window_start_time,
                                                    double window_stop_time,
                                                    std::vector<mind_sim::micro::sim::MicroEventTable>& events) {
-        if (serial_profile.enabled) {
-            ++serial_profile.exchange_windows;
-        }
         const int sample_count = integer_step_count(window_stop_time - window_start_time, dt_macro_);
         prepare_micro_output_trace(sample_count);
-        measure_if(serial_profile.enabled, serial_profile.transform_seconds, [&]() {
-            for (std::size_t circuit = 0; circuit < micro_runtimes.size(); ++circuit) {
-                append_events(micro_runtimes[circuit]->scheduled_events(), events[circuit]);
-            }
-        });
+        for (std::size_t circuit = 0; circuit < micro_runtimes.size(); ++circuit) {
+            append_events(micro_runtimes[circuit]->scheduled_events(), events[circuit]);
+        }
         for (int circuit_index = 0; circuit_index < static_cast<int>(micro_circuits.size()); ++circuit_index) {
             auto& circuit = micro_circuits[static_cast<std::size_t>(circuit_index)];
-            mind_sim::micro::sim::MicroSpikeTableView spikes;
-            measure_if(serial_profile.enabled, serial_profile.micro_seconds, [&]() {
-                spikes = micro_runtimes[static_cast<std::size_t>(circuit_index)]->advance_window(
-                    window_start_time,
-                    window_stop_time);
-            });
-            measure_if(serial_profile.enabled, serial_profile.transform_seconds, [&]() {
-                bind_spike_views(
-                    spikes,
-                    circuit,
-                    micro_pending_spikes[static_cast<std::size_t>(circuit_index)],
-                    micro_transform_spikes[static_cast<std::size_t>(circuit_index)],
-                    micro_transform_views[static_cast<std::size_t>(circuit_index)],
-                    dt_micro_,
-                    window_start_time,
-                    window_stop_time);
-                for (int binding_index = 0; binding_index < static_cast<int>(circuit.bindings.size()); ++binding_index) {
-                    auto& binding = circuit.bindings[static_cast<std::size_t>(binding_index)];
-                    auto& transform_views =
-                        micro_transform_views[static_cast<std::size_t>(circuit_index)][static_cast<std::size_t>(binding_index)];
-                    for (int transform_index = 0;
-                         transform_index < static_cast<int>(binding.output_transforms.size());
-                         ++transform_index) {
-                        auto& transform = binding.output_transforms[static_cast<std::size_t>(transform_index)];
-                        const auto spike_view = transform_views[static_cast<std::size_t>(transform_index)];
-                        transform.rule->apply(spike_view,
-                                              micro_output_soa,
-                                              micro_output_trace_soa,
-                                              roi_count,
-                                              exposure_count,
-                                              binding.roi_index,
-                                              transform.state,
-                                              transform.params,
-                                              window_start_time,
-                                              window_stop_time,
-                                              sample_count,
-                                              dt_macro_,
-                                              transform.exposure_offsets);
-                    }
+            auto spikes = micro_runtimes[static_cast<std::size_t>(circuit_index)]->advance_window(
+                window_start_time,
+                window_stop_time);
+            bind_spike_views(
+                spikes,
+                circuit,
+                micro_pending_spikes[static_cast<std::size_t>(circuit_index)],
+                micro_transform_spikes[static_cast<std::size_t>(circuit_index)],
+                micro_transform_views[static_cast<std::size_t>(circuit_index)],
+                dt_micro_,
+                window_start_time,
+                window_stop_time);
+            for (int binding_index = 0; binding_index < static_cast<int>(circuit.bindings.size()); ++binding_index) {
+                auto& binding = circuit.bindings[static_cast<std::size_t>(binding_index)];
+                auto& transform_views =
+                    micro_transform_views[static_cast<std::size_t>(circuit_index)][static_cast<std::size_t>(binding_index)];
+                for (int transform_index = 0;
+                     transform_index < static_cast<int>(binding.output_transforms.size());
+                     ++transform_index) {
+                    auto& transform = binding.output_transforms[static_cast<std::size_t>(transform_index)];
+                    const auto spike_view = transform_views[static_cast<std::size_t>(transform_index)];
+                    transform.rule->apply(spike_view,
+                                          micro_output_soa,
+                                          micro_output_trace_soa,
+                                          roi_count,
+                                          exposure_count,
+                                          binding.roi_index,
+                                          transform.state,
+                                          transform.params,
+                                          window_start_time,
+                                          window_stop_time,
+                                          sample_count,
+                                          dt_macro_,
+                                          transform.exposure_offsets);
                 }
-            });
+            }
         }
 
-        measure_if(serial_profile.enabled, serial_profile.transform_seconds, [&]() {
-            for (const auto offset: micro_output_offsets) {
-                current_exposure_soa[offset] = micro_output_soa[offset];
-            }
-        });
+        for (const auto offset: micro_output_offsets) {
+            current_exposure_soa[offset] = micro_output_soa[offset];
+        }
     };
 
     bool next_micro_window_prepared = false;
@@ -881,20 +754,18 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
             return;
         }
         const int window_stop = std::min(step_count, window_start + exchange_step_count_);
-        measure_if(async_profile.enabled, async_profile.prepare_input_seconds, [&]() {
-            prepare_micro_events_for_exchange(micro_macro_to_macro_evaluation,
-                                           roi_count,
-                                           exposure_count,
-                                           window_start,
-                                           window_stop,
-                                           history_step_offset,
-                                           dt_macro_,
-                                           history,
-                                           micro_sample_exposure_soa,
-                                           micro_circuits,
-                                           next_micro_events,
-                                           macro2micro_seed_);
-        });
+        prepare_micro_events_for_exchange(micro_macro_to_macro_evaluation,
+                                          roi_count,
+                                          exposure_count,
+                                          window_start,
+                                          window_stop,
+                                          history_step_offset,
+                                          dt_macro_,
+                                          history,
+                                          micro_sample_exposure_soa,
+                                          micro_circuits,
+                                          next_micro_events,
+                                          macro2micro_seed_);
         next_micro_window_start = window_start;
         next_micro_window_stop = window_stop;
         next_micro_window_prepared = true;
@@ -902,20 +773,18 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
 
     if (use_micro_pipeline && step_count > 0) {
         const int first_exchange_stop = std::min(step_count, exchange_step_count_);
-        measure_if(async_profile.enabled, async_profile.prepare_input_seconds, [&]() {
-            prepare_micro_events_for_exchange(micro_macro_to_macro_evaluation,
-                                           roi_count,
-                                           exposure_count,
-                                           0,
-                                           first_exchange_stop,
-                                           history_step_offset,
-                                           dt_macro_,
-                                           history,
-                                           micro_sample_exposure_soa,
-                                           micro_circuits,
-                                           current_micro_events,
-                                           macro2micro_seed_);
-        });
+        prepare_micro_events_for_exchange(micro_macro_to_macro_evaluation,
+                                          roi_count,
+                                          exposure_count,
+                                          0,
+                                          first_exchange_stop,
+                                          history_step_offset,
+                                          dt_macro_,
+                                          history,
+                                          micro_sample_exposure_soa,
+                                          micro_circuits,
+                                          current_micro_events,
+                                          macro2micro_seed_);
         submit_micro_window(0.0, first_exchange_stop * dt_macro_, current_micro_events);
         if (first_exchange_stop < step_count) {
             prepare_async_micro_window(first_exchange_stop);
@@ -928,20 +797,18 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
         const double exchange_stop_time = exchange_stop * dt_macro_;
 
         if (!use_micro_pipeline) {
-            measure_if(serial_profile.enabled, serial_profile.transform_seconds, [&]() {
-                prepare_micro_events_for_exchange(micro_macro_to_macro_evaluation,
-                                               roi_count,
-                                               exposure_count,
-                                               exchange_start,
-                                               exchange_stop,
-                                               history_step_offset,
-                                               dt_macro_,
-                                               history,
-                                               micro_sample_exposure_soa,
-                                               micro_circuits,
-                                               current_micro_events,
-                                               macro2micro_seed_);
-            });
+            prepare_micro_events_for_exchange(micro_macro_to_macro_evaluation,
+                                              roi_count,
+                                              exposure_count,
+                                              exchange_start,
+                                              exchange_stop,
+                                              history_step_offset,
+                                              dt_macro_,
+                                              history,
+                                              micro_sample_exposure_soa,
+                                              micro_circuits,
+                                              current_micro_events,
+                                              macro2micro_seed_);
             run_micro_window_synchronously(exchange_start_time,
                                            exchange_stop_time,
                                            current_micro_events);
@@ -979,19 +846,7 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
                                            stop_time - start_time);
                 }
             };
-            if (serial_profile.enabled) {
-                measure_if(true, serial_profile.macro_seconds, step_macro_models);
-            } else if (async_profile.enabled) {
-                measure_if(true, async_profile.macro_seconds, step_macro_models);
-            } else {
-                step_macro_models();
-            }
-            if (serial_profile.enabled) {
-                ++serial_profile.macro_steps;
-            }
-            if (async_profile.enabled) {
-                ++async_profile.macro_steps;
-            }
+            step_macro_models();
             if (!micro_output_trace_soa.empty()) {
                 apply_micro_output_trace_sample(exchange_sample);
             }
@@ -1049,8 +904,6 @@ mind_sim::cosim::SimulationResult Simulator::run(double t_stop) {
         plan->deactivate();
     }
 
-    report_serial_profile(serial_profile);
-    report_async_profile(async_profile);
     return result;
 }
 

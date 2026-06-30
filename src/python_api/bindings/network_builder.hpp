@@ -15,6 +15,11 @@ struct PointProcessView;
 
 class NetworkBuilder {
   public:
+    enum class RoiInitialHistoryLayout {
+        TimeOutput,
+        OutputTime,
+    };
+
     explicit NetworkBuilder(mind_sim::macro::frontend::Connectivity connectivity);
 
     [[nodiscard]] mind_sim::macro::frontend::ROI roi(int index) const;
@@ -31,12 +36,12 @@ class NetworkBuilder {
     void set_dt(double dt);
     void set_exchange_window(double exchange_window);
     void load_mech(std::string directory);
-    void set_initial_history(std::vector<std::string> output_names,
-                             int time_count,
-                             int axis1_count,
-                             int axis2_count,
-                             std::vector<double> values,
-                             mind_sim::macro::frontend::Network::InitialHistoryLayout layout);
+    void set_roi_initial_history(int roi_index,
+                                 std::vector<std::string> output_names,
+                                 int axis1_count,
+                                 int axis2_count,
+                                 std::vector<double> values,
+                                 RoiInitialHistoryLayout layout);
 
     void use_region(int roi_index,
                     std::string library_path,
@@ -46,7 +51,7 @@ class NetworkBuilder {
                      int target_roi,
                      std::string library_path,
                      std::unordered_map<std::string, double> params);
-    void use_micro(int roi_index, std::vector<std::string> exposures);
+    void use_micro(int roi_index, Sim& micro, std::vector<std::string> exposures);
     void macro2micro(int roi_index,
                      std::string library_path,
                      const PointProcessView& target,
@@ -82,14 +87,13 @@ class NetworkBuilder {
         std::unordered_map<std::string, double> params{};
     };
 
-    struct InitialHistoryConfig {
+    struct RoiInitialHistoryConfig {
+        int roi{-1};
         std::vector<std::string> output_names{};
-        int time_count{0};
         int axis1_count{0};
         int axis2_count{0};
         std::vector<double> values{};
-        mind_sim::macro::frontend::Network::InitialHistoryLayout layout{
-            mind_sim::macro::frontend::Network::InitialHistoryLayout::TimeOutputRoi};
+        RoiInitialHistoryLayout layout{RoiInitialHistoryLayout::TimeOutput};
     };
 
     struct MicroBindingConfig {
@@ -118,19 +122,36 @@ class NetworkBuilder {
 
     [[nodiscard]] int roi_index(const std::string& label) const;
     [[nodiscard]] RuleRef resolve_rule_ref(const std::string& mechanism) const;
+    [[nodiscard]] std::shared_ptr<mind_sim::macro::sim::RegionRule> region_rule(
+        const RuleRef& rule_ref);
+    [[nodiscard]] std::shared_ptr<mind_sim::macro::sim::MacroToMacroRule> macro_to_macro_rule(
+        const RuleRef& rule_ref);
+    [[nodiscard]] std::shared_ptr<mind_sim::cosim::transform::MicroInputRule> micro_input_rule(
+        const RuleRef& rule_ref);
+    [[nodiscard]] std::shared_ptr<mind_sim::cosim::transform::MicroOutputRule> micro_output_rule(
+        const RuleRef& rule_ref);
     void register_mod_library(const std::string& library_path);
     void validate_roi_index(int roi_index, const char* what) const;
 
     mind_sim::macro::frontend::Connectivity connectivity_;
     std::optional<std::vector<int>> recorded_rois_{};
     std::optional<std::vector<std::string>> recorded_outputs_{};
-    std::optional<InitialHistoryConfig> initial_history_{};
+    std::vector<RoiInitialHistoryConfig> roi_initial_histories_{};
     std::vector<RegionConfig> regions_{};
     std::vector<MacroToMacroConfig> macro_to_macro_{};
     std::vector<MicroBindingConfig> micro_bindings_{};
     std::vector<MicroInputConfig> micro_inputs_{};
     std::vector<MicroOutputConfig> micro_outputs_{};
+    Sim* micro_{nullptr};
     std::unordered_map<std::string, RuleRef> mod_rules_{};
+    std::unordered_map<std::string, std::shared_ptr<mind_sim::macro::sim::RegionRule>>
+        region_rule_cache_{};
+    std::unordered_map<std::string, std::shared_ptr<mind_sim::macro::sim::MacroToMacroRule>>
+        macro_to_macro_rule_cache_{};
+    std::unordered_map<std::string, std::shared_ptr<mind_sim::cosim::transform::MicroInputRule>>
+        micro_input_rule_cache_{};
+    std::unordered_map<std::string, std::shared_ptr<mind_sim::cosim::transform::MicroOutputRule>>
+        micro_output_rule_cache_{};
     double dt_{0.0};
     double exchange_window_{0.0};
 };

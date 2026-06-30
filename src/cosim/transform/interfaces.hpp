@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mod/abi.hpp"
+#include "mod/rule_api.hpp"
 #include "micro/sim/types.hpp"
 #include "utils/dynamic_library.hpp"
 
@@ -39,6 +39,7 @@ class MicroInputRule {
                double start_time,
                double stop_time,
                std::uint64_t rng_seed,
+               std::uint64_t rng_stream_id,
                int exchange_start_step,
                const std::vector<int>& source_indices,
                const std::vector<int>& source_ids,
@@ -49,9 +50,6 @@ class MicroInputRule {
     std::string name_{};
     std::shared_ptr<mind_sim::utils::DynamicLibrary> library_{};
     mind_sim::mod::MicroInputApplyFn apply_{nullptr};
-    int exposure_count_{0};
-    int state_count_{0};
-    int param_count_{0};
     std::vector<std::string> exposure_names_{};
     std::vector<std::string> state_names_{};
     std::vector<double> state_defaults_{};
@@ -94,9 +92,6 @@ class MicroOutputRule {
     std::string name_{};
     std::shared_ptr<mind_sim::utils::DynamicLibrary> library_{};
     mind_sim::mod::MicroOutputApplyFn apply_{nullptr};
-    int output_count_{0};
-    int state_count_{0};
-    int param_count_{0};
     std::vector<std::string> exposure_names_{};
     std::vector<std::string> state_names_{};
     std::vector<double> state_defaults_{};

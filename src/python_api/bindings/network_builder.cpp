@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -31,7 +32,7 @@ std::filesystem::path unified_mod_library_for(const std::filesystem::path& sourc
         return x86;
     }
     throw std::runtime_error("could not find libcorenrnmech.so under " + source_dir.string() +
-                             "; run mind_nrnivmodl " + source_dir.string() + " first");
+                             "; run mind-nrnivmodl " + source_dir.string() + " first");
 }
 
 template <typename Rule>
@@ -40,7 +41,7 @@ std::vector<double> values_with_defaults(const std::vector<std::string>& names,
                                          const std::unordered_map<std::string, double>& overrides,
                                          const std::string& what) {
     if (names.size() != defaults.size()) {
-        throw std::runtime_error(what + " descriptor names/defaults size mismatch");
+        throw std::runtime_error(what + " rule metadata names/defaults size mismatch");
     }
     std::unordered_map<std::string, double> values;
     values.reserve(names.size());
@@ -323,24 +324,44 @@ void NetworkBuilder::load_mech(std::string directory) {
     register_mod_library(unified_mod_library_for(source_dir).string());
 }
 
-void NetworkBuilder::set_initial_history(
-    std::vector<std::string> output_names,
-    int time_count,
-    int axis1_count,
-    int axis2_count,
-    std::vector<double> values,
-    mind_sim::macro::frontend::Network::InitialHistoryLayout layout) {
-    if (time_count <= 0) {
-        throw std::runtime_error("initial_history time axis must be positive");
+void NetworkBuilder::set_roi_initial_history(int roi_index_value,
+                                             std::vector<std::string> output_names,
+                                             int axis1_count,
+                                             int axis2_count,
+                                             std::vector<double> values,
+                                             RoiInitialHistoryLayout layout) {
+    validate_roi_index(roi_index_value, "initial_history ROI");
+    if (output_names.empty()) {
+        throw std::runtime_error("ROI initial_history requires at least one output");
     }
-    initial_history_ = InitialHistoryConfig{
+    if (axis1_count <= 0 || axis2_count <= 0) {
+        throw std::runtime_error("ROI initial_history axes must be positive");
+    }
+    const int output_axis_count =
+        layout == RoiInitialHistoryLayout::TimeOutput ? axis2_count : axis1_count;
+    if (output_axis_count != static_cast<int>(output_names.size())) {
+        throw std::runtime_error("ROI initial_history output axis does not match outputs");
+    }
+    const auto expected_size =
+        static_cast<std::size_t>(axis1_count) * static_cast<std::size_t>(axis2_count);
+    if (values.size() != expected_size) {
+        throw std::runtime_error("ROI initial_history value count does not match its shape");
+    }
+    std::unordered_set<std::string> seen_outputs;
+    for (const auto& output_name: output_names) {
+        if (!seen_outputs.insert(output_name).second) {
+            throw std::runtime_error("ROI initial_history output names must be unique");
+        }
+    }
+
+    roi_initial_histories_.push_back(RoiInitialHistoryConfig{
+        .roi = roi_index_value,
         .output_names = std::move(output_names),
-        .time_count = time_count,
         .axis1_count = axis1_count,
         .axis2_count = axis2_count,
         .values = std::move(values),
         .layout = layout,
-    };
+    });
 }
 
 void NetworkBuilder::use_region(int roi_index_value,
@@ -351,8 +372,7 @@ void NetworkBuilder::use_region(int roi_index_value,
     const RuleRef rule_ref = resolve_rule_ref(library_path);
     regions_.push_back(RegionConfig{
         .roi = roi_index_value,
-        .rule = std::make_shared<mind_sim::macro::sim::RegionRule>(rule_ref.library_path,
-                                                                    rule_ref.rule_name),
+        .rule = region_rule(rule_ref),
         .state = std::move(initial_state),
         .params = std::move(params),
     });
@@ -368,18 +388,21 @@ void NetworkBuilder::macro2macro(int source_roi,
     macro_to_macro_.push_back(MacroToMacroConfig{
         .source = source_roi,
         .target = target_roi,
-        .rule = std::make_shared<mind_sim::macro::sim::MacroToMacroRule>(rule_ref.library_path,
-                                                                         rule_ref.rule_name),
+        .rule = macro_to_macro_rule(rule_ref),
         .params = std::move(params),
     });
 }
 
-void NetworkBuilder::use_micro(int roi_index_value, std::vector<std::string> exposures) {
+void NetworkBuilder::use_micro(int roi_index_value, Sim& micro, std::vector<std::string> exposures) {
     validate_roi_index(roi_index_value, "micro ROI");
     if (exposures.empty()) {
         throw std::runtime_error("ROI.use_micro requires at least one exposure");
     }
-    Sim& micro = default_micro();
+    if (micro_ == nullptr) {
+        micro_ = &micro;
+    } else if (micro_ != &micro) {
+        throw std::runtime_error("a Network can bind only one micro sim");
+    }
     const auto& populations = micro.model.populations();
     if (populations.empty()) {
         throw std::runtime_error("Network.use_micro requires a micro Sim with at least one population");
@@ -429,21 +452,9 @@ void NetworkBuilder::macro2micro(int roi_index_value,
     const int connection_id = micro->model.spike_input_connect(macro2micro_id, target.insert_id, weight, delay);
     static_cast<void>(connection_id);
 
-    std::shared_ptr<mind_sim::cosim::transform::MicroInputRule> rule;
-    for (const auto& config: micro_inputs_) {
-        if (config.rule && config.rule->library_path() == rule_ref.library_path &&
-            config.rule->name() == rule_ref.rule_name) {
-            rule = config.rule;
-            break;
-        }
-    }
-    if (!rule) {
-        rule = std::make_shared<mind_sim::cosim::transform::MicroInputRule>(rule_ref.library_path,
-                                                                            rule_ref.rule_name);
-    }
     micro_inputs_.push_back(MicroInputConfig{
         .roi = roi_index_value,
-        .rule = std::move(rule),
+        .rule = micro_input_rule(rule_ref),
         .macro2micro_id = macro2micro_id,
         .state = std::move(state),
         .params = std::move(params),
@@ -461,21 +472,9 @@ void NetworkBuilder::micro2macro(int roi_index_value,
         throw std::runtime_error("micro2macro source sid must be non-negative");
     }
 
-    std::shared_ptr<mind_sim::cosim::transform::MicroOutputRule> rule;
-    for (const auto& config: micro_outputs_) {
-        if (config.rule && config.rule->library_path() == rule_ref.library_path &&
-            config.rule->name() == rule_ref.rule_name) {
-            rule = config.rule;
-            break;
-        }
-    }
-    if (!rule) {
-        rule = std::make_shared<mind_sim::cosim::transform::MicroOutputRule>(rule_ref.library_path,
-                                                                             rule_ref.rule_name);
-    }
     micro_outputs_.push_back(MicroOutputConfig{
         .roi = roi_index_value,
-        .rule = std::move(rule),
+        .rule = micro_output_rule(rule_ref),
         .sid = sid,
         .state = std::move(state),
         .params = std::move(params),
@@ -579,19 +578,20 @@ mind_sim::macro::frontend::Network NetworkBuilder::build() const {
     }
 
     std::vector<Sim*> micro_by_roi(static_cast<std::size_t>(roi_count()), nullptr);
-    std::unordered_set<Sim*> recorder_attached;
+    int circuit_index = -1;
     for (const auto& binding: micro_bindings_) {
         if (!binding.micro->model.core_initialized()) {
             throw std::runtime_error("Network.use_micro requires an initialized micro Sim");
         }
-        const int circuit_index = network.use_micro("micro", binding.micro->model.core_neuron_data_shared());
+        if (circuit_index < 0) {
+            circuit_index = network.use_micro(binding.micro->name,
+                                              binding.micro->model.core_neuron_data_shared());
+            attach_micro_recorders(network, *binding.micro);
+        }
         network.bind_micro_roi(circuit_index,
                                network.roi(binding.roi),
                                make_gid_ranges(binding.gid_range_begins, binding.gid_range_ends));
         micro_by_roi[static_cast<std::size_t>(binding.roi)] = binding.micro;
-        if (recorder_attached.insert(binding.micro).second) {
-            attach_micro_recorders(network, *binding.micro);
-        }
     }
 
     struct MicroInputBatch {
@@ -608,6 +608,7 @@ mind_sim::macro::frontend::Network NetworkBuilder::build() const {
         for (auto& batch: micro_input_batches) {
             if (batch.roi == config.roi &&
                 batch.rule->library_path() == config.rule->library_path() &&
+                batch.rule->name() == config.rule->name() &&
                 batch.state == config.state &&
                 batch.params == config.params) {
                 batch.macro2micro_ids.push_back(config.macro2micro_id);
@@ -626,6 +627,7 @@ mind_sim::macro::frontend::Network NetworkBuilder::build() const {
         }
     }
 
+    std::uint64_t rng_stream_id = 0;
     for (auto& batch: micro_input_batches) {
         auto* micro = micro_by_roi[static_cast<std::size_t>(batch.roi)];
         if (!micro) {
@@ -639,7 +641,8 @@ mind_sim::macro::frontend::Network NetworkBuilder::build() const {
                                               micro_input_param_values(*batch.rule, batch.params),
                                               std::move(macro2micro_indices),
                                               batch.macro2micro_ids,
-                                              offset_map(outputs, batch.rule->exposure_names(), roi_width));
+                                              offset_map(outputs, batch.rule->exposure_names(), roi_width),
+                                              rng_stream_id++);
     }
 
     struct MicroOutputBatch {
@@ -656,6 +659,7 @@ mind_sim::macro::frontend::Network NetworkBuilder::build() const {
         for (auto& batch: micro_output_batches) {
             if (batch.roi == config.roi &&
                 batch.rule->library_path() == config.rule->library_path() &&
+                batch.rule->name() == config.rule->name() &&
                 batch.state == config.state &&
                 batch.params == config.params) {
                 batch.sids.push_back(config.sid);
@@ -695,13 +699,88 @@ mind_sim::macro::frontend::Network NetworkBuilder::build() const {
 	                       offset_map(outputs, config.rule->write_source_exposure_names(), roi_width),
 	                       offset_map(outputs, config.rule->write_target_exposure_names(), roi_width));
     }
-    if (initial_history_.has_value()) {
-        network.set_initial_history(initial_history_->output_names,
-                                    initial_history_->time_count,
-                                    initial_history_->axis1_count,
-                                    initial_history_->axis2_count,
-                                    initial_history_->values,
-                                    initial_history_->layout);
+    if (!roi_initial_histories_.empty()) {
+        int time_count = -1;
+        std::vector<std::string> history_outputs;
+        std::unordered_map<std::string, int> history_output_slots;
+        for (const auto& config: roi_initial_histories_) {
+            const int config_time_count =
+                config.layout == RoiInitialHistoryLayout::TimeOutput ? config.axis1_count : config.axis2_count;
+            if (time_count < 0) {
+                time_count = config_time_count;
+            } else if (time_count != config_time_count) {
+                throw std::runtime_error("all ROI initial_history calls must use the same time count");
+            }
+            for (const auto& output_name: config.output_names) {
+                const int output = network.output_index(output_name);
+                static_cast<void>(output);
+                if (history_output_slots.find(output_name) == history_output_slots.end()) {
+                    const int slot = static_cast<int>(history_outputs.size());
+                    history_output_slots.emplace(output_name, slot);
+                    history_outputs.push_back(output_name);
+                }
+            }
+        }
+
+        const auto history_output_count = static_cast<int>(history_outputs.size());
+        const auto slot_size = static_cast<std::size_t>(history_output_count * roi_count());
+        std::vector<double> history(static_cast<std::size_t>(time_count) * slot_size, 0.0);
+        for (int time = 0; time < time_count; ++time) {
+            for (int history_output = 0; history_output < history_output_count; ++history_output) {
+                const int output = network.output_index(history_outputs[static_cast<std::size_t>(history_output)]);
+                for (int roi_value = 0; roi_value < roi_count(); ++roi_value) {
+                    history[static_cast<std::size_t>(time) * slot_size +
+                            static_cast<std::size_t>(history_output * roi_count() + roi_value)] =
+                        network.output_history_start()[static_cast<std::size_t>(roi_value)]
+                            .values[static_cast<std::size_t>(output)];
+                }
+            }
+        }
+
+        std::vector<unsigned char> seen(
+            static_cast<std::size_t>(roi_count() * history_output_count), 0);
+        for (const auto& config: roi_initial_histories_) {
+            for (int provided_output = 0; provided_output < static_cast<int>(config.output_names.size());
+                 ++provided_output) {
+                const auto slot_found =
+                    history_output_slots.find(config.output_names[static_cast<std::size_t>(provided_output)]);
+                const int history_output = slot_found->second;
+                const auto seen_offset =
+                    static_cast<std::size_t>(config.roi * history_output_count + history_output);
+                if (seen[seen_offset] != 0) {
+                    throw std::runtime_error("ROI initial_history already has output " +
+                                             config.output_names[static_cast<std::size_t>(provided_output)]);
+                }
+                seen[seen_offset] = 1;
+
+                for (int time = 0; time < time_count; ++time) {
+                    std::size_t source_offset = 0;
+                    if (config.layout == RoiInitialHistoryLayout::TimeOutput) {
+                        source_offset =
+                            static_cast<std::size_t>(time) * static_cast<std::size_t>(config.axis2_count) +
+                            static_cast<std::size_t>(provided_output);
+                    } else {
+                        source_offset =
+                            static_cast<std::size_t>(provided_output) *
+                                static_cast<std::size_t>(config.axis2_count) +
+                            static_cast<std::size_t>(time);
+                    }
+                    const double value = config.values[source_offset];
+                    if (!std::isfinite(value)) {
+                        throw std::runtime_error("ROI initial_history values must be finite");
+                    }
+                    history[static_cast<std::size_t>(time) * slot_size +
+                            static_cast<std::size_t>(history_output * roi_count() + config.roi)] = value;
+                }
+            }
+        }
+
+        network.set_initial_history(history_outputs,
+                                    time_count,
+                                    history_output_count,
+                                    roi_count(),
+                                    history,
+                                    mind_sim::macro::frontend::Network::InitialHistoryLayout::TimeOutputRoi);
     }
     return network;
 }
@@ -726,19 +805,82 @@ NetworkBuilder::RuleRef NetworkBuilder::resolve_rule_ref(const std::string& mech
         known = "<none>";
     }
     throw std::runtime_error("unknown MOD mechanism '" + mechanism +
-                             "'; call ms.macro.load_mech(directory) first. Loaded mechanisms: " +
+                             "'; call mind_sim.load_mech(directory) before creating the network. Loaded mechanisms: " +
                              known);
+}
+
+std::shared_ptr<mind_sim::macro::sim::RegionRule> NetworkBuilder::region_rule(
+    const RuleRef& rule_ref) {
+    const auto key = rule_ref.library_path + '\n' + rule_ref.rule_name;
+    auto found = region_rule_cache_.find(key);
+    if (found == region_rule_cache_.end()) {
+        found = region_rule_cache_
+                    .emplace(key,
+                             std::make_shared<mind_sim::macro::sim::RegionRule>(
+                                 rule_ref.library_path,
+                                 rule_ref.rule_name))
+                    .first;
+    }
+    return found->second;
+}
+
+std::shared_ptr<mind_sim::macro::sim::MacroToMacroRule> NetworkBuilder::macro_to_macro_rule(
+    const RuleRef& rule_ref) {
+    const auto key = rule_ref.library_path + '\n' + rule_ref.rule_name;
+    auto found = macro_to_macro_rule_cache_.find(key);
+    if (found == macro_to_macro_rule_cache_.end()) {
+        found = macro_to_macro_rule_cache_
+                    .emplace(key,
+                             std::make_shared<mind_sim::macro::sim::MacroToMacroRule>(
+                                 rule_ref.library_path,
+                                 rule_ref.rule_name))
+                    .first;
+    }
+    return found->second;
+}
+
+std::shared_ptr<mind_sim::cosim::transform::MicroInputRule> NetworkBuilder::micro_input_rule(
+    const RuleRef& rule_ref) {
+    const auto key = rule_ref.library_path + '\n' + rule_ref.rule_name;
+    auto found = micro_input_rule_cache_.find(key);
+    if (found == micro_input_rule_cache_.end()) {
+        found = micro_input_rule_cache_
+                    .emplace(key,
+                             std::make_shared<mind_sim::cosim::transform::MicroInputRule>(
+                                 rule_ref.library_path,
+                                 rule_ref.rule_name))
+                    .first;
+    }
+    return found->second;
+}
+
+std::shared_ptr<mind_sim::cosim::transform::MicroOutputRule> NetworkBuilder::micro_output_rule(
+    const RuleRef& rule_ref) {
+    const auto key = rule_ref.library_path + '\n' + rule_ref.rule_name;
+    auto found = micro_output_rule_cache_.find(key);
+    if (found == micro_output_rule_cache_.end()) {
+        found = micro_output_rule_cache_
+                    .emplace(key,
+                             std::make_shared<mind_sim::cosim::transform::MicroOutputRule>(
+                                 rule_ref.library_path,
+                                 rule_ref.rule_name))
+                    .first;
+    }
+    return found->second;
 }
 
 void NetworkBuilder::register_mod_library(const std::string& library_path) {
     const auto canonical_path = canonical_string(library_path);
     auto library = mind_sim::utils::load_dynamic_library(canonical_path);
-    const auto descriptors = mind_sim::mod::rule_descriptors(*library, "MOD library");
-    if (descriptors.empty()) {
-        throw std::runtime_error("MOD library has no MIND rules: " + canonical_path);
+    if (!library->has_symbol("mind_rule_reg")) {
+        return;
     }
-    for (const auto* descriptor: descriptors) {
-        const std::string name = descriptor->name;
+    const auto rules = mind_sim::mod::register_rules_from_library(library, "MOD library");
+    if (rules.empty()) {
+        return;
+    }
+    for (const auto& rule: rules) {
+        const std::string& name = rule->name;
         const auto found = mod_rules_.find(name);
         if (found != mod_rules_.end() && found->second.library_path != canonical_path) {
             throw std::runtime_error("duplicate MOD mechanism '" + name + "': " +
@@ -758,7 +900,9 @@ void NetworkBuilder::validate_roi_index(int roi_index_value, const char* what) c
 }
 
 void MacroConfig::load_mech(std::string directory) {
-    mech_dirs_.push_back(std::move(directory));
+    if (std::find(mech_dirs_.begin(), mech_dirs_.end(), directory) == mech_dirs_.end()) {
+        mech_dirs_.push_back(std::move(directory));
+    }
 }
 
 void MacroConfig::set_dt(double dt) {

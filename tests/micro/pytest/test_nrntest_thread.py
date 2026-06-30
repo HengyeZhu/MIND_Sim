@@ -6,7 +6,7 @@ import mind_sim as ms
 
 
 def _run_thread_model(thread_count: int):
-    sim = ms.Sim()
+    sim = ms.micro.sim()
     sim.set_device("cpu")
     sim.set_num_threads(thread_count)
     sim.set_dt(0.025)

@@ -49,7 +49,7 @@ def test_syntax(tmp_path):
         directory.mkdir()
         (directory / "temp.mod").write_text(text)
         result = subprocess.run(
-            ["mind_nrnivmodl", str(directory)],
+            ["mind-nrnivmodl", str(directory)],
             capture_output=True,
             text=True,
         )

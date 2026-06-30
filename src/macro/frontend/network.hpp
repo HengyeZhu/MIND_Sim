@@ -6,6 +6,7 @@
 #include "macro/sim/types.hpp"
 #include "micro/sim/core_neuron_data.hpp"
 
+#include <cstdint>
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -35,15 +36,20 @@ struct MicroOutputTransform {
     std::vector<int> exposure_offsets{};
 };
 
-struct MicroRoiBinding {
-    int roi_index{-1};
-    std::vector<GidRange> gid_ranges{};
-    std::shared_ptr<mind_sim::cosim::transform::MicroInputRule> input_rule{};
-    std::vector<double> input_state{};
-    std::vector<double> input_params{};
+struct MicroInputTransform {
+    std::shared_ptr<mind_sim::cosim::transform::MicroInputRule> rule{};
+    std::vector<double> state{};
+    std::vector<double> params{};
     std::vector<int> macro2micro_indices{};
     std::vector<int> macro2micro_source_ids{};
     std::vector<int> exposure_offsets{};
+    std::uint64_t rng_stream_id{0};
+};
+
+struct MicroRoiBinding {
+    int roi_index{-1};
+    std::vector<GidRange> gid_ranges{};
+    std::vector<MicroInputTransform> input_transforms{};
     std::vector<MicroOutputTransform> output_transforms{};
 };
 
@@ -141,7 +147,8 @@ class Network {
                                        std::vector<double> input_params,
                                        std::vector<int> macro2micro_indices,
                                        std::vector<int> macro2micro_source_ids,
-                                       std::vector<int> exposure_offsets);
+                                       std::vector<int> exposure_offsets,
+                                       std::uint64_t rng_stream_id);
     void configure_micro_output_rule(const ROI& roi,
                                      std::shared_ptr<mind_sim::cosim::transform::MicroOutputRule> output_rule,
                                      std::vector<double> output_state,

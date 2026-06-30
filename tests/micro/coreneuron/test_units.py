@@ -18,12 +18,13 @@ def micro_mod_dir():
     lib = MOD_DIR / "x86_64" / "libcorenrnmech.so"
     mod_mtime = max(path.stat().st_mtime for path in MOD_DIR.glob("*.mod"))
     if not lib.exists() or lib.stat().st_mtime < mod_mtime:
-        subprocess.run(["mind_nrnivmodl", str(MOD_DIR)], check=True)
+        subprocess.run(["mind-nrnivmodl", str(MOD_DIR)], check=True)
     return MOD_DIR
 
 
-def _single_cell_sim(*, nseg: int = 1, length: float = 10.0, diam: float = 10.0):
-    sim = ms.Sim()
+def _single_cell_sim(micro_mod_dir, *, nseg: int = 1, length: float = 10.0, diam: float = 10.0):
+    ms.load_mech(micro_mod_dir)
+    sim = ms.micro.sim()
     sim.set_device("cpu")
     sim.set_num_threads(1)
     sim.set_dt(0.025)
@@ -43,8 +44,7 @@ def _single_cell_sim(*, nseg: int = 1, length: float = 10.0, diam: float = 10.0)
 
 
 def test_units(micro_mod_dir):
-    sim, _, soma = _single_cell_sim()
-    sim.load_mech(str(micro_mod_dir))
+    sim, _, soma = _single_cell_sim(micro_mod_dir)
     pp = soma[0](0.5).insert("UnitsTest")
 
     sim.build_microcircuit()

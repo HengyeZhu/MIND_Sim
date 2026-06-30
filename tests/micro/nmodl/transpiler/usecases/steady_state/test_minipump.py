@@ -17,16 +17,16 @@ def minipump_mod_dir():
     lib = MOD_DIR / "x86_64" / "libcorenrnmech.so"
     mod_mtime = max(path.stat().st_mtime for path in MOD_DIR.glob("*.mod"))
     if not lib.exists() or lib.stat().st_mtime < mod_mtime:
-        subprocess.run(["mind_nrnivmodl", str(MOD_DIR)], check=True)
+        subprocess.run(["mind-nrnivmodl", str(MOD_DIR)], check=True)
     return MOD_DIR
 
 
 def run(steady_state, minipump_mod_dir):
-    sim = ms.Sim()
+    ms.load_mech(minipump_mod_dir)
+    sim = ms.micro.sim()
     sim.set_device("cpu")
     sim.set_num_threads(1)
     sim.set_dt(0.025)
-    sim.load_mech(str(minipump_mod_dir))
     sim.run_steady_state_minipump = 1.0 if steady_state else 0.0
 
     soma = ms.section("soma", "soma")

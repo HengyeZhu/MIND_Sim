@@ -8,9 +8,8 @@
 #include "macro/sim/runtime.hpp"
 #include "morph/section_distance.hpp"
 #include "morph/section_spec.hpp"
-#include "io/result_hdf5.hpp"
 #include "python_api/bindings/network_builder.hpp"
-#include "mod/abi.hpp"
+#include "mod/rule_api.hpp"
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
@@ -211,9 +210,16 @@ struct Sim;
 struct PointProcessView;
 struct ArtificialCellView;
 
-void register_default_micro(Sim* sim);
-void unregister_default_micro(Sim* sim);
-Sim& default_micro();
+class MicroConfig {
+  public:
+    void load_mech(std::string directory);
+    void apply(Sim& sim) const;
+
+  private:
+    std::vector<std::string> mech_dirs_{};
+};
+
+MicroConfig& micro_config();
 
 struct RecorderBuffer {
     Sim* sim{};
@@ -259,7 +265,7 @@ struct Sim {
     Sim& operator=(const Sim&) = delete;
     Sim(Sim&&) noexcept = delete;
     Sim& operator=(Sim&&) noexcept = delete;
-    ~Sim();
+    ~Sim() = default;
 
     std::string name{"micro"};
     MicroFrontendModel model{};
@@ -915,7 +921,6 @@ inline void network_bind_micro_roi(Network& network,
 }
 
 void bind_rules(nb::module_& m);
-void bind_io(nb::module_& m);
 void bind_micro(nb::module_& m);
 void bind_macro(nb::module_& m);
 

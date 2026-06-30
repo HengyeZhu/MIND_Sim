@@ -16,6 +16,7 @@ import mind_sim as ms
 SCRIPT_DIR = Path(__file__).resolve().parent
 ASSET_DIR = SCRIPT_DIR / "assets"
 DEFAULT_MOD_DIR = ASSET_DIR / "mod"
+MORPHOLOGY_DIR = ASSET_DIR / "morphologies"
 
 PYR_COUNT = 850
 SST_COUNT = 50
@@ -185,8 +186,8 @@ def main() -> int:
     if mech_lib.exists() and mech_lib.stat().st_mtime >= newest_mod:
         print(f"[mech] cache hit: {mech_lib}", flush=True)
     else:
-        print(f"[mech] compiling with mind_nrnivmodl: {mod_dir}", flush=True)
-        subprocess.run(["mind_nrnivmodl", str(mod_dir)], check=True)
+        print(f"[mech] compiling with mind-nrnivmodl: {mod_dir}", flush=True)
+        subprocess.run(["mind-nrnivmodl", str(mod_dir)], check=True)
 
     print(
         "[build] "
@@ -197,14 +198,14 @@ def main() -> int:
 
     total_t0 = time.perf_counter()
     build_t0 = time.perf_counter()
-    sim = ms.Sim()
+    ms.load_mech(mod_dir)
+    sim = ms.micro.sim()
     sim.set_device("cpu")
     sim.set_num_threads(int(args.threads))
     sim.set_dt(0.025)
     sim.celsius = 6.3
-    sim.load_mech(str(mod_dir))
 
-    pyr_section_list = ms.load_swc_section_list(str(ASSET_DIR / "HL23PYR.swc"))
+    pyr_section_list = ms.load_swc_section_list(str(MORPHOLOGY_DIR / "HL23PYR.swc"))
     pyr_section_list.delete_label("axon")
     pyr_sections = list(pyr_section_list.to_list())
     pyr_sections = add_pyr_sst_stub_axon(pyr_sections)
@@ -221,16 +222,16 @@ def main() -> int:
     pyr_apic_indices = [idx for idx, name in enumerate(pyr_apic_names) if name in pyr_apic_values]
     pyr_apic_gbar = [pyr_apic_values[pyr_apic_names[idx]] for idx in pyr_apic_indices]
 
-    sst_section_list = ms.load_swc_section_list(str(ASSET_DIR / "HL23SST.swc"))
+    sst_section_list = ms.load_swc_section_list(str(MORPHOLOGY_DIR / "HL23SST.swc"))
     sst_section_list.delete_label("axon")
     sst_sections = list(sst_section_list.to_list())
     sst_sections = add_pyr_sst_stub_axon(sst_sections)
     compute_section_nseg(sst_sections, skip_label="myelin")
 
-    pv_sections = list(ms.load_swc_section_list(str(ASSET_DIR / "HL23PV.swc")).to_list())
+    pv_sections = list(ms.load_swc_section_list(str(MORPHOLOGY_DIR / "HL23PV.swc")).to_list())
     compute_section_nseg(pv_sections)
 
-    vip_section_list = ms.load_swc_section_list(str(ASSET_DIR / "HL23VIP.swc"))
+    vip_section_list = ms.load_swc_section_list(str(MORPHOLOGY_DIR / "HL23VIP.swc"))
     vip_section_list.delete_label("axon")
     vip_sections = list(vip_section_list.to_list())
     vip_sections = add_vip_stub_axon(vip_sections)

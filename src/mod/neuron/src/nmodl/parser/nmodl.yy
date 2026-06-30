@@ -2454,35 +2454,59 @@ nmodl::ast::MindBlock* parse_mind_block(std::string str) {
     if (role.empty()) {
         throw std::runtime_error("MIND block is missing ROLE");
     }
-    const auto role_key = upper(role);
-    if (role_key == "REGION") {
+    enum class MindRole {
+        Region,
+        MacroToMacro,
+        MacroToMicro,
+        MicroToMacro,
+    };
+    auto parse_role = [&upper](const std::string& value) {
+        const auto role_key = upper(value);
+        if (role_key == "REGION") {
+            return MindRole::Region;
+        }
+        if (role_key == "MACRO2MACRO") {
+            return MindRole::MacroToMacro;
+        }
+        if (role_key == "MACRO2MICRO") {
+            return MindRole::MacroToMicro;
+        }
+        if (role_key == "MICRO2MACRO") {
+            return MindRole::MicroToMacro;
+        }
+        throw std::runtime_error("unsupported MIND ROLE " + value);
+    };
+    switch (parse_role(role)) {
+    case MindRole::Region:
         if (saw_read_write) {
             throw std::runtime_error("MIND REGION uses EXPOSURE, not READ or WRITE");
         }
         source_exposures.insert(source_exposures.end(), exposures.begin(), exposures.end());
-    } else if (role_key == "MACRO2MACRO") {
+        break;
+    case MindRole::MacroToMacro:
         if (saw_exposure) {
             throw std::runtime_error("MIND MACRO2MACRO uses READ and WRITE, not EXPOSURE");
         }
         if (!any_binding_is(source_exposures, "WRITE") && !any_binding_is(target_exposures, "WRITE")) {
             throw std::runtime_error("MIND MACRO2MACRO must use WRITE_SOURCE or WRITE_TARGET");
         }
-    } else if (role_key == "MACRO2MICRO") {
+        break;
+    case MindRole::MacroToMicro:
         if (saw_exposure) {
             throw std::runtime_error("MIND MACRO2MICRO uses READ_SOURCE, not EXPOSURE");
         }
         if (!target_exposures.empty() || !all_bindings_are(source_exposures, "READ")) {
             throw std::runtime_error("MIND MACRO2MICRO supports READ_SOURCE only");
         }
-    } else if (role_key == "MICRO2MACRO") {
+        break;
+    case MindRole::MicroToMacro:
         if (saw_exposure) {
             throw std::runtime_error("MIND MICRO2MACRO uses WRITE_TARGET, not EXPOSURE");
         }
         if (!source_exposures.empty() || !all_bindings_are(target_exposures, "WRITE")) {
             throw std::runtime_error("MIND MICRO2MACRO supports WRITE_TARGET only");
         }
-    } else {
-        throw std::runtime_error("unsupported MIND ROLE " + role);
+        break;
     }
     return new nmodl::ast::MindBlock(
         new nmodl::ast::String(role), target_exposures, source_exposures);

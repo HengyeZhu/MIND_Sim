@@ -1,8 +1,6 @@
 outputs/
-assets/mod/x86_64/
-assets/mod/i686/
-assets/mod/aarch64/
-assets/mod/arm64/
-*.o
-*.so
 __pycache__/
+
+assets/mod/*.mod
+assets/mod/*.inc
+assets/mod/*/

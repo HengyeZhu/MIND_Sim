@@ -22,21 +22,43 @@
 
 ## Installation
 
-After cloning the repository, install MIND_Sim from the source tree with pip:
+### CPU wheel
 
 ```bash
-cd MIND_Sim
-pip install .
+pip install mind-simulator
 ```
 
-This installs the CPU backend by default (GPU backend coming soon).
+### MOD files
 
-Before running the pip command, make sure the current environment already provides the native build tools:
+```bash
+mind-nrnivmodl path/to/mods
+```
 
-- C++20 compiler
-- Bison and Flex
-- OpenMP runtime/development files
+Requires: C++ compiler.
 
+### NVHPC builds
+
+```bash
+conda activate mind_sim
+
+CMAKE_BIN="$(command -v cmake)"
+PYTHON_BIN="$(command -v python)"
+NVCXX_BIN="$(command -v nvc++)"
+unset CC CXX LD CFLAGS CXXFLAGS CPPFLAGS LDFLAGS LIBRARY_PATH COMPILER_PATH GCC_EXEC_PREFIX
+export PATH="/usr/bin:/bin:${PATH}"
+
+"${CMAKE_BIN}" -S . -B build-nvhpc-cpu \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_COMPILER="${NVCXX_BIN}" \
+  -DMIND_SIM_ENABLE_GPU=OFF \
+  -DPython_EXECUTABLE="${PYTHON_BIN}"
+"${CMAKE_BIN}" --build build-nvhpc-cpu -j
+"${CMAKE_BIN}" --install build-nvhpc-cpu --prefix "$("${PYTHON_BIN}" -c 'import sys; print(sys.prefix)')"
+```
+
+Requires: CMake, Bison, Flex, nanobind, and NVIDIA HPC SDK.
+Use `-DMIND_SIM_ENABLE_GPU=ON` for the OpenACC GPU build.
+Use `-DMIND_SIM_ENABLE_NATIVE_OPT=ON` only for host-specific CPU builds.
 
 ## Overview
 
@@ -48,7 +70,7 @@ MIND_Sim is an extension simulator based on the [NEURON Simulator](https://githu
 2. It extends the MOD DSL to describe neural population dynamics and micro2macro transformations, providing a flexible way to build hybrid models and addressing the current limitation that [the TVB platform does not yet support hybrid models](https://github.com/the-virtual-brain/tvb-root/pull/771).
 3. It treats regions of interest (ROIs) as first-class modeling objects, so users can freely choose the brain regions and scales they want to simulate.
 
-This is my first public release of a simulator. I have made efforts to comply with the licenses of the open-source projects on which this work depends, but I may still have overlooked some details. If you notice that any reuse requirement has not been handled correctly, please contact me at [gluciferd@gmail.com](mailto:gluciferd@gmail.com).
+A demo blog post introducing the MIND_Sim workflow is available [here](https://hengyezhu.github.io/mind-simulator-demo.html).
 
 ## Architecture
 

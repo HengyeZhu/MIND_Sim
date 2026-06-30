@@ -13,6 +13,7 @@ SST_COUNT = 50
 PV_COUNT = 50
 VIP_COUNT = 50
 SPIKE_THRESHOLD_MV = 0.0
+CELL_TYPES = ("HL23PYR", "HL23SST", "HL23PV", "HL23VIP")
 
 
 def main() -> int:
@@ -44,6 +45,7 @@ def main() -> int:
 
     h.nrn_load_dll(str(mechanism_lib))
     h.load_file("stdrun.hoc")
+    h.load_file("import3d.hoc")
     h.celsius = 6.3
     h.dt = 0.025
     h.tstop = float(args.tstop)
@@ -55,17 +57,20 @@ def main() -> int:
 
     total_t0 = time.perf_counter()
     build_t0 = time.perf_counter()
-    hoc_dir = Path(__file__).resolve().parent / "assets" / "hoc_templates"
-    for path in (
-        hoc_dir / "HL23PYR.axon.hoc",
-        hoc_dir / "HL23SST.axon.hoc",
-        hoc_dir / "HL23PV.full.hoc",
-        hoc_dir / "HL23VIP.bpo.hoc",
-    ):
+    asset_dir = Path(__file__).resolve().parent / "assets"
+    model_dir = asset_dir / "models"
+    morphology_dir = asset_dir / "morphologies"
+    hoc_files = [model_dir / "NeuronTemplate.hoc"]
+    hoc_files.extend(model_dir / f"biophys_{cell_type}.hoc" for cell_type in CELL_TYPES)
+    for path in hoc_files:
         if not path.is_file():
             raise FileNotFoundError(f"HOC file not found: {path}")
         print(f"[hoc] load: {path}", flush=True)
         h.xopen(str(path))
+    for cell_type in CELL_TYPES:
+        morphology = morphology_dir / f"{cell_type}.swc"
+        if not morphology.is_file():
+            raise FileNotFoundError(f"SWC morphology not found: {morphology}")
 
     print(
         "[build] "
@@ -81,15 +86,20 @@ def main() -> int:
     clamps = []
     netcons = []
 
+    def build_cell(cell_type: str):
+        cell = h.NeuronTemplate(str(morphology_dir / f"{cell_type}.swc"))
+        getattr(h, f"biophys_{cell_type}")(cell)
+        return cell
+
     for gid in range(total_cells):
         if gid < PYR_COUNT:
-            cell = h.HL23PYR()
+            cell = build_cell("HL23PYR")
         elif gid < PYR_COUNT + SST_COUNT:
-            cell = h.HL23SST()
+            cell = build_cell("HL23SST")
         elif gid < PYR_COUNT + SST_COUNT + PV_COUNT:
-            cell = h.HL23PV()
+            cell = build_cell("HL23PV")
         else:
-            cell = h.HL23VIP()
+            cell = build_cell("HL23VIP")
 
         soma = cell.soma[0]
         stim = h.IClamp(soma(0.5))

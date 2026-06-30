@@ -10,7 +10,7 @@ import mind_sim as ms
 
 
 def _single_cell_sim(*, nseg: int = 1, length: float = 10.0, diam: float = 10.0):
-    sim = ms.Sim()
+    sim = ms.micro.sim()
     sim.set_device("cpu")
     sim.set_num_threads(1)
     sim.set_dt(0.025)

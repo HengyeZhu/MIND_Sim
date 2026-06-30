@@ -1,7 +1,7 @@
 #pragma once
 
 #include "macro/sim/types.hpp"
-#include "mod/abi.hpp"
+#include "mod/rule_api.hpp"
 #include "utils/dynamic_library.hpp"
 
 #include <memory>
@@ -40,9 +40,6 @@ class RegionRule {
     std::string name_{};
     std::shared_ptr<mind_sim::utils::DynamicLibrary> library_{};
     mind_sim::mod::RegionApplyFn step_{nullptr};
-    int exposure_count_{0};
-    int state_count_{0};
-    int param_count_{0};
     std::vector<std::string> exposure_names_{};
     std::vector<std::string> state_names_{};
     std::vector<double> state_defaults_{};
@@ -92,11 +89,6 @@ class MacroToMacroRule {
     std::string name_{};
     std::shared_ptr<mind_sim::utils::DynamicLibrary> library_{};
     mind_sim::mod::MacroToMacroApplyFn apply_{nullptr};
-    int read_source_count_{0};
-    int read_target_count_{0};
-    int write_source_count_{0};
-    int write_target_count_{0};
-    int param_count_{0};
     std::vector<std::string> read_source_exposure_names_{};
     std::vector<std::string> read_target_exposure_names_{};
     std::vector<std::string> write_source_exposure_names_{};

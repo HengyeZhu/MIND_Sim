@@ -833,7 +833,7 @@ class CodegenCoreneuronCppVisitor: public CodegenCppVisitor {
     void print_mind_rule_codegen_in_namespace();
 
     /**
-     * Print MIND_Sim exported descriptor/apply glue after the coreneuron namespace is closed.
+     * Print MIND_Sim exported registration/apply glue after the coreneuron namespace is closed.
      */
     void print_mind_rule_codegen_exports();
 

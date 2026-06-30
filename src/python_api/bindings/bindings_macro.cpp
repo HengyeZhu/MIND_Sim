@@ -8,10 +8,10 @@ namespace mind_sim::python_api::bindings {
 
 namespace {
 
-using InitialHistoryArray3 =
-    nb::ndarray<nb::numpy, const double, nb::ndim<3>, nb::c_contig>;
-using InitialHistoryArray4 =
-    nb::ndarray<nb::numpy, const double, nb::ndim<4>, nb::c_contig>;
+using RoiInitialHistoryArray1 =
+    nb::ndarray<nb::numpy, const double, nb::ndim<1>, nb::c_contig>;
+using RoiInitialHistoryArray2 =
+    nb::ndarray<nb::numpy, const double, nb::ndim<2>, nb::c_contig>;
 
 std::vector<std::vector<double>> square_connectivity_matrix(const Connectivity& connectivity,
                                                             const std::vector<double>& flat) {
@@ -27,32 +27,32 @@ std::vector<std::vector<double>> square_connectivity_matrix(const Connectivity& 
     return out;
 }
 
-Network::InitialHistoryLayout parse_initial_history_layout(const std::string& layout) {
-    if (layout == "time_output_roi" || layout == "tvb") {
-        return Network::InitialHistoryLayout::TimeOutputRoi;
+NetworkBuilder::RoiInitialHistoryLayout parse_roi_initial_history_layout(const std::string& layout) {
+    if (layout == "time_output") {
+        return NetworkBuilder::RoiInitialHistoryLayout::TimeOutput;
     }
-    if (layout == "time_roi_output") {
-        return Network::InitialHistoryLayout::TimeRoiOutput;
+    if (layout == "output_time") {
+        return NetworkBuilder::RoiInitialHistoryLayout::OutputTime;
     }
     throw std::runtime_error(
-        "initial_history layout must be 'time_output_roi', 'time_roi_output', or 'tvb'");
+        "ROI initial_history layout must be 'time_output' or 'output_time'");
 }
 
-void set_initial_history_from_array(NetworkBuilder& builder,
-                                    const double* data,
-                                    std::size_t size,
-                                    int time_count,
-                                    int axis1_count,
-                                    int axis2_count,
-                                    std::vector<std::string> output_names,
-                                    const std::string& layout) {
+void set_roi_initial_history_from_array(NetworkBuilder& builder,
+                                        int roi_index,
+                                        const double* data,
+                                        std::size_t size,
+                                        int axis1_count,
+                                        int axis2_count,
+                                        std::vector<std::string> output_names,
+                                        const std::string& layout) {
     std::vector<double> values(data, data + size);
-    builder.set_initial_history(std::move(output_names),
-                                time_count,
-                                axis1_count,
-                                axis2_count,
-                                std::move(values),
-                                parse_initial_history_layout(layout));
+    builder.set_roi_initial_history(roi_index,
+                                    std::move(output_names),
+                                    axis1_count,
+                                    axis2_count,
+                                    std::move(values),
+                                    parse_roi_initial_history_layout(layout));
 }
 
 }  // namespace
@@ -185,43 +185,50 @@ void bind_macro(nb::module_& m) {
         .def("load_mech",
              &NetworkBuilder::load_mech,
              nb::arg("directory"))
-        .def("set_initial_history",
+        .def("set_roi_initial_history",
              [](NetworkBuilder& builder,
-                InitialHistoryArray3 history,
+                int roi_index,
+                RoiInitialHistoryArray1 history,
                 std::vector<std::string> output_names,
                 std::string layout) {
-                 set_initial_history_from_array(builder,
-                                                history.data(),
-                                                history.size(),
-                                                static_cast<int>(history.shape(0)),
-                                                static_cast<int>(history.shape(1)),
-                                                static_cast<int>(history.shape(2)),
-                                                std::move(output_names),
-                                                layout);
+                 const auto parsed_layout = parse_roi_initial_history_layout(layout);
+                 const int time_count = static_cast<int>(history.shape(0));
+                 const int axis1_count =
+                     parsed_layout == NetworkBuilder::RoiInitialHistoryLayout::TimeOutput ? time_count : 1;
+                 const int axis2_count =
+                     parsed_layout == NetworkBuilder::RoiInitialHistoryLayout::TimeOutput ? 1 : time_count;
+                 set_roi_initial_history_from_array(builder,
+                                                    roi_index,
+                                                    history.data(),
+                                                    history.size(),
+                                                    axis1_count,
+                                                    axis2_count,
+                                                    std::move(output_names),
+                                                    layout);
              },
+             nb::arg("roi"),
              nb::arg("history"),
-             nb::arg("outputs") = std::vector<std::string>{},
-             nb::arg("layout") = "time_output_roi")
-        .def("set_initial_history",
+             nb::arg("outputs"),
+             nb::arg("layout") = "time_output")
+        .def("set_roi_initial_history",
              [](NetworkBuilder& builder,
-                InitialHistoryArray4 history,
+                int roi_index,
+                RoiInitialHistoryArray2 history,
                 std::vector<std::string> output_names,
                 std::string layout) {
-                 if (history.shape(3) != 1) {
-                     throw std::runtime_error("initial_history mode axis must have length 1");
-                 }
-                 set_initial_history_from_array(builder,
-                                                history.data(),
-                                                history.size(),
-                                                static_cast<int>(history.shape(0)),
-                                                static_cast<int>(history.shape(1)),
-                                                static_cast<int>(history.shape(2)),
-                                                std::move(output_names),
-                                                layout);
+                 set_roi_initial_history_from_array(builder,
+                                                    roi_index,
+                                                    history.data(),
+                                                    history.size(),
+                                                    static_cast<int>(history.shape(0)),
+                                                    static_cast<int>(history.shape(1)),
+                                                    std::move(output_names),
+                                                    layout);
              },
+             nb::arg("roi"),
              nb::arg("history"),
-             nb::arg("outputs") = std::vector<std::string>{},
-             nb::arg("layout") = "tvb")
+             nb::arg("outputs"),
+             nb::arg("layout") = "time_output")
         .def("use_region",
              &NetworkBuilder::use_region,
              nb::arg("roi"),
@@ -237,6 +244,7 @@ void bind_macro(nb::module_& m) {
         .def("use_micro",
              &NetworkBuilder::use_micro,
              nb::arg("roi"),
+             nb::arg("micro"),
              nb::arg("exposures"))
         .def("macro2micro",
              &NetworkBuilder::macro2micro,
@@ -280,17 +288,11 @@ void bind_macro(nb::module_& m) {
 
     nb::class_<mind_sim::macro::sim::MacroSimulationResult>(m, "MacroSimulationResult")
         .def_ro("times", &mind_sim::macro::sim::MacroSimulationResult::times)
-        .def_ro("records", &mind_sim::macro::sim::MacroSimulationResult::records)
-        .def("save_h5",
-             &mind_sim::io::save_macro_result_h5,
-             nb::arg("path"),
-             nb::arg("output_names"),
-             nb::arg("roi_labels"),
-             nb::arg("timing_s") = std::vector<double>{},
-             nb::arg("metadata") = std::vector<double>{});
+        .def_ro("records", &mind_sim::macro::sim::MacroSimulationResult::records);
 
     nb::class_<MacroRuntime>(m, "MacroRuntime")
         .def(nb::init<Network>(), nb::arg("network"))
+        .def("dt", &MacroRuntime::dt)
         .def("run",
              nb::overload_cast<double>(&MacroRuntime::run),
              nb::arg("t_stop"),
@@ -308,14 +310,7 @@ void bind_macro(nb::module_& m) {
 
     nb::class_<mind_sim::cosim::SimulationResult>(m, "SimulationResult")
         .def_ro("times", &mind_sim::cosim::SimulationResult::times)
-        .def_ro("records", &mind_sim::cosim::SimulationResult::records)
-        .def("save_h5",
-             &mind_sim::io::save_cosim_result_h5,
-             nb::arg("path"),
-             nb::arg("output_names"),
-             nb::arg("roi_labels"),
-             nb::arg("timing_s") = std::vector<double>{},
-             nb::arg("metadata") = std::vector<double>{});
+        .def_ro("records", &mind_sim::cosim::SimulationResult::records);
 
     nb::class_<mind_sim::cosim::Simulator>(m, "Simulator")
         .def(nb::init<Network, std::uint64_t>(),

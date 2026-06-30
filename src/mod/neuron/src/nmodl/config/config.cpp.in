@@ -28,5 +28,11 @@ const std::string_view nmodl::NrnUnitsLib::embedded_nrnunits =
  * from CMAKE_INSTALL_PREFIX. Note that this use of NMODL_PROJECT_PLATLIB_BINARY_DIR
  * will cause ccache misses when the build prefix is changed.
  */
-std::vector<std::string> nmodl::NrnUnitsLib::NRNUNITSLIB_PATH =
-    {"@CMAKE_INSTALL_PREFIX@/share/nmodl/nrnunits.lib", "@NMODL_PROJECT_PLATLIB_BINARY_DIR@/share/nmodl/nrnunits.lib"};
+#if @NMODL_PORTABLE_NRNUNITS_PATHS@
+std::vector<std::string> nmodl::NrnUnitsLib::NRNUNITSLIB_PATH = {};
+#else
+std::vector<std::string> nmodl::NrnUnitsLib::NRNUNITSLIB_PATH = {
+    "@CMAKE_INSTALL_PREFIX@/share/nmodl/nrnunits.lib",
+    "@NMODL_PROJECT_PLATLIB_BINARY_DIR@/share/nmodl/nrnunits.lib",
+};
+#endif

@@ -9,6 +9,7 @@ class MacroRuntime {
   public:
     explicit MacroRuntime(mind_sim::macro::frontend::Network network);
 
+    [[nodiscard]] double dt() const noexcept;
     [[nodiscard]] mind_sim::macro::sim::MacroSimulationResult run(double t_stop);
     [[nodiscard]] mind_sim::macro::sim::MacroSimulationResult run(double t_stop, double dt_macro);
 

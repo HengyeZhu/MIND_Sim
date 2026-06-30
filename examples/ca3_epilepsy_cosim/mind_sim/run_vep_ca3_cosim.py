@@ -25,37 +25,45 @@ def main() -> None:
         help="Labelled matrix CSV with weights and delays_ms sections.",
     )
     parser.add_argument("--duration-ms", "--t-ms", dest="duration_ms", type=float, default=20.0)
+    parser.add_argument("--device", choices=["cpu", "gpu"], default="cpu")
     parser.add_argument("--micro-threads", type=int, default=4)
+    parser.add_argument(
+        "--mod-dir",
+        type=Path,
+        default=Path(__file__).resolve().parent / "mod",
+        help="Directory containing the CA3/MIND MOD files and compiled x86_64/libcorenrnmech.so.",
+    )
+    parser.add_argument("--macro-init-seed", type=int, default=1234)
+    parser.add_argument("--ca3-connectivity-seed", type=int, default=4321)
+    parser.add_argument("--macro2micro-seed", type=int, default=1)
     parser.add_argument(
         "--output",
         "--out",
         dest="output",
         type=Path,
-        default=Path("ca3_epilepsy_cosim/outputs/vep_ca3_mindsim_cosim.npz"),
+        default=Path("ca3_epilepsy_cosim/outputs/vep_ca3_mind_sim_cosim.npz"),
     )
     args = parser.parse_args()
-
     output = args.output
 
     import mind_sim as ms
 
-    ms.macro.load_mech(Path(__file__).resolve().parent / "mod")
     pre_start = time.perf_counter()
+    ms.load_mech(args.mod_dir)
     ms.macro.dt(0.1)
     ms.macro.exchange_window(0.5)
     rois = ms.macro.load_rois(args.connectivity_csv)
-    roi_list = rois.rois()
+    roi_list = list(rois)
     roi_labels = rois.labels
     roi_weights = rois.weights
     roi_delays = rois.delays
     left_ca3_roi = rois.roi("Left-CA3")
 
     # Micro model
-    micro = ms.Sim()
-    micro.set_device("cpu")
+    micro = ms.micro.sim()
+    micro.set_device(args.device)
     micro.set_num_threads(args.micro_threads)
     micro.set_dt(0.025)
-    micro.load_mech(str(Path(__file__).resolve().parent / "mod"))
 
     pyr_soma = ms.section("soma", "soma")
     pyr_soma.nseg = 1
@@ -174,7 +182,7 @@ def main() -> None:
         soma[0](0.5).insert("IClamp", **{"del": 0.2, "dur": 1.0e9, "amp": -25e-3})
         sid = int(cell.gid)
         network.register_spike_source(sid, soma[0](0.5)._ref_v, SPIKE_THRESHOLD_MV)
-    macro_rng = np.random.default_rng(1234)
+    macro_rng = np.random.default_rng(args.macro_init_seed)
     propagation_labels = {
         "Left-CA1",
         "Right-CA1",
@@ -187,7 +195,7 @@ def main() -> None:
     }
     initial_x = np.zeros(len(rois.labels))
     initial_z = np.zeros(len(rois.labels))
-    for roi_index, roi in enumerate(rois.rois()):
+    for roi_index, roi in enumerate(rois):
         if roi.label == left_ca3_roi.label:
             x0 = -1.6
         elif roi.label in propagation_labels:
@@ -217,7 +225,7 @@ def main() -> None:
             },
         )
 
-    left_ca3_roi.use_micro(exposures=["x", "ca3_input"])
+    left_ca3_roi.use_micro(micro, exposures=["x", "ca3_input"])
     ca3_input_to_spikes_params = {
         "base_hz": 1.0,
         "gain_hz": 45.0,
@@ -226,7 +234,7 @@ def main() -> None:
         "slope": 4.0,
     }
     # Micro recurrent connections
-    conn_rng = random.Random(4321)
+    conn_rng = random.Random(args.ca3_connectivity_seed)
 
     for cell in bas_population:
         target = cell.group("soma")[0](0.5).insert(
@@ -363,18 +371,23 @@ def main() -> None:
         )
 
     history_steps = round(np.max(roi_delays) / 0.1) + 1
-    history_alpha = np.linspace(-1.0, 0.0, history_steps)[:, np.newaxis]
-    roi_phase = np.linspace(0.0, 2.0 * np.pi, len(roi_labels), endpoint=False)[np.newaxis, :]
-    macro_initial_history = np.empty((history_steps, 2, len(roi_labels)))
-    macro_initial_history[:, 0] = initial_x + 0.01 * history_alpha * np.sin(roi_phase)
-    macro_initial_history[:, 1] = initial_z + 0.002 * history_alpha * np.cos(roi_phase)
-    macro_initial_history[-1, 0] = initial_x
-    macro_initial_history[-1, 1] = initial_z
-    rois.initial_history(macro_initial_history, outputs=["x", "z"])
+    history_alpha = np.linspace(-1.0, 0.0, history_steps)
+    roi_phase = np.linspace(0.0, 2.0 * np.pi, len(roi_labels), endpoint=False)
+    for roi_index, roi in enumerate(roi_list):
+        roi_initial_history = np.empty((history_steps, 2))
+        roi_initial_history[:, 0] = (
+            initial_x[roi_index] + 0.01 * history_alpha * math.sin(roi_phase[roi_index])
+        )
+        roi_initial_history[:, 1] = (
+            initial_z[roi_index] + 0.002 * history_alpha * math.cos(roi_phase[roi_index])
+        )
+        roi_initial_history[-1, 0] = initial_x[roi_index]
+        roi_initial_history[-1, 1] = initial_z[roi_index]
+        roi.initial_history(roi_initial_history, outputs=["x", "z"])
 
     micro.build_microcircuit()
 
-    for roi in rois.rois():
+    for roi in rois:
         roi.record("x")
         roi.record("z")
     pyr_voltage_trace = ms.Vector().record(pyr_population[0].group("soma")[0](0.5)._ref_v)
@@ -383,7 +396,7 @@ def main() -> None:
     adend3_voltage_trace = ms.Vector().record(pyr_population[0].group("Adend3")[0](0.5)._ref_v)
     voltage_time_trace = ms.Vector().record(micro._ref_t)
     micro.finitialize(-65.0)
-    simulator = ms.Simulator(rois)
+    simulator = ms.Simulator(rois, macro2micro_seed=args.macro2micro_seed)
     pre_run_s = time.perf_counter() - pre_start
 
     run_start = time.perf_counter()
@@ -421,6 +434,7 @@ def main() -> None:
         "ca3_micro_model": "ModelDB 186768 CA3, MIND Sim API/CoreNEURON rewrite",
         "macro_model": "TVB built-in Epileptor2D equations implemented as a MOD mechanism for non-CA3 ROIs",
         "micro_backend": "CoreNEURON",
+        "micro_device": args.device,
         "duration_ms": args.duration_ms,
         "dt_micro_ms": 0.025,
         "dt_macro_ms": 0.1,
@@ -438,6 +452,9 @@ def main() -> None:
         "drive_weight": 0.02e-3,
         "effective_drive_weight": 0.02e-3 * 1.0e-2,
         "drive_delay_ms": 0.2,
+        "macro_init_seed": args.macro_init_seed,
+        "ca3_connectivity_seed": args.ca3_connectivity_seed,
+        "macro2micro_seed": args.macro2micro_seed,
         "connections": True,
         "initial_history": "explicit non-constant TVB-style chronological history with axes time,output,roi and outputs ['x', 'z']; history[-1] is the t=0 state",
         "notes": "Left-CA3 ROI has no macro REGION owner. Its x exposure is produced by population-specific PYR/BAS/OLM event-driven micro2macro transforms; macro input to Left-CA3 is transformed into external AMPA events on PYR Adend3 synapses. Left-CA3 z is initialized for history layout compatibility and is not a transform output.",
@@ -470,7 +487,7 @@ def main() -> None:
     )
     print(f"output={output}")
     print("backend=mind_sim")
-    print("device=cpu")
+    print(f"device={args.device}")
     print(f"num_threads={args.micro_threads}")
     print(f"pre_run_s={pre_run_s:.6f}")
     print(f"run_s={run_s:.6f}")

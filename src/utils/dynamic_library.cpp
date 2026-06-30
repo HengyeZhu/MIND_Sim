@@ -72,6 +72,13 @@ void* DynamicLibrary::symbol(const char* name) const {
     return ptr;
 }
 
+bool DynamicLibrary::has_symbol(const char* name) const noexcept {
+    dlerror();
+    void* ptr = dlsym(handle_, name);
+    const char* error = dlerror();
+    return !error && ptr != nullptr;
+}
+
 const std::string& DynamicLibrary::path() const noexcept {
     return path_;
 }

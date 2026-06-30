@@ -17,12 +17,12 @@ def macro_mod_dir():
     lib = MOD_DIR / "x86_64" / "libcorenrnmech.so"
     mod_mtime = max(path.stat().st_mtime for path in MOD_DIR.glob("*.mod"))
     if not lib.exists() or lib.stat().st_mtime < mod_mtime:
-        subprocess.run(["mind_nrnivmodl", str(MOD_DIR)], check=True)
+        subprocess.run(["mind-nrnivmodl", str(MOD_DIR)], check=True)
     return MOD_DIR
 
 
 def _configure_macro_runtime(macro_mod_dir, dt):
-    ms.macro.load_mech(macro_mod_dir)
+    ms.load_mech(macro_mod_dir)
     ms.macro.dt(dt)
     ms.macro.exchange_window(dt)
 
@@ -40,7 +40,7 @@ def _build_rois(model, outputs, states, labels, weights, delays=None, params=Non
     if delays is None:
         delays = np.zeros_like(np.array(weights))
     rois = ms.macro.load_rois(labels=labels, weights=weights, delays=delays)
-    for roi in rois.rois():
+    for roi in rois:
         roi.use_macro(model, initial_state=states[roi.label], params=params or {})
         for output in outputs:
             roi.record(output)
@@ -50,7 +50,8 @@ def _build_rois(model, outputs, states, labels, weights, delays=None, params=Non
         [[[states[label][output] for label in labels] for output in history_outputs]],
         dtype=float,
     )
-    rois.initial_history(history, outputs=history_outputs, layout="time_output_roi")
+    for roi_index, roi in enumerate(rois):
+        roi.initial_history(history[:, :, roi_index], outputs=history_outputs)
     return rois
 
 

@@ -136,20 +136,12 @@ static bool parse_float(const char*& p, const char* end, float& out) noexcept {
     if (p >= end) {
         return false;
     }
-    if constexpr (requires { std::from_chars(p, end, out, std::chars_format::general); }) {
-        auto res = std::from_chars(p, end, out, std::chars_format::general);
-        if (res.ec != std::errc{}) {
-            return false;
-        }
-        p = res.ptr;
-    } else {
-        char* parsed_end = nullptr;
-        out = std::strtof(p, &parsed_end);
-        if (parsed_end == p) {
-            return false;
-        }
-        p = parsed_end;
+    char* parsed_end = nullptr;
+    out = std::strtof(p, &parsed_end);
+    if (parsed_end == p) {
+        return false;
     }
+    p = parsed_end;
     return true;
 }
 

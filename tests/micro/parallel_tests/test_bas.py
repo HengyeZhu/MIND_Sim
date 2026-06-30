@@ -10,7 +10,7 @@ import mind_sim as ms
 
 
 def _build_ball_and_stick_network(cell_count, thread_count):
-    sim = ms.Sim()
+    sim = ms.micro.sim()
     sim.set_device("cpu")
     sim.set_num_threads(thread_count)
     sim.set_dt(0.025)

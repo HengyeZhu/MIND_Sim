@@ -16,6 +16,7 @@ class DynamicLibrary {
     DynamicLibrary& operator=(DynamicLibrary&& other) noexcept;
 
     [[nodiscard]] void* symbol(const char* name) const;
+    [[nodiscard]] bool has_symbol(const char* name) const noexcept;
     [[nodiscard]] const std::string& path() const noexcept;
 
   private:

@@ -8,7 +8,7 @@ import mind_sim as ms
 
 
 def _single_cell_sim():
-    sim = ms.Sim()
+    sim = ms.micro.sim()
     sim.set_device("cpu")
     sim.set_num_threads(1)
     sim.set_dt(0.025)
@@ -27,7 +27,7 @@ def _single_cell_sim():
 
 
 def test_nernst():
-    sim = ms.Sim()
+    sim = ms.micro.sim()
 
     assert sim.nernst(1, 1, 0) == 0.0
     assert sim.nernst(-1, 1, 1) == 1e6
@@ -35,7 +35,7 @@ def test_nernst():
 
 
 def test_ghk():
-    sim = ms.Sim()
+    sim = ms.micro.sim()
 
     assert isclose(sim.ghk(-10, 0.1, 10, 2), -2828.3285716150644)
     assert isclose(sim.ghk(1e-6, 0.1, 10, 2), -1910.40949510667)
@@ -63,7 +63,7 @@ def test_second_order_cur():
 
 
 def test_ion_charge():
-    sim = ms.Sim()
+    sim = ms.micro.sim()
 
     assert sim.ion_charge("na_ion") == 1
 

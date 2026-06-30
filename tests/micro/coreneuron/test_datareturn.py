@@ -14,7 +14,7 @@ import mind_sim as ms
 
 def test_datareturn():
     def run_model(thread_count, chunks):
-        sim = ms.Sim()
+        sim = ms.micro.sim()
         sim.set_device("cpu")
         sim.set_num_threads(thread_count)
         sim.set_dt(0.025)

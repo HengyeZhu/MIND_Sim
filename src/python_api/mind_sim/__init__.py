@@ -1,10 +1,16 @@
 from . import _native
-from ._vector import Vector
 from ._network import (
     Simulator,
 )
 
-Sim = _native.Sim
+
+def load_mech(directory) -> None:
+    path = str(directory)
+    _native._macro_config.load_mech(path)
+    _native._micro_config.load_mech(path)
+
+
+Vector = _native.Vector
 section = _native.section
 section_list = _native.section_list
 segment_values = _native.segment_values
@@ -17,11 +23,11 @@ build_section_distance_layout = _native.build_section_distance_layout
 SimulationResult = _native.SimulationResult
 
 __all__ = [
-    "Sim",
     "SimulationResult",
     "Simulator",
     "Vector",
     "build_section_distance_layout",
+    "load_mech",
     "load_asc_section_list",
     "load_asc_sections",
     "load_swc_section_list",
@@ -32,5 +38,7 @@ __all__ = [
 ]
 
 from . import macro  # noqa: E402
+from . import micro  # noqa: E402
 
 __all__.append("macro")
+__all__.append("micro")

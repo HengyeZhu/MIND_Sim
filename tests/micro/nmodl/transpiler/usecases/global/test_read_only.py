@@ -20,16 +20,16 @@ def read_only_mod_dir(tmp_path_factory):
     lib = mod_dir / "x86_64" / "libcorenrnmech.so"
     mod_mtime = (mod_dir / "read_only.mod").stat().st_mtime
     if not lib.exists() or lib.stat().st_mtime < mod_mtime:
-        subprocess.run(["mind_nrnivmodl", str(mod_dir)], check=True)
+        subprocess.run(["mind-nrnivmodl", str(mod_dir)], check=True)
     return mod_dir
 
 
 def single_section_sim(mod_dir):
-    sim = ms.Sim()
+    ms.load_mech(mod_dir)
+    sim = ms.micro.sim()
     sim.set_device("cpu")
     sim.set_num_threads(1)
     sim.set_dt(0.025)
-    sim.load_mech(str(mod_dir))
 
     soma = ms.section("soma", "soma")
     soma.L_um = 10.0
