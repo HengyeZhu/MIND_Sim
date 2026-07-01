@@ -6,7 +6,7 @@
 	url = https://github.com/BlueBrain/Random123.git
 [submodule "external/eigen"]
 	path = external/eigen
-	url = https://gitlab.com/libeigen/eigen.git
+	url = https://eigen.googlesource.com/mirror
 [submodule "external/fmt"]
 	path = external/fmt
 	url = https://github.com/fmtlib/fmt
