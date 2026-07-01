@@ -4,6 +4,8 @@ outputs/
 
 mind_sim/mod/*.inc
 mind_sim/mod/*.mod
+mind_sim/mod/*.h
+mind_sim/mod/readme.html
 !mind_sim/mod/ca3_bas_spikes_to_vep.mod
 !mind_sim/mod/ca3_input_macro2macro.mod
 !mind_sim/mod/ca3_input_to_spikes.mod

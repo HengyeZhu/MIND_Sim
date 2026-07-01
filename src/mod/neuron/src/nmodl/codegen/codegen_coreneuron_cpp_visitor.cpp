@@ -1547,6 +1547,7 @@ void CodegenCoreneuronCppVisitor::print_standard_includes() {
     printer->add_multi_line(R"CODE(
         #include "mod/rule_api.hpp"
         #include <algorithm>
+        #include <cmath>
         #include <cstdint>
         #include <math.h>
         #include <stdio.h>
@@ -4251,6 +4252,9 @@ void CodegenCoreneuronCppVisitor::print_mind_rule_codegen_in_namespace() {
             if (pnt == nullptr) {
                 throw std::runtime_error("macro2micro net_send received a null Point_process");
             }
+            if (!std::isfinite(time)) {
+                throw std::runtime_error("macro2micro net_send received a non-finite event time");
+            }
             if (time < gContext->start_time) {
                 throw std::runtime_error("macro2micro net_send scheduled an event before the current window");
             }
@@ -4271,6 +4275,9 @@ void CodegenCoreneuronCppVisitor::print_mind_rule_codegen_in_namespace() {
         }
         if (pnt == nullptr) {
             throw std::runtime_error("macro2micro net_event received a null Point_process");
+        }
+        if (!std::isfinite(time)) {
+            throw std::runtime_error("macro2micro net_event received a non-finite event time");
         }
         if (time < ctx->start_time || time >= ctx->stop_time) {
             return;

@@ -202,6 +202,26 @@ if(NOT EXISTS "${MIND_SIM_NRN_SOURCE_DIR}/src/nmodl/CMakeLists.txt")
     "under src/mod/neuron, but src/mod/neuron/src/nmodl/CMakeLists.txt is missing."
   )
 endif()
+set(MIND_SIM_EXTERNAL_SOURCE_DIR "${PROJECT_SOURCE_DIR}/external")
+foreach(MIND_SIM_EXTERNAL_REQUIRED_PATH IN ITEMS
+  CLI11/include/CLI/CLI.hpp
+  Random123/include/Random123/philox.h
+  eigen/Eigen/Core
+  fmt/include/fmt/format.h
+  json/include/nlohmann/json.hpp
+  pybind11/include/pybind11/pybind11.h
+  spdlog/include/spdlog/spdlog.h
+)
+  if(NOT EXISTS "${MIND_SIM_EXTERNAL_SOURCE_DIR}/${MIND_SIM_EXTERNAL_REQUIRED_PATH}")
+    message(FATAL_ERROR
+      "Missing external/${MIND_SIM_EXTERNAL_REQUIRED_PATH}. "
+      "MIND_Sim keeps third-party dependencies in Git submodules under external/. "
+      "Run `git submodule update --init --recursive` from the repository root. "
+      "If this tree came from GitHub's auto-generated source archive, clone the "
+      "repository instead because that archive does not include submodule contents."
+    )
+  endif()
+endforeach()
 
 foreach(module IN ITEMS jinja2 yaml sympy)
   execute_process(
@@ -222,19 +242,19 @@ function(mind_sim_add_header_only_target target include_dir)
   endif()
 endfunction()
 
-mind_sim_add_header_only_target(CLI11::CLI11 "${MIND_SIM_NRN_SOURCE_DIR}/external/CLI11/include")
-mind_sim_add_header_only_target(nlohmann_json::nlohmann_json "${MIND_SIM_NRN_SOURCE_DIR}/external/json/include")
+mind_sim_add_header_only_target(CLI11::CLI11 "${MIND_SIM_EXTERNAL_SOURCE_DIR}/CLI11/include")
+mind_sim_add_header_only_target(nlohmann_json::nlohmann_json "${MIND_SIM_EXTERNAL_SOURCE_DIR}/json/include")
 
 if(NOT TARGET fmt::fmt)
   add_library(mind_sim_nmodl_fmt INTERFACE)
-  target_include_directories(mind_sim_nmodl_fmt INTERFACE "${MIND_SIM_NRN_SOURCE_DIR}/external/fmt/include")
+  target_include_directories(mind_sim_nmodl_fmt INTERFACE "${MIND_SIM_EXTERNAL_SOURCE_DIR}/fmt/include")
   target_compile_definitions(mind_sim_nmodl_fmt INTERFACE FMT_HEADER_ONLY)
   add_library(fmt::fmt ALIAS mind_sim_nmodl_fmt)
 endif()
 
 if(NOT TARGET spdlog::spdlog)
   add_library(mind_sim_nmodl_spdlog INTERFACE)
-  target_include_directories(mind_sim_nmodl_spdlog INTERFACE "${MIND_SIM_NRN_SOURCE_DIR}/external/spdlog/include")
+  target_include_directories(mind_sim_nmodl_spdlog INTERFACE "${MIND_SIM_EXTERNAL_SOURCE_DIR}/spdlog/include")
   target_compile_definitions(mind_sim_nmodl_spdlog INTERFACE SPDLOG_FMT_EXTERNAL)
   target_link_libraries(mind_sim_nmodl_spdlog INTERFACE fmt::fmt)
   add_library(spdlog::spdlog ALIAS mind_sim_nmodl_spdlog)
@@ -243,7 +263,7 @@ endif()
 if(NOT TARGET pybind11::module)
   add_library(mind_sim_nmodl_pybind11_module INTERFACE)
   target_include_directories(mind_sim_nmodl_pybind11_module INTERFACE
-    "${MIND_SIM_NRN_SOURCE_DIR}/external/pybind11/include"
+    "${MIND_SIM_EXTERNAL_SOURCE_DIR}/pybind11/include"
     ${Python_INCLUDE_DIRS}
   )
   add_library(pybind11::module ALIAS mind_sim_nmodl_pybind11_module)
@@ -251,7 +271,7 @@ endif()
 if(NOT TARGET pybind11::embed)
   add_library(mind_sim_nmodl_pybind11_embed INTERFACE)
   target_include_directories(mind_sim_nmodl_pybind11_embed INTERFACE
-    "${MIND_SIM_NRN_SOURCE_DIR}/external/pybind11/include"
+    "${MIND_SIM_EXTERNAL_SOURCE_DIR}/pybind11/include"
     ${Python_INCLUDE_DIRS}
   )
   add_library(pybind11::embed ALIAS mind_sim_nmodl_pybind11_embed)
@@ -286,8 +306,8 @@ if(TARGET Python::Python)
 else()
   set(PYTHON_LIBRARIES ${Python_LIBRARIES})
 endif()
-set(PYBIND11_INCLUDE_DIR "${MIND_SIM_NRN_SOURCE_DIR}/external/pybind11/include")
-set(pybind11_INCLUDE_DIRS "${MIND_SIM_NRN_SOURCE_DIR}/external/pybind11/include")
+set(PYBIND11_INCLUDE_DIR "${MIND_SIM_EXTERNAL_SOURCE_DIR}/pybind11/include")
+set(pybind11_INCLUDE_DIRS "${MIND_SIM_EXTERNAL_SOURCE_DIR}/pybind11/include")
 set(NMODL_NEURON_SOURCE_DIR "${MIND_SIM_NRN_SOURCE_DIR}")
 set(NMODL_ENABLE_PYTHON_BINDINGS OFF CACHE BOOL "Build NMODL Python bindings" FORCE)
 set(NMODL_ENABLE_FLEX_BISON_LINES ON CACHE BOOL "Enable line numbers in generated NMODL parser files" FORCE)
@@ -322,8 +342,8 @@ else()
 endif()
 
 include_directories(
-  "${MIND_SIM_NRN_SOURCE_DIR}/external/Random123/include"
-  "${MIND_SIM_NRN_SOURCE_DIR}/external/eigen"
+  "${MIND_SIM_EXTERNAL_SOURCE_DIR}/Random123/include"
+  "${MIND_SIM_EXTERNAL_SOURCE_DIR}/eigen"
 )
 
 set(MIND_SIM_PARENT_CXX_STANDARD "${CMAKE_CXX_STANDARD}")
@@ -785,8 +805,27 @@ install(
     PATTERN "*.inc"
 )
 install(
-  DIRECTORY "${MIND_SIM_NRN_SOURCE_DIR}/external/eigen/Eigen"
-  DESTINATION "${MIND_SIM_INSTALL_INCLUDE_DIR}/mod/neuron/external/eigen"
+  DIRECTORY "${MIND_SIM_EXTERNAL_SOURCE_DIR}/Random123/include/Random123"
+  DESTINATION "${MIND_SIM_INSTALL_INCLUDE_DIR}/external/Random123/include"
+)
+install(
+  DIRECTORY "${MIND_SIM_EXTERNAL_SOURCE_DIR}/eigen/Eigen"
+  DESTINATION "${MIND_SIM_INSTALL_INCLUDE_DIR}/external/eigen"
+)
+install(
+  DIRECTORY "${MIND_SIM_EXTERNAL_SOURCE_DIR}/eigen/unsupported/Eigen"
+  DESTINATION "${MIND_SIM_INSTALL_INCLUDE_DIR}/external/eigen/unsupported"
+)
+install(
+  FILES
+    "${MIND_SIM_EXTERNAL_SOURCE_DIR}/eigen/COPYING.README"
+    "${MIND_SIM_EXTERNAL_SOURCE_DIR}/eigen/COPYING.MPL2"
+    "${MIND_SIM_EXTERNAL_SOURCE_DIR}/eigen/COPYING.BSD"
+    "${MIND_SIM_EXTERNAL_SOURCE_DIR}/eigen/COPYING.APACHE"
+    "${MIND_SIM_EXTERNAL_SOURCE_DIR}/eigen/COPYING.MINPACK"
+    "${MIND_SIM_EXTERNAL_SOURCE_DIR}/eigen/COPYING.LGPL"
+    "${MIND_SIM_EXTERNAL_SOURCE_DIR}/eigen/COPYING.GPL"
+  DESTINATION "${MIND_SIM_INSTALL_INCLUDE_DIR}/external/eigen"
 )
 
 add_executable(mind_nrnivmodl src/mod/mind_nrnivmodl.cpp)

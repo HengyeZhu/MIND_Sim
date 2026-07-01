@@ -862,24 +862,40 @@ void validate_micro_output_net_receive_ast(const JsonValue& ast) {
     throw std::runtime_error("could not locate CoreNEURON randoms include directory");
 }
 
-[[nodiscard]] fs::path resolved_eigen_include_dir() {
-    if (auto path = existing_or_empty(packaged_root_dir() / "include" / "src" / "mod" /
-                                      "neuron" / "external" / "eigen");
+[[nodiscard]] fs::path resolved_random123_include_dir() {
+    if (auto path = existing_or_empty(packaged_root_dir() / "include" / "src" / "external" /
+                                      "Random123" / "include");
         !path.empty()) {
         return path;
     }
     const fs::path configured{MIND_SIM_SOURCE_DIR};
     if (!configured_path_is_placeholder(configured)) {
-        if (auto path = existing_or_empty(configured / "src" / "mod" / "neuron" /
-                                          "external" / "eigen");
+        if (auto path = existing_or_empty(configured / "external" / "Random123" / "include");
             !path.empty()) {
+            return path;
+        }
+    }
+    throw std::runtime_error("could not locate Random123 include directory");
+}
+
+[[nodiscard]] fs::path resolved_eigen_include_dir() {
+    if (auto path = existing_or_empty(packaged_root_dir() / "include" / "src" / "external" /
+                                      "eigen");
+        !path.empty()) {
+        return path;
+    }
+    const fs::path configured{MIND_SIM_SOURCE_DIR};
+    if (!configured_path_is_placeholder(configured)) {
+        if (auto path = existing_or_empty(configured / "external" / "eigen"); !path.empty()) {
             return path;
         }
     }
     throw std::runtime_error("could not locate Eigen include directory");
 }
 
-void compile_object_file(const fs::path& source_path, const fs::path& object_path) {
+void compile_object_file(const fs::path& source_path,
+                         const fs::path& object_path,
+                         const std::vector<fs::path>& extra_include_dirs = {}) {
     fs::create_directories(object_path.parent_path());
     std::vector<std::string> command{
         cxx_compiler_command(),
@@ -890,6 +906,7 @@ void compile_object_file(const fs::path& source_path, const fs::path& object_pat
         include_arg(resolved_source_include_dir()),
         include_arg(resolved_mechanism_include_dir()),
         include_arg(resolved_randoms_include_dir()),
+        include_arg(resolved_random123_include_dir()),
         include_arg(resolved_eigen_include_dir()),
         "-DCORENEURON_BUILD",
         "-DCORENRN_BUILD=1",
@@ -913,6 +930,9 @@ void compile_object_file(const fs::path& source_path, const fs::path& object_pat
         "-o",
         shell_quote(object_path),
     };
+    for (const auto& include_dir : extra_include_dirs) {
+        command.insert(command.begin() + 5, include_arg(include_dir));
+    }
     run(command);
 }
 
@@ -1040,6 +1060,9 @@ void write_rule_registration_source(const fs::path& path, const std::vector<Mind
 
 void compile_mods(const fs::path& source, const fs::path& output_dir) {
     const auto mods = collect_mods(source);
+    const fs::path mod_include_dir =
+        fs::absolute(fs::is_regular_file(source) ? source.parent_path() : source);
+    const std::vector<fs::path> extra_include_dirs{mod_include_dir};
     const fs::path workdir = output_dir / "corenrn";
     fs::remove_all(workdir);
     const fs::path generated_dir = workdir / "mod2c";
@@ -1079,20 +1102,20 @@ void compile_mods(const fs::path& source, const fs::path& output_dir) {
         }
 
         const fs::path object_path = object_dir / (name + ".o");
-        compile_object_file(source_cpp, object_path);
+        compile_object_file(source_cpp, object_path, extra_include_dirs);
         objects.push_back(object_path);
     }
 
     const fs::path modl_reg_cpp = generated_dir / "mod_func.cpp";
     const fs::path modl_reg_object = object_dir / "mod_func.o";
     write_modl_reg_source(modl_reg_cpp, units);
-    compile_object_file(modl_reg_cpp, modl_reg_object);
+    compile_object_file(modl_reg_cpp, modl_reg_object, extra_include_dirs);
     objects.push_back(modl_reg_object);
 
     const fs::path rule_reg_cpp = generated_dir / "mind_rule_reg.cpp";
     const fs::path rule_reg_object = object_dir / "mind_rule_reg.o";
     write_rule_registration_source(rule_reg_cpp, rules);
-    compile_object_file(rule_reg_cpp, rule_reg_object);
+    compile_object_file(rule_reg_cpp, rule_reg_object, extra_include_dirs);
     objects.push_back(rule_reg_object);
 
     const fs::path library_path = output_dir / "libcorenrnmech.so";

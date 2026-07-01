@@ -39,6 +39,13 @@ cmake.build-type = "Release"
 wheel.packages = []
 wheel.license-files = [
   "Copyright",
+  "external/CLI11/LICENSE",
+  "external/Random123/LICENSE",
+  "external/eigen/COPYING.*",
+  "external/fmt/LICENSE",
+  "external/json/LICENSE.MIT",
+  "external/pybind11/LICENSE",
+  "external/spdlog/LICENSE",
   "src/mod/neuron/Copyright",
   "src/micro/sim/coreneuron/Copyright",
 ]

@@ -8,12 +8,14 @@ The first MIND_Sim release builds Linux x86_64 CPU wheels only:
 Build the default CPU wheels:
 
 ```bash
+git submodule update --init --recursive
 bash packaging/python/build_wheels.bash linux
 ```
 
 Build one Python version:
 
 ```bash
+git submodule update --init --recursive
 bash packaging/python/build_wheels.bash linux 311
 ```
 
@@ -36,6 +38,7 @@ Load or activate the NVIDIA HPC SDK first. Module names are site-specific:
 
 ```bash
 module load nvidia-hpc-sdk cuda
+git submodule update --init --recursive
 ```
 
 Install an NVHPC CPU build under the active Python environment prefix:

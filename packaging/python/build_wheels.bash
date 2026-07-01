@@ -40,6 +40,22 @@ export MIND_SIM_ENABLE_GPU=OFF
 export MIND_SIM_BINARY_DIST_BUILD=ON
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+required_external_paths=(
+  external/CLI11/include/CLI/CLI.hpp
+  external/Random123/include/Random123/philox.h
+  external/eigen/Eigen/Core
+  external/fmt/include/fmt/core.h
+  external/json/include/nlohmann/json.hpp
+  external/pybind11/include/pybind11/pybind11.h
+  external/spdlog/include/spdlog/spdlog.h
+)
+for required_external_path in "${required_external_paths[@]}"; do
+  if [[ ! -e "${repo_root}/${required_external_path}" ]]; then
+    echo "Missing ${required_external_path}; run: git submodule update --init --recursive" >&2
+    exit 2
+  fi
+done
+
 if [[ "${MIND_SIM_BUILD_WHEEL_IMAGE:-1}" != "0" ]]; then
   "${repo_root}/packaging/python/build_manylinux_image.bash"
 fi

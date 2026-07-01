@@ -3,6 +3,7 @@
 #include "mod/rule_registry.hpp"
 
 #include <cstddef>
+#include <cmath>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -37,6 +38,12 @@ int vector_count(const std::vector<T>& values) noexcept {
 void append_micro_event(void* user_data, double time, int source_index) {
     if (user_data == nullptr) {
         throw std::runtime_error("MicroInputRule event sink is null");
+    }
+    if (!std::isfinite(time)) {
+        throw std::runtime_error("MicroInputRule emitted a non-finite event time");
+    }
+    if (source_index < 0) {
+        throw std::runtime_error("MicroInputRule emitted a negative event source index");
     }
     auto& events = *static_cast<mind_sim::micro::sim::MicroEventTable*>(user_data);
     events.time.push_back(time);

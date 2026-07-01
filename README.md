@@ -11,12 +11,6 @@
 </h3>
 
 <p align="center">
-  <a href="https://doi.org/10.5281/zenodo.21073036">
-    <img src="https://zenodo.org/badge/1222268213.svg" alt="DOI">
-  </a>
-</p>
-
-<p align="center">
   <a href="#installation">Installation</a> •
   <a href="#overview">Overview</a> •
   <a href="#architecture">Architecture</a> •
@@ -46,6 +40,7 @@ Requires: C++ compiler.
 
 ```bash
 conda activate mind_sim
+git submodule update --init --recursive
 
 CMAKE_BIN="$(command -v cmake)"
 PYTHON_BIN="$(command -v python)"
